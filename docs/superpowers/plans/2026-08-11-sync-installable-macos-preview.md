@@ -27,7 +27,7 @@
 **Files:**
 - Modify: `CMakeLists.txt`
 - Modify: `native/include/sync/control.hpp`
-- Modify: `native/include/sync/protocol.hpp`
+- Modify: `native/include/sync/server.hpp`
 - Modify: `native/src/control.cpp`
 - Modify: `native/src/server.cpp`
 - Modify: `native/test/control_test.cpp`
@@ -102,7 +102,7 @@ Expected: all suites pass and health transitions match live sender ownership.
 - [ ] **Step 5: Commit the health contract**
 
 ```bash
-git add CMakeLists.txt native/include/sync/control.hpp native/include/sync/protocol.hpp native/src/control.cpp native/src/server.cpp native/test/control_test.cpp native/test/server_contract_test.cpp test/integration/loopback.test.js
+git add CMakeLists.txt native/include/sync/control.hpp native/include/sync/server.hpp native/src/control.cpp native/src/server.cpp native/test/control_test.cpp native/test/server_contract_test.cpp test/integration/loopback.test.js
 git commit -m "feat: expose live Sync sender health"
 ```
 
