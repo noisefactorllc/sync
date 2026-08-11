@@ -4,6 +4,7 @@
 
 #import <Foundation/Foundation.h>
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -12,7 +13,11 @@
 #include <thread>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -52,6 +57,63 @@ class TemporaryFixture {
   std::filesystem::path directory_;
   std::filesystem::path executable_;
   std::filesystem::path arguments_;
+};
+
+class TemporaryHttpServer {
+ public:
+  explicit TemporaryHttpServer(bool sends_http = true) {
+    socket_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    SYNC_REQUIRE(socket_ >= 0);
+    int reuse = 1;
+    SYNC_REQUIRE(::setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                              sizeof(reuse)) == 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    SYNC_REQUIRE(::bind(socket_, reinterpret_cast<sockaddr*>(&address),
+                        sizeof(address)) == 0);
+    socklen_t size = sizeof(address);
+    SYNC_REQUIRE(::getsockname(socket_, reinterpret_cast<sockaddr*>(&address),
+                               &size) == 0);
+    port_ = ntohs(address.sin_port);
+    SYNC_REQUIRE(::listen(socket_, 1) == 0);
+    worker_ = std::thread([this, sends_http] {
+      constexpr std::string_view http_response =
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+          "Content-Length: 8\r\nConnection: close\r\n\r\nnot sync";
+      constexpr std::string_view malformed_response = "not http\r\n";
+      const std::string_view response =
+          sends_http ? http_response : malformed_response;
+      while (true) {
+        const int client = ::accept(socket_, nullptr, nullptr);
+        if (client < 0) return;
+        std::array<char, 4096> request{};
+        if (::recv(client, request.data(), request.size(), 0) > 0) {
+          (void)::send(client, response.data(), response.size(), 0);
+        }
+        ::close(client);
+        if (sends_http) return;
+      }
+    });
+  }
+
+  ~TemporaryHttpServer() {
+    if (socket_ >= 0) {
+      ::shutdown(socket_, SHUT_RDWR);
+      ::close(socket_);
+    }
+    if (worker_.joinable()) worker_.join();
+  }
+
+  [[nodiscard]] std::string endpoint() const {
+    return "http://127.0.0.1:" + std::to_string(port_);
+  }
+
+ private:
+  int socket_ = -1;
+  std::uint16_t port_ = 0;
+  std::thread worker_;
 };
 
 bool wait_until(const std::function<bool()>& predicate,
@@ -137,6 +199,88 @@ SYNC_TEST(companion_process_bounds_management_and_never_owns_external_processes)
   process.terminate([&] { terminated = true; });
   SYNC_REQUIRE(wait_until([&] { return terminated; }));
   SYNC_REQUIRE(!process.owned_pid().has_value());
+}
+
+SYNC_TEST(companion_process_reports_an_unrelated_listener_as_a_port_conflict) {
+  TemporaryHttpServer server;
+  CompanionProcess process({
+      .helper_path = "/bin/false",
+      .framework_path = "/tmp/Syphon.framework",
+      .endpoint = server.endpoint(),
+      .health_timeout_seconds = 1.0,
+  });
+
+  bool completed = false;
+  std::optional<noisefactor::sync::companion::HealthSnapshot> observed;
+  process.probe([&](auto health, std::string) {
+    observed = std::move(health);
+    completed = true;
+  });
+  SYNC_REQUIRE(wait_until([&] { return completed; }));
+  SYNC_REQUIRE(observed.has_value());
+  SYNC_REQUIRE(observed->reachable);
+  SYNC_REQUIRE(!observed->compatible);
+}
+
+SYNC_TEST(companion_process_reports_a_raw_tcp_listener_as_a_port_conflict) {
+  TemporaryHttpServer server(false);
+  CompanionProcess process({
+      .helper_path = "/bin/false",
+      .framework_path = "/tmp/Syphon.framework",
+      .endpoint = server.endpoint(),
+      .health_timeout_seconds = 1.0,
+  });
+
+  bool completed = false;
+  std::optional<noisefactor::sync::companion::HealthSnapshot> observed;
+  process.probe([&](auto health, std::string) {
+    observed = std::move(health);
+    completed = true;
+  });
+  SYNC_REQUIRE(wait_until([&] { return completed; }));
+  SYNC_REQUIRE(observed.has_value());
+  SYNC_REQUIRE(observed->reachable);
+  SYNC_REQUIRE(!observed->compatible);
+}
+
+SYNC_TEST(companion_process_sequences_exit_before_restart_completion) {
+  TemporaryFixture fixture;
+  fixture.write_helper(
+      "trap 'exit 0' TERM\n"
+      "while :; do sleep 1; done\n");
+  CompanionProcess process({
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+  });
+
+  std::vector<std::string> events;
+  std::string error;
+  SYNC_REQUIRE(process.start(
+      [](std::string_view) {},
+      [&](int) { events.push_back("old exit"); }, error));
+  const int old_pid = *process.owned_pid();
+
+  bool replacement_started = false;
+  process.terminate([&] {
+    events.push_back("termination complete");
+    SYNC_REQUIRE(process.start(
+        [](std::string_view) {},
+        [&](int) { events.push_back("replacement exit"); }, error));
+    replacement_started = true;
+  });
+  SYNC_REQUIRE(wait_until([&] { return replacement_started; }));
+  SYNC_REQUIRE(process.owned_pid().has_value());
+  SYNC_REQUIRE(*process.owned_pid() != old_pid);
+  SYNC_REQUIRE(wait_until([&] { return events.size() >= 2; }));
+  SYNC_REQUIRE(events ==
+               std::vector<std::string>({"old exit", "termination complete"}));
+
+  bool replacement_stopped = false;
+  process.terminate([&] { replacement_stopped = true; });
+  SYNC_REQUIRE(wait_until([&] { return replacement_stopped; }));
+  SYNC_REQUIRE(events == std::vector<std::string>(
+                             {"old exit", "termination complete",
+                              "replacement exit"}));
 }
 
 } // namespace

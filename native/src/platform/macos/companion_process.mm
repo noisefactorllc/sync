@@ -4,13 +4,20 @@
 
 #include <sync/origin.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <mutex>
 #include <set>
 #include <utility>
 
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace noisefactor::sync::companion {
 namespace {
@@ -109,9 +116,106 @@ std::optional<HealthSnapshot> parse_health(NSData* data,
   };
 }
 
+std::optional<HealthSnapshot> classify_http_health(NSHTTPURLResponse* response,
+                                                   NSData* data,
+                                                   bool require_sender_count) {
+  if (response == nil) return std::nullopt;
+  if (response.statusCode == 200) {
+    if (auto health = parse_health(data, require_sender_count);
+        health.has_value()) {
+      return health;
+    }
+  }
+  return HealthSnapshot{
+      .reachable = true,
+      .compatible = false,
+  };
+}
+
+bool tcp_listener_reachable(std::string_view endpoint,
+                            double timeout_seconds) {
+  NSURLComponents* components =
+      [NSURLComponents componentsWithString:ns_string(endpoint)];
+  if (components == nil || components.host == nil) return false;
+  const std::string host = cpp_string(components.host);
+  const std::string service =
+      std::to_string(components.port == nil ? 80 : components.port.intValue);
+  if (host.empty()) return false;
+
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  addrinfo* addresses = nullptr;
+  if (::getaddrinfo(host.c_str(), service.c_str(), &hints, &addresses) != 0) {
+    return false;
+  }
+  const int timeout_ms = std::clamp(
+      static_cast<int>(std::ceil(timeout_seconds * 1000.0)), 1, 250);
+  bool reachable = false;
+  for (addrinfo* address = addresses; address != nullptr;
+       address = address->ai_next) {
+    const int descriptor =
+        ::socket(address->ai_family, address->ai_socktype,
+                 address->ai_protocol);
+    if (descriptor < 0) continue;
+    const int flags = ::fcntl(descriptor, F_GETFL, 0);
+    if (flags >= 0) (void)::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK);
+    const int connected =
+        ::connect(descriptor, address->ai_addr, address->ai_addrlen);
+    if (connected == 0) {
+      reachable = true;
+    } else if (errno == EINPROGRESS) {
+      pollfd poll_descriptor{
+          .fd = descriptor,
+          .events = POLLOUT,
+          .revents = 0,
+      };
+      const int polled = ::poll(&poll_descriptor, 1, timeout_ms);
+      if (polled > 0) {
+        int socket_error = 0;
+        socklen_t error_size = sizeof(socket_error);
+        reachable =
+            ::getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &socket_error,
+                         &error_size) == 0 &&
+            socket_error == 0;
+      }
+    }
+    ::close(descriptor);
+    if (reachable) break;
+  }
+  ::freeaddrinfo(addresses);
+  return reachable;
+}
+
+std::optional<HealthSnapshot> classify_probe_result(
+    NSHTTPURLResponse* response, NSData* data, bool require_sender_count,
+    std::string_view endpoint, double timeout_seconds) {
+  if (auto health =
+          classify_http_health(response, data, require_sender_count);
+      health.has_value()) {
+    return health;
+  }
+  if (!tcp_listener_reachable(endpoint, timeout_seconds)) return std::nullopt;
+  return HealthSnapshot{
+      .reachable = true,
+      .compatible = false,
+  };
+}
+
 struct ManagementState {
   std::atomic_bool completed{false};
   __strong NSTask* task = nil;
+};
+
+struct OwnedTaskState {
+  __strong NSTask* task = nil;
+  __strong NSPipe* stderr_pipe = nil;
+  __strong NSPipe* stdout_pipe = nil;
+  CompanionProcess::StderrCallback stderr_callback;
+  CompanionProcess::ExitCallback exit_callback;
+  std::vector<std::function<void()>> termination_completions;
+  bool termination_requested = false;
 };
 
 } // namespace
@@ -159,11 +263,7 @@ struct CompanionProcess::Impl {
   explicit Impl(CompanionProcessOptions value) : options(std::move(value)) {}
 
   CompanionProcessOptions options;
-  __strong NSTask* owned_task = nil;
-  __strong NSPipe* stderr_pipe = nil;
-  __strong NSPipe* stdout_pipe = nil;
-  StderrCallback stderr_callback;
-  ExitCallback exit_callback;
+  std::shared_ptr<OwnedTaskState> owned_state;
 
   void run_management(std::vector<std::string> arguments,
                       std::function<void(int, std::string, std::string,
@@ -225,10 +325,13 @@ CompanionProcess::CompanionProcess(CompanionProcessOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
 
 CompanionProcess::~CompanionProcess() {
-  NSTask* task = impl_->owned_task;
+  const auto state = impl_->owned_state;
+  NSTask* task = state == nullptr ? nil : state->task;
   task.terminationHandler = nil;
-  impl_->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
-  impl_->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+  if (state != nullptr) {
+    state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
+    state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+  }
   if (task != nil && task.running) {
     ::kill(task.processIdentifier, SIGKILL);
   }
@@ -242,7 +345,8 @@ std::vector<std::string> CompanionProcess::launch_arguments() const {
 }
 
 std::optional<int> CompanionProcess::owned_pid() const noexcept {
-  NSTask* task = impl_->owned_task;
+  const auto state = impl_->owned_state;
+  NSTask* task = state == nullptr ? nil : state->task;
   if (task == nil || !task.running) return std::nullopt;
   return static_cast<int>(task.processIdentifier);
 }
@@ -250,56 +354,65 @@ std::optional<int> CompanionProcess::owned_pid() const noexcept {
 bool CompanionProcess::start(StderrCallback stderr_callback,
                              ExitCallback exit_callback,
                              std::string& error) {
-  if (owned_pid().has_value()) {
+  if (impl_->owned_state != nullptr) {
     error = "Sync helper is already running.";
     return false;
   }
+  auto state = std::make_shared<OwnedTaskState>();
   NSTask* task = [[NSTask alloc] init];
+  state->task = task;
   task.executableURL = [NSURL fileURLWithPath:ns_string(impl_->options.helper_path)];
   NSMutableArray<NSString*>* arguments = [NSMutableArray array];
   for (const std::string& argument : launch_arguments()) {
     [arguments addObject:ns_string(argument)];
   }
   task.arguments = arguments;
-  impl_->stderr_pipe = [NSPipe pipe];
-  impl_->stdout_pipe = [NSPipe pipe];
-  task.standardError = impl_->stderr_pipe;
-  task.standardOutput = impl_->stdout_pipe;
-  impl_->stderr_callback = std::move(stderr_callback);
-  impl_->exit_callback = std::move(exit_callback);
+  state->stderr_pipe = [NSPipe pipe];
+  state->stdout_pipe = [NSPipe pipe];
+  task.standardError = state->stderr_pipe;
+  task.standardOutput = state->stdout_pipe;
+  state->stderr_callback = std::move(stderr_callback);
+  state->exit_callback = std::move(exit_callback);
 
   Impl* process = impl_.get();
-  impl_->stderr_pipe.fileHandleForReading.readabilityHandler =
+  state->stderr_pipe.fileHandleForReading.readabilityHandler =
       ^(NSFileHandle* handle) {
         NSData* data = handle.availableData;
         if (data.length == 0) return;
         std::string bytes(static_cast<const char*>(data.bytes), data.length);
-        on_main([process, bytes = std::move(bytes)] {
-          if (process->stderr_callback) process->stderr_callback(bytes);
+        on_main([state, bytes = std::move(bytes)] {
+          if (state->stderr_callback) state->stderr_callback(bytes);
         });
       };
-  impl_->stdout_pipe.fileHandleForReading.readabilityHandler =
+  state->stdout_pipe.fileHandleForReading.readabilityHandler =
       ^(NSFileHandle* handle) {
         (void)handle.availableData;
       };
   task.terminationHandler = ^(NSTask* terminated) {
-    process->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
-    process->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+    state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
+    state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+    terminated.terminationHandler = nil;
     const int status = terminated.terminationStatus;
-    on_main([process, terminated, status] {
-      if (process->owned_task == terminated) process->owned_task = nil;
-      if (process->exit_callback) process->exit_callback(status);
+    on_main([process, state, status] {
+      if (process->owned_state == state) process->owned_state.reset();
+      if (state->exit_callback) {
+        auto callback = std::move(state->exit_callback);
+        callback(status);
+      }
+      auto completions = std::move(state->termination_completions);
+      for (auto& completion : completions) completion();
     });
   };
 
   NSError* launch_error = nil;
   if (![task launchAndReturnError:&launch_error]) {
-    impl_->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
-    impl_->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+    state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
+    state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+    task.terminationHandler = nil;
     error = cpp_string(launch_error.localizedDescription);
     return false;
   }
-  impl_->owned_task = task;
+  impl_->owned_state = std::move(state);
   error.clear();
   return true;
 }
@@ -346,40 +459,46 @@ void CompanionProcess::probe(ProbeCallback completion) {
             [fallback_response isKindOfClass:NSHTTPURLResponse.class]
                 ? static_cast<NSHTTPURLResponse*>(fallback_response)
                 : nil;
-        const auto health = fallback_error == nil && fallback_http.statusCode == 200
-                                ? parse_health(fallback_data, false)
-                                : std::nullopt;
+        const auto health = classify_probe_result(
+            fallback_http, fallback_data, false, endpoint_base,
+            timeout_seconds);
         const std::string message =
-            fallback_error != nil
-                ? cpp_string(fallback_error.localizedDescription)
-                : (health.has_value()
-                       ? std::string{}
-                       : "Sync health was unavailable or invalid.");
+            health.has_value() && !health->compatible
+                ? "TCP 53979 is occupied by an incompatible service."
+                : (fallback_error != nil
+                       ? cpp_string(fallback_error.localizedDescription)
+                       : (!health.has_value() ? "Sync health was unavailable."
+                                              : std::string{}));
         [fallback_session finishTasksAndInvalidate];
         on_main([completion, health, message] { completion(health, message); });
       }] resume];
       return;
     }
-    const auto health = error == nil && http.statusCode == 200
-                            ? parse_health(data, true)
-                            : std::nullopt;
-    const std::string message = error != nil
-                                    ? cpp_string(error.localizedDescription)
-                                    : (health.has_value()
-                                           ? std::string{}
-                                           : "Sync status was unavailable or invalid.");
+    const auto health = classify_probe_result(
+        http, data, true, endpoint_base, timeout_seconds);
+    const std::string message =
+        health.has_value() && !health->compatible
+            ? "TCP 53979 is occupied by an incompatible service."
+            : (error != nil
+                   ? cpp_string(error.localizedDescription)
+                   : (!health.has_value() ? "Sync status was unavailable."
+                                          : std::string{}));
     [session finishTasksAndInvalidate];
     on_main([completion, health, message] { completion(health, message); });
   }] resume];
 }
 
 void CompanionProcess::terminate(Completion completion) {
-  NSTask* task = impl_->owned_task;
-  if (task == nil || !task.running) {
-    impl_->owned_task = nil;
+  const auto state = impl_->owned_state;
+  if (state == nullptr) {
     on_main(std::move(completion));
     return;
   }
+  state->termination_completions.push_back(std::move(completion));
+  if (state->termination_requested) return;
+  state->termination_requested = true;
+  NSTask* task = state->task;
+  if (task == nil || !task.running) return;
   const pid_t pid = task.processIdentifier;
   [task terminate];
   dispatch_after(
@@ -389,13 +508,6 @@ void CompanionProcess::terminate(Completion completion) {
       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (task.running && task.processIdentifier == pid) ::kill(pid, SIGKILL);
       });
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-    [task waitUntilExit];
-    on_main([this, task, completion = std::move(completion)] {
-      if (impl_->owned_task == task) impl_->owned_task = nil;
-      completion();
-    });
-  });
 }
 
 void CompanionProcess::list_pairings(PairingsCallback completion) {

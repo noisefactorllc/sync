@@ -338,7 +338,7 @@ void show_error(NSString* title, NSString* message) {
 - (void)openGuide:(id)sender {
   (void)sender;
   [NSWorkspace.sharedWorkspace
-      openURL:[NSURL URLWithString:@"https://noisedeck.app/docs/Sync"]];
+      openURL:[NSURL URLWithString:@"https://noisedeck.app/docs/Sync.md"]];
 }
 
 - (void)openSource:(id)sender {

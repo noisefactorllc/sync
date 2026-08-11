@@ -297,11 +297,13 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
       .last_presentation_time_us = 6,
       .checksum = 7,
   };
+  const std::string version(noisefactor::sync::kProductVersion);
 
   SYNC_REQUIRE(
       control::encode_welcome(1, noisefactor::sync::kProductVersion,
                               "instance-a", providers) ==
-      "{\"type\":\"welcome\",\"protocolVersion\":1,\"version\":\"0.2.0\","
+      "{\"type\":\"welcome\",\"protocolVersion\":1,\"version\":\"" + version +
+      "\","
       "\"instanceId\":\"instance-a\",\"capabilities\":{\"send\":true,"
       "\"receive\":false,\"providers\":[{\"id\":\"test\",\"direction\":"
       "\"send\","
@@ -309,7 +311,8 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
   SYNC_REQUIRE(
       control::encode_health(noisefactor::sync::kProductVersion, "instance-a",
                              providers) ==
-      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"0.2.0\","
+      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"" + version +
+      "\","
       "\"protocolVersions\":[1],\"instanceId\":\"instance-a\","
       "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[{"
       "\"id\":\"test\",\"direction\":\"send\",\"available\":true,"
@@ -317,7 +320,8 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
   SYNC_REQUIRE(
       control::encode_status(noisefactor::sync::kProductVersion, "instance-a",
                              providers, 3) ==
-      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"0.2.0\","
+      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"" + version +
+      "\","
       "\"protocolVersions\":[1],\"instanceId\":\"instance-a\","
       "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[{"
       "\"id\":\"test\",\"direction\":\"send\",\"available\":true,"

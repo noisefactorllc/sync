@@ -27,6 +27,7 @@ plutil -lint "$info" >/dev/null
 identifier="$(plutil -extract CFBundleIdentifier raw -o - "$info")"
 version="$(plutil -extract CFBundleShortVersionString raw -o - "$info")"
 agent="$(plutil -extract LSUIElement raw -o - "$info")"
+minimum_system="$(plutil -extract LSMinimumSystemVersion raw -o - "$info")"
 if [[ "$identifier" != "io.noisefactor.sync" || "$agent" != "true" ]]; then
   echo "verify-macos-bundle: invalid identity or LSUIElement metadata" >&2
   exit 1
@@ -44,6 +45,31 @@ while IFS= read -r -d '' candidate; do
   mach_count=$((mach_count + 1))
   if ! lipo -archs "$candidate" | tr ' ' '\n' | grep -qx arm64; then
     echo "verify-macos-bundle: $candidate does not contain arm64" >&2
+    exit 1
+  fi
+  deployment_target="$(otool -l "$candidate" | awk '
+    $1 == "cmd" { command = $2 }
+    command == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }
+    command == "LC_VERSION_MIN_MACOSX" && $1 == "version" { print $2; exit }
+  ')"
+  if [[ -z "$deployment_target" ]]; then
+    echo "verify-macos-bundle: $candidate has neither LC_BUILD_VERSION nor LC_VERSION_MIN_MACOSX" >&2
+    exit 1
+  fi
+  if ! awk -v actual="$deployment_target" -v maximum="$minimum_system" '
+    BEGIN {
+      split(actual, actual_parts, ".")
+      split(maximum, maximum_parts, ".")
+      for (index = 1; index <= 3; index++) {
+        actual_part = actual_parts[index] + 0
+        maximum_part = maximum_parts[index] + 0
+        if (actual_part < maximum_part) exit 0
+        if (actual_part > maximum_part) exit 1
+      }
+      exit 0
+    }
+  '; then
+    echo "verify-macos-bundle: $candidate targets macOS $deployment_target, newer than the bundle minimum $minimum_system" >&2
     exit 1
   fi
   while IFS= read -r dependency; do
