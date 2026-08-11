@@ -104,6 +104,19 @@ async function health(host, port, origin) {
   }
 }
 
+async function status(host, port, origin) {
+  const socket = await connect(host, port);
+  try {
+    const hostHeader = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+    const originHeader = origin === undefined ? "" : `Origin: ${origin}\r\n`;
+    socket.end(`GET /status HTTP/1.1\r\nHost: ${hostHeader}\r\n${originHeader}Connection: close\r\n\r\n`);
+    return await withTimeout(readHttpResponse(socket), `status response from ${host}`);
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+}
+
 async function preflight(host, port, origin, requestPrivateNetwork = false) {
   const socket = await connect(host, port);
   try {
@@ -1235,7 +1248,7 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     const expectedHealth = {
       product: "Sync",
       status: "ok",
-      version: "0.1.2",
+      version: "0.2.0",
       protocolVersions: [1],
       instanceId: ready.instanceId,
       capabilities: {
@@ -1260,6 +1273,14 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     assert.equal(publicHealth.headers.get("access-control-allow-origin"),
                  "https://evil.example");
     assert.equal(publicHealth.headers.get("vary"), "Origin");
+    const initialStatus = await status("127.0.0.1", ready.port);
+    assert.equal(initialStatus.status, 200);
+    assert.deepEqual(JSON.parse(initialStatus.body), {
+      ...expectedHealth,
+      activeSenders: 0,
+    });
+    assert.equal((await status("127.0.0.1", ready.port, ORIGIN)).status, 403,
+                 "native status does not opt into browser CORS");
 
     const deniedUpgrade = await upgrade({
       port: ready.port,
@@ -1291,7 +1312,7 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     assert.deepEqual(await control.client.nextJson("welcome"), {
       type: "welcome",
       protocolVersion: 1,
-      version: "0.1.2",
+      version: "0.2.0",
       instanceId: ready.instanceId,
       capabilities: expectedHealth.capabilities,
     });
@@ -1393,6 +1414,11 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     assert.equal(created.path, `/senders/${created.id}`);
     assert.match(created.ticket, /^[a-f0-9]{32,}$/);
     assert.equal(created.path.includes(created.ticket), false);
+    assert.equal(
+      JSON.parse((await status("127.0.0.1", ready.port)).body).activeSenders,
+      1,
+      "status counts a sender immediately after creation",
+    );
 
     const selectedProtocol = `sync.sender.${created.ticket}`;
     const data = await upgrade({
@@ -1455,6 +1481,11 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     data.client.send(0x8, dataClose.payload);
     await data.client.waitClosed();
     sockets.delete(data.client);
+    assert.equal(
+      JSON.parse((await status("127.0.0.1", ready.port)).body).activeSenders,
+      0,
+      "status removes a sender immediately after closure",
+    );
 
     control.client.sendJson({ type: "createSender", name: "Revoked Before Connect" });
     const revoked = await control.client.nextJson("unused-ticket sender creation");
@@ -1725,7 +1756,7 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     const response = await health("127.0.0.1", daemon.ready.port, ORIGIN);
     assert.equal(response.status, 200);
     const healthBody = JSON.parse(response.body.toString("utf8"));
-    assert.equal(healthBody.version, "0.1.2");
+    assert.equal(healthBody.version, "0.2.0");
     assert.equal(healthBody.capabilities.receive, false);
     assert.deepEqual(healthBody.capabilities.providers, [{
       id: "syphon",
@@ -1744,7 +1775,7 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     sockets.add(control.client);
     control.client.sendJson({ type: "hello", token: TOKEN, protocolVersions: [1] });
     const welcome = await control.client.nextJson("Syphon welcome");
-    assert.equal(welcome.version, "0.1.2");
+    assert.equal(welcome.version, "0.2.0");
     assert.deepEqual(welcome.capabilities, healthBody.capabilities);
     control.client.sendJson({ type: "createSender", name: "Syphon Integration" });
     const creation = await control.client.nextJson("Syphon sender result");

@@ -13,7 +13,11 @@ class PairingAuthority;
 class PairingPrompt;
 } // namespace pairing
 
-inline constexpr std::string_view kProductVersion = "0.1.2";
+#ifndef SYNC_PRODUCT_VERSION
+#define SYNC_PRODUCT_VERSION "0.2.0"
+#endif
+
+inline constexpr std::string_view kProductVersion = SYNC_PRODUCT_VERSION;
 inline constexpr std::size_t kMaximumProviderCapabilities = 4;
 inline constexpr std::size_t kMaximumProviderIdBytes = 32;
 

@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a public, signed, notarized Apple Silicon `Sync.app` DMG from `downloads.noisefactor.io` that runs the existing Sync daemon as a managed menu-bar companion with bundled Syphon.
 
-**Architecture:** A small AppKit `LSUIElement` application supervises the existing `syncd` executable as an embedded child and consumes its loopback health and JSON pairing-management interfaces. Sync owns deterministic unsigned app/DMG packaging; Scaffold owns signing credentials, notarization, public installer serving, atomic deployment, and downloads-page publication.
+**Architecture:** A small AppKit `LSUIElement` application supervises the existing `syncd` executable as an embedded child and consumes its loopback native status and JSON pairing-management interfaces. Sync owns deterministic unsigned app/DMG packaging; Scaffold owns signing credentials, notarization, public installer serving, atomic deployment, and downloads-page publication.
 
 **Tech Stack:** C++20, Objective-C++/AppKit/Foundation/ServiceManagement, CMake, libuv, OpenSSL 3, Syphon/Metal, shell packaging, GitHub Actions, Python/aiohttp, Node.js page tooling.
 
@@ -22,7 +22,7 @@
 
 ---
 
-### Task 1: Live sender count in the health contract
+### Task 1: Live sender count in a native status contract
 
 **Files:**
 - Modify: `CMakeLists.txt`
@@ -35,25 +35,26 @@
 - Modify: `test/integration/loopback.test.js`
 
 **Interfaces:**
-- Produces: `control::encode_health(product_version, instance_id, providers, active_senders)`.
-- Produces: additive `activeSenders` integer in `GET /health`.
+- Preserves: the exact existing `control::encode_health(product_version, instance_id, providers)` browser contract.
+- Produces: `control::encode_status(product_version, instance_id, providers, active_senders)`.
+- Produces: native-only, no-CORS `GET /status` with an `activeSenders` integer.
 - Produces: CMake cache string `SYNC_PRODUCT_VERSION`, default `0.2.0`, compiled into `kProductVersion`.
 
 - [ ] **Step 1: Add failing control and server tests**
 
-Assert that the health encoder emits `"activeSenders":3`, and that a real server reports 0, then 1 after `createSender`, then 0 after sender closure. Keep existing field assertions.
+Assert that the health encoder remains exact, the status encoder emits `"activeSenders":3`, and a real server reports 0, then 1 after `createSender`, then 0 after sender closure. Assert that `/status` rejects an `Origin` header.
 
 ```cpp
-const auto health = control::encode_health("0.2.0", "instance", providers, 3);
-SYNC_REQUIRE(health.find("\"activeSenders\":3") != std::string::npos);
+const auto status = control::encode_status("0.2.0", "instance", providers, 3);
+SYNC_REQUIRE(status.find("\"activeSenders\":3") != std::string::npos);
 ```
 
 ```js
-assert.equal((await health()).activeSenders, 0)
-const sender = await client.createSender({ name: 'health-count' })
-assert.equal((await health()).activeSenders, 1)
+assert.equal((await status()).activeSenders, 0)
+const sender = await client.createSender({ name: 'status-count' })
+assert.equal((await status()).activeSenders, 1)
 await sender.close()
-assert.equal((await health()).activeSenders, 0)
+assert.equal((await status()).activeSenders, 0)
 ```
 
 - [ ] **Step 2: Run the focused tests and confirm failure**
@@ -68,9 +69,9 @@ SYNC_DAEMON_PATH=build-acceptance/syncd node --test test/integration/loopback.te
 
 Expected: compilation or assertion failure because the new encoder parameter/field is absent.
 
-- [ ] **Step 3: Implement dynamic health generation and product-version injection**
+- [ ] **Step 3: Implement dynamic native status and product-version injection**
 
-Add an occupied-sender counter to `Server`. Remove the cached `health_body_`; encode the response at request time. Define the version through CMake:
+Add an occupied-sender counter to `Server`. Preserve the cached, exact browser health body and encode the native status response at request time. Define the version through CMake:
 
 ```cmake
 set(SYNC_PRODUCT_VERSION "0.2.0" CACHE STRING "Sync product version")
@@ -97,13 +98,13 @@ npm run test:browser
 SYNC_DAEMON_PATH=build-acceptance/syncd npm run test:integration
 ```
 
-Expected: all suites pass and health transitions match live sender ownership.
+Expected: all suites pass, status transitions match live sender ownership, and old browser health validation remains green.
 
-- [ ] **Step 5: Commit the health contract**
+- [ ] **Step 5: Commit the status contract**
 
 ```bash
 git add CMakeLists.txt native/include/sync/control.hpp native/include/sync/server.hpp native/src/control.cpp native/src/server.cpp native/test/control_test.cpp native/test/server_contract_test.cpp test/integration/loopback.test.js
-git commit -m "feat: expose live Sync sender health"
+git commit -m "feat: expose live Sync sender status"
 ```
 
 ### Task 2: Testable companion state and bounded diagnostics

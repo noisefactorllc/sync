@@ -645,10 +645,10 @@ class Server {
       std::cerr << "syncd: failed to generate instance identifier\n";
       return false;
     }
-    health_body_ = control::encode_health(
-        kProductVersion, instance_id_, provider_capabilities());
     welcome_body_ = control::encode_welcome(
         1, kProductVersion, instance_id_, provider_capabilities());
+    health_body_ = control::encode_health(
+        kProductVersion, instance_id_, provider_capabilities());
 
     sockaddr_in address4{};
     if (uv_ip4_addr("127.0.0.1", options_.port, &address4) != 0 ||
@@ -744,6 +744,14 @@ class Server {
   [[nodiscard]] auto provider_capabilities() const noexcept
       -> std::span<const ProviderCapability> {
     return {options_.providers.data(), options_.provider_count};
+  }
+
+  [[nodiscard]] std::size_t active_sender_count() const noexcept {
+    std::size_t count = 0;
+    for (const Sender& sender : senders_) {
+      if (sender.occupied) ++count;
+    }
+    return count;
   }
 
   void set_deadline(Connection &connection, DeadlineKind kind,
@@ -1176,6 +1184,23 @@ class Server {
     }
     if (!valid_host(basic->host)) {
       send_http(connection, 403, "Forbidden", "{\"error\":\"forbidden\"}");
+      return;
+    }
+    if (basic->path == "/status") {
+      if (basic->origin.has_value()) {
+        send_http(connection, 403, "Forbidden", "{\"error\":\"forbidden\"}");
+        return;
+      }
+      if (basic->method != "GET" || basic->requested_method.has_value() ||
+          basic->requested_private_network) {
+        send_http(connection, 405, "Method Not Allowed",
+                  "{\"error\":\"method_not_allowed\"}");
+        return;
+      }
+      const std::string status_body = control::encode_status(
+          kProductVersion, instance_id_, provider_capabilities(),
+          active_sender_count());
+      send_http(connection, 200, "OK", status_body);
       return;
     }
     if (basic->path == "/health") {
@@ -1742,8 +1767,8 @@ class Server {
   FrameReceiver receiver_;
   std::unique_ptr<pairing::AuthorityWorker> authority_worker_;
   bool can_send_ = false;
-  std::string health_body_;
   std::string welcome_body_;
+  std::string health_body_;
   std::uint64_t next_pairing_generation_ = 0;
   std::uint64_t active_pairing_generation_ = 0;
   std::uint64_t next_authority_generation_ = 0;

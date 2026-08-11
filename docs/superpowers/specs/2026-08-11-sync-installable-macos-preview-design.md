@@ -115,18 +115,25 @@ are signed in inside-out order with the existing Noise Factor Developer ID
 identity and hardened runtime. The DMG contains `Sync.app`, an Applications
 symlink, the MIT license, and the third-party notice.
 
-## Health and management interfaces
+## Health, status, and management interfaces
 
-`GET /health` remains unauthenticated, loopback-only, and protocol-version
-neutral. It gains one additive numeric field:
+`GET /health` remains byte-compatible with the existing browser SDK contract:
+unauthenticated, loopback-only, CORS-enabled for normalized origins, and
+protocol-version neutral. This is important because CDN-pinned SDK builds
+validate the health response as an exact schema.
+
+The companion uses a new native-only `GET /status` endpoint. It rejects any
+request carrying an `Origin` header and emits the health identity and
+capability fields plus one numeric field:
 
 ```json
 {"activeSenders": 0}
 ```
 
-The value is generated per request from occupied sender slots, not cached at
-server initialization. Existing health fields and wire protocol version 1 do
-not change.
+The value is generated per request from occupied sender slots. Existing health
+fields, old browser clients, and wire protocol version 1 do not change. The app
+may fall back to `/health` only to recognize a compatible older external daemon;
+sender count is then reported as unavailable.
 
 The menu app runs the embedded helper with `--list-pairings` and
 `--revoke-origin <normalized-origin>`. Both commands already emit bounded JSON
@@ -140,7 +147,7 @@ use a two-second total timeout.
 Sync receives CMake targets for the menu app and deterministic app-bundle/DMG
 packaging. Local unsigned packaging remains possible for tests. Release version
 uses `0.2.<scaffold workflow run number>`; CMake injects that exact value into
-the health response and `Info.plist` without changing wire protocol version 1
+the health/status responses and `Info.plist` without changing wire protocol version 1
 or the independently versioned browser SDK.
 
 Scaffold receives a dedicated `build-sync-preview.yml` workflow rather than
@@ -216,7 +223,8 @@ Local verification must prove:
 
 - all existing Sync native, browser, integration, and real Syphon tests remain
   green;
-- health reports exact live sender counts through sender create/close paths;
+- native status reports exact live sender counts through sender create/close
+  paths while browser health remains byte-compatible;
 - app state transitions, external-instance detection, helper-exit recovery,
   bounded diagnostics, and pairing JSON parsing are covered by focused tests;
 - the unsigned app bundle has the expected layout and no unbundled non-system

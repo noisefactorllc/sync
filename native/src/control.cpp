@@ -789,6 +789,18 @@ std::string encode_health(std::string_view product_version,
   return output;
 }
 
+std::string encode_status(std::string_view product_version,
+                          std::string_view instance_id,
+                          std::span<const ProviderCapability> providers,
+                          std::size_t active_senders) {
+  std::string output = encode_health(product_version, instance_id, providers);
+  output.pop_back();
+  output.append(",\"activeSenders\":");
+  append_number(output, active_senders);
+  output.push_back('}');
+  return output;
+}
+
 std::string encode_sender_created(std::string_view id, std::string_view name,
                                   std::string_view path,
                                   std::string_view ticket) {

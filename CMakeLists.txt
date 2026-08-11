@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(noisefactor_sync_protocol LANGUAGES CXX)
+project(noisefactor_sync_protocol VERSION 0.2.0 LANGUAGES CXX)
+
+set(SYNC_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
+    "Sync product version reported by the native companion")
 
 find_package(Threads REQUIRED)
 
@@ -22,6 +25,9 @@ add_library(sync_protocol
 )
 target_compile_features(sync_protocol PUBLIC cxx_std_20)
 target_include_directories(sync_protocol PUBLIC native/include)
+target_compile_definitions(sync_protocol PUBLIC
+  SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
+)
 target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads)
 
 add_executable(sync_protocol_tests

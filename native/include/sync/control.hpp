@@ -68,6 +68,10 @@ std::string encode_capabilities(std::span<const ProviderCapability> providers);
 std::string encode_health(std::string_view product_version,
                           std::string_view instance_id,
                           std::span<const ProviderCapability> providers);
+std::string encode_status(std::string_view product_version,
+                          std::string_view instance_id,
+                          std::span<const ProviderCapability> providers,
+                          std::size_t active_senders);
 std::string encode_welcome(std::uint16_t protocol_version,
                            std::string_view product_version,
                            std::string_view instance_id,
