@@ -95,6 +95,15 @@ if(APPLE)
   find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
   find_library(METAL_FRAMEWORK Metal REQUIRED)
 
+  add_executable(sync_companion_model_tests
+    native/test/macos/companion_model_test.cpp
+    native/src/platform/macos/companion_model.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_companion_model_tests PRIVATE native/include)
+  add_test(NAME sync_companion_model_tests COMMAND sync_companion_model_tests)
+
   add_library(sync_pairing_prompt
     native/src/platform/macos/pairing_prompt.mm
   )
