@@ -1,0 +1,9 @@
+build*/
+node_modules/
+coverage/
+.superpowers/
+docs/superpowers/
+.DS_Store
+*.tmp-*
+compile_commands.json
+CMakeUserPresets.json

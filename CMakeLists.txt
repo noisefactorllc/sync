@@ -1,0 +1,234 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(noisefactor_sync_protocol LANGUAGES CXX)
+
+find_package(Threads REQUIRED)
+
+find_package(OpenSSL 3 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
+
+add_library(sync_protocol
+  native/src/control.cpp
+  native/src/frame_receiver.cpp
+  native/src/origin.cpp
+  native/src/pairing.cpp
+  native/src/authority_worker.cpp
+  native/src/pairing_store.cpp
+  native/src/publisher_hub.cpp
+  native/src/protocol.cpp
+  native/src/secure_memory.cpp
+  native/src/websocket.cpp
+)
+target_compile_features(sync_protocol PUBLIC cxx_std_20)
+target_include_directories(sync_protocol PUBLIC native/include)
+target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads)
+
+add_executable(sync_protocol_tests
+  native/test/control_test.cpp
+  native/test/frame_receiver_test.cpp
+  native/test/publisher_hub_test.cpp
+  native/test/server_contract_test.cpp
+  native/test/test_main.cpp
+  native/test/protocol_test.cpp
+  native/test/websocket_test.cpp
+  native/src/server.cpp
+)
+target_compile_features(sync_protocol_tests PRIVATE cxx_std_20)
+target_link_libraries(sync_protocol_tests PRIVATE sync_protocol PkgConfig::LIBUV)
+target_compile_definitions(sync_protocol_tests PRIVATE SYNC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(syncd
+  native/src/main.cpp
+  native/src/server.cpp
+)
+target_compile_features(syncd PRIVATE cxx_std_20)
+target_link_libraries(syncd PRIVATE sync_cli PkgConfig::LIBUV)
+
+enable_testing()
+add_test(NAME sync_protocol_tests COMMAND sync_protocol_tests)
+
+add_executable(sync_pairing_store_tests
+  native/test/origin_test.cpp
+  native/test/pairing_test.cpp
+  native/test/pairing_store_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_pairing_store_tests PRIVATE cxx_std_20)
+target_link_libraries(sync_pairing_store_tests PRIVATE sync_protocol)
+add_test(NAME sync_pairing_store_tests COMMAND sync_pairing_store_tests)
+
+add_library(sync_cli
+  native/src/cli.cpp
+)
+target_compile_features(sync_cli PUBLIC cxx_std_20)
+target_include_directories(sync_cli PUBLIC native/src)
+target_link_libraries(sync_cli PUBLIC sync_protocol)
+
+add_executable(sync_cli_tests
+  native/test/cli_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_cli_tests PRIVATE cxx_std_20)
+target_link_libraries(sync_cli_tests PRIVATE sync_cli)
+add_test(NAME sync_cli_tests COMMAND sync_cli_tests)
+
+add_executable(sync_pairing_test_server
+  native/test/pairing_server_main.cpp
+  native/src/server.cpp
+)
+target_compile_features(sync_pairing_test_server PRIVATE cxx_std_20)
+target_compile_definitions(sync_pairing_test_server PRIVATE
+  SYNC_PAIRING_PROMPT_DEADLINE_MS=525
+)
+target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol PkgConfig::LIBUV)
+
+if(APPLE)
+  enable_language(OBJCXX)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+
+  add_library(sync_pairing_prompt
+    native/src/platform/macos/pairing_prompt.mm
+  )
+  target_compile_features(sync_pairing_prompt PUBLIC cxx_std_20)
+  set_target_properties(sync_pairing_prompt PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_pairing_prompt PUBLIC native/include)
+  target_compile_options(sync_pairing_prompt PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_pairing_prompt
+    PUBLIC sync_protocol
+    PRIVATE ${FOUNDATION_FRAMEWORK} ${CORE_FOUNDATION_FRAMEWORK}
+  )
+
+  add_executable(sync_pairing_prompt_tests
+    native/test/macos/pairing_prompt_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_pairing_prompt_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_pairing_prompt_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_pairing_prompt_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_pairing_prompt_tests
+    PRIVATE sync_pairing_prompt ${FOUNDATION_FRAMEWORK}
+  )
+  add_test(NAME sync_pairing_prompt_tests COMMAND sync_pairing_prompt_tests)
+  add_test(
+    NAME sync_pairing_prompt_missing_pool_diagnostics
+    COMMAND ${CMAKE_COMMAND}
+      -DSYNC_PAIRING_PROMPT_TESTS=$<TARGET_FILE:sync_pairing_prompt_tests>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/pairing_prompt_missing_pool_test.cmake
+  )
+
+  add_library(sync_metal_publisher
+    native/src/platform/macos/metal_frame_publisher.mm
+  )
+  target_compile_features(sync_metal_publisher PUBLIC cxx_std_20)
+  set_target_properties(sync_metal_publisher PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_metal_publisher PUBLIC native/include)
+  target_compile_options(sync_metal_publisher PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_metal_publisher
+    PUBLIC sync_protocol
+    PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+
+  add_executable(sync_metal_publisher_tests
+    native/test/macos/metal_frame_publisher_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_metal_publisher_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_metal_publisher_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_definitions(sync_metal_publisher_tests PRIVATE
+    SYNC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  target_compile_options(sync_metal_publisher_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_metal_publisher_tests
+    PRIVATE sync_metal_publisher ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+  add_test(NAME sync_metal_publisher_tests COMMAND sync_metal_publisher_tests)
+
+  add_executable(sync_metal_publisher_probe
+    native/test/macos/metal_frame_publisher_probe.mm
+  )
+  target_compile_features(sync_metal_publisher_probe PRIVATE cxx_std_20)
+  set_target_properties(sync_metal_publisher_probe PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_metal_publisher_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_metal_publisher_probe
+    PRIVATE sync_metal_publisher ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+  add_test(
+    NAME sync_metal_missing_pool_diagnostics
+    COMMAND ${CMAKE_COMMAND}
+      -DSYNC_METAL_PROBE=$<TARGET_FILE:sync_metal_publisher_probe>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/metal_missing_pool_test.cmake
+  )
+
+  add_library(sync_syphon_consumer
+    native/src/platform/macos/syphon_consumer.mm
+  )
+  target_compile_features(sync_syphon_consumer PUBLIC cxx_std_20)
+  set_target_properties(sync_syphon_consumer PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_syphon_consumer PUBLIC native/include)
+  target_compile_options(sync_syphon_consumer PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_syphon_consumer
+    PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+
+  add_executable(sync_syphon_consumer_tests
+    native/test/macos/syphon_consumer_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_syphon_consumer_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_syphon_consumer_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_syphon_consumer_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_syphon_consumer_tests
+    PRIVATE sync_syphon_consumer sync_metal_publisher
+      ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+  add_test(NAME sync_syphon_consumer_tests COMMAND sync_syphon_consumer_tests)
+
+  add_executable(sync_syphon_discovery_probe
+    native/test/macos/syphon_discovery_probe.mm
+  )
+  target_compile_features(sync_syphon_discovery_probe PRIVATE cxx_std_20)
+  set_target_properties(sync_syphon_discovery_probe PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_syphon_discovery_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_syphon_discovery_probe
+    PRIVATE sync_syphon_consumer ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+  add_test(NAME sync_syphon_discovery_probe COMMAND sync_syphon_discovery_probe)
+  add_test(
+    NAME sync_syphon_missing_pool_diagnostics
+    COMMAND ${CMAKE_COMMAND}
+      -DSYNC_SYPHON_PROBE=$<TARGET_FILE:sync_syphon_discovery_probe>
+      -DSYNC_MISSING_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/missing/Syphon.framework
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/syphon_missing_pool_test.cmake
+  )
+
+  set_source_files_properties(native/src/main.cpp PROPERTIES LANGUAGE OBJCXX)
+  set_target_properties(syncd PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(syncd PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(syncd PRIVATE
+    sync_pairing_prompt sync_metal_publisher sync_syphon_consumer
+    ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+else()
+  target_link_libraries(syncd PRIVATE sync_protocol)
+endif()

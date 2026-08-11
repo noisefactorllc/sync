@@ -1,0 +1,16 @@
+{
+  "name": "sync",
+  "private": true,
+  "description": "Low-latency bridge between browser renderers and native video ecosystems",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noisefactorllc/sync.git"
+  },
+  "type": "module",
+  "scripts": {
+    "test:browser": "node --test --test-timeout=30000 test/browser/*.test.js",
+    "test:protocol": "node --test --test-timeout=30000 test/browser/protocol.test.js",
+    "test:integration": "node --test --test-timeout=30000 test/integration/loopback.test.js"
+  }
+}
