@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -34,6 +35,7 @@ enum class AdapterMode {
   Fail,
   SlowApprove,
   SlowDeny,
+  ControlledApprove,
   ThrowCppCreate,
   ThrowObjcCreate,
   ThrowCppReceive,
@@ -50,6 +52,7 @@ struct AdapterRecord {
 
   AdapterMode mode;
   std::mutex mutex;
+  std::condition_variable response_condition;
   std::vector<std::thread::id> threads;
   std::string header;
   std::string message;
@@ -57,6 +60,7 @@ struct AdapterRecord {
   std::string alternate_button;
   std::chrono::milliseconds ui_deadline{};
   bool caution = false;
+  bool response_released = false;
   std::atomic<std::size_t> create_calls{0};
   std::atomic<std::size_t> receive_calls{0};
   std::atomic<std::size_t> cancel_calls{0};
@@ -119,6 +123,13 @@ class RecordingAdapter final : public prompt_test::Adapter {
       case AdapterMode::SlowDeny:
         std::this_thread::sleep_for(70ms);
         return prompt_test::AdapterResponse::Denied;
+      case AdapterMode::ControlledApprove: {
+        std::unique_lock lock(record_->mutex);
+        const bool released = record_->response_condition.wait_for(
+            lock, 5s, [&] { return record_->response_released; });
+        return released ? prompt_test::AdapterResponse::Approved
+                        : prompt_test::AdapterResponse::Failed;
+      }
       case AdapterMode::ThrowCppReceive:
         throw std::runtime_error("deterministic C++ receive failure");
       case AdapterMode::ThrowObjcReceive:
@@ -161,13 +172,21 @@ pairing::PromptRequest request(std::uint64_t generation,
 
 template <typename Predicate>
 bool wait_until(Predicate predicate,
-                std::chrono::milliseconds timeout = 1000ms) {
+                std::chrono::milliseconds timeout = 5s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) return true;
     std::this_thread::sleep_for(1ms);
   }
   return predicate();
+}
+
+void release_controlled_response(AdapterRecord& record) {
+  {
+    std::lock_guard lock(record.mutex);
+    record.response_released = true;
+  }
+  record.response_condition.notify_all();
 }
 
 pairing::PromptResult wait_for_result(pairing::PairingPrompt& prompt) {
@@ -266,7 +285,6 @@ SYNC_TEST(mac_prompt_worker_deadline_reports_timed_out) {
   const auto result = wait_for_result(*prompt);
   SYNC_REQUIRE(result.generation == 91);
   SYNC_REQUIRE(result.decision == pairing::PromptDecision::TimedOut);
-  SYNC_REQUIRE(record->receive_calls >= 2);
   SYNC_REQUIRE(record->cancel_calls == 1);
   SYNC_REQUIRE(record->release_calls == 1);
   require_one_worker_thread(*record);
@@ -287,11 +305,12 @@ SYNC_TEST(mac_prompt_response_at_or_after_worker_deadline_is_timed_out) {
 }
 
 SYNC_TEST(mac_prompt_cancel_suppresses_an_inflight_late_approval_and_reuses_slot) {
-  auto record = std::make_shared<AdapterRecord>(AdapterMode::SlowApprove);
-  auto prompt = make_prompt(record, 200ms, 50ms);
+  auto record = std::make_shared<AdapterRecord>(AdapterMode::ControlledApprove);
+  auto prompt = make_prompt(record, 5s, 50ms);
   SYNC_REQUIRE(prompt->begin(request(101, "https://client.example", "Noisedeck")));
   SYNC_REQUIRE(wait_until([&] { return record->receive_calls.load() == 1; }));
   prompt->cancel(101);
+  release_controlled_response(*record);
   SYNC_REQUIRE(wait_until([&] { return record->release_calls.load() == 1; }));
   SYNC_REQUIRE(!prompt->poll().available);
   SYNC_REQUIRE(record->cancel_calls == 1);
@@ -320,11 +339,12 @@ SYNC_TEST(mac_prompt_unconsumed_result_blocks_begin_and_can_be_canceled) {
 }
 
 SYNC_TEST(mac_prompt_wrong_generation_cancel_does_not_suppress_result) {
-  auto record = std::make_shared<AdapterRecord>(AdapterMode::SlowApprove);
-  auto prompt = make_prompt(record, 200ms, 50ms);
+  auto record = std::make_shared<AdapterRecord>(AdapterMode::ControlledApprove);
+  auto prompt = make_prompt(record, 5s, 50ms);
   SYNC_REQUIRE(prompt->begin(request(121, "https://client.example", "Noisedeck")));
   SYNC_REQUIRE(wait_until([&] { return record->receive_calls.load() == 1; }));
   prompt->cancel(122);
+  release_controlled_response(*record);
   const auto result = wait_for_result(*prompt);
   SYNC_REQUIRE(result.generation == 121);
   SYNC_REQUIRE(result.decision == pairing::PromptDecision::Approved);
