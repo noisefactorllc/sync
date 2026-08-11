@@ -1,6 +1,8 @@
 #include "test_harness.hpp"
 
 #include <array>
+#include <atomic>
+#include <csignal>
 #include <cstddef>
 #include <iostream>
 #include <sstream>
@@ -102,7 +104,26 @@ private:
   std::streambuf *old_stderr_;
 };
 
+void stop_after_platform_pump(void *context) noexcept {
+  auto *calls = static_cast<std::atomic<std::size_t> *>(context);
+  if (calls->fetch_add(1, std::memory_order_relaxed) == 0) {
+    std::raise(SIGTERM);
+  }
+}
+
 } // namespace
+
+SYNC_TEST(server_invokes_the_configured_platform_event_pump) {
+  std::atomic<std::size_t> calls{0};
+  auto options = base_options();
+  options.test_receiver = true;
+  options.platform_event_pump = stop_after_platform_pump;
+  options.platform_event_pump_context = &calls;
+
+  ScopedStreamCapture capture;
+  SYNC_REQUIRE(noisefactor::sync::run_server(options) == 0);
+  SYNC_REQUIRE(calls.load(std::memory_order_relaxed) >= 1);
+}
 
 SYNC_TEST(
     server_rejects_invalid_publisher_modes_before_ready_and_never_owns_external) {

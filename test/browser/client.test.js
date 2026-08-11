@@ -35,7 +35,7 @@ const CAPABILITIES = Object.freeze({
 const HEALTH = Object.freeze({
   product: 'Sync',
   status: 'ok',
-  version: '0.1.0',
+  version: '0.1.1',
   protocolVersions: Object.freeze([1]),
   instanceId: INSTANCE_ID,
   capabilities: CAPABILITIES,
@@ -43,7 +43,7 @@ const HEALTH = Object.freeze({
 const WELCOME = Object.freeze({
   type: 'welcome',
   protocolVersion: 1,
-  version: '0.1.0',
+  version: '0.1.1',
   instanceId: INSTANCE_ID,
   capabilities: CAPABILITIES,
 });
@@ -1363,6 +1363,32 @@ test('createSender serializes control requests and uses a distinct ticket-subpro
   assert.deepEqual(commands.map(({ type }) => type), [
     'hello', 'createSender', 'createSender', 'closeSender', 'closeSender',
   ]);
+  bridge.close();
+});
+
+test('createSender forwards a live one-frame pressure policy to its real sink', async () => {
+  scriptedControl();
+  const bridge = client();
+  await bridge.connect();
+  const sender = await bridge.createSender('Resizable', {
+    exportQueue: new ExportQueue(),
+    maxBufferedFrames: 1,
+    clock: { timeOrigin: 0 },
+  });
+  sender.configure({
+    width: 2,
+    height: 2,
+    format: 'rgba8unorm',
+    colorSpace: 'srgb',
+    alphaMode: 'premultiplied',
+    fps: 60,
+  });
+  FakeWebSocket.instances[1].bufferedAmount = 1;
+
+  assert.equal(sender.submit('texture', 1), false);
+  assert.equal(sender.stats.droppedBackpressure, 1);
+  sender.close();
+  await sender.closed;
   bridge.close();
 });
 

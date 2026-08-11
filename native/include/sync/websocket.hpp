@@ -14,6 +14,7 @@
 namespace noisefactor::sync::websocket {
 
 inline constexpr std::size_t kMaximumHttpUpgradeBytes = 16384;
+inline constexpr std::size_t kMaximumReusablePayloadBytes = 8U * 1024U * 1024U;
 inline constexpr std::string_view kSupportedWebSocketVersion = "13";
 
 enum class HttpError {
@@ -81,10 +82,13 @@ class ClientFrameDecoder {
   explicit ClientFrameDecoder(std::size_t max_message_bytes,
                               PayloadSensitivity sensitivity =
                                   PayloadSensitivity::NonSensitive,
-                              CleanseObserver* cleanse_observer = nullptr);
+                              CleanseObserver* cleanse_observer = nullptr,
+                              std::size_t max_reusable_payload_bytes =
+                                  kMaximumReusablePayloadBytes);
   ~ClientFrameDecoder() noexcept;
 
   DecodeError feed(std::span<const std::byte> bytes, std::vector<Message>& output);
+  void recycle_payload(std::vector<std::byte>& payload) noexcept;
 
  private:
   enum class State {
@@ -98,11 +102,13 @@ class ClientFrameDecoder {
   DecodeError fail(DecodeError error);
   DecodeError finish_length();
   DecodeError finish_frame(std::vector<Message>& output);
+  void prepare_fragment_storage(std::size_t required_capacity);
   void reset_frame();
 
   std::size_t max_message_bytes_;
   PayloadSensitivity sensitivity_ = PayloadSensitivity::NonSensitive;
   CleanseObserver* cleanse_observer_ = nullptr;
+  std::size_t max_reusable_payload_bytes_ = 0;
   State state_ = State::FirstHeaderByte;
   bool terminal_ = false;
   bool final_ = false;
@@ -117,6 +123,7 @@ class ClientFrameDecoder {
   std::array<std::byte, 4> mask_{};
   std::size_t mask_received_ = 0;
   std::vector<std::byte> payload_;
+  std::vector<std::byte> reusable_payload_;
   bool fragment_open_ = false;
   Opcode fragmented_opcode_ = Opcode::Continuation;
   std::vector<std::byte> fragment_payload_;

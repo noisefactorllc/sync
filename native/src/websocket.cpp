@@ -366,25 +366,43 @@ std::string websocket_accept_key(std::string_view key) {
 
 ClientFrameDecoder::ClientFrameDecoder(std::size_t max_message_bytes,
                                        PayloadSensitivity sensitivity,
-                                       CleanseObserver* cleanse_observer)
+                                       CleanseObserver* cleanse_observer,
+                                       std::size_t max_reusable_payload_bytes)
     : max_message_bytes_(max_message_bytes),
       sensitivity_(sensitivity),
-      cleanse_observer_(cleanse_observer) {
+      cleanse_observer_(cleanse_observer),
+      max_reusable_payload_bytes_(
+          std::min(max_message_bytes, max_reusable_payload_bytes)) {
   if (max_message_bytes == 0) {
     throw std::invalid_argument("WebSocket message limit must be nonzero");
   }
 }
 
+void ClientFrameDecoder::prepare_fragment_storage(
+    std::size_t required_capacity) {
+  if (fragment_payload_.capacity() >= required_capacity) return;
+  if (fragment_payload_.empty() &&
+      reusable_payload_.capacity() >= required_capacity) {
+    fragment_payload_.swap(reusable_payload_);
+    return;
+  }
+  std::vector<std::byte>().swap(reusable_payload_);
+  fragment_payload_.reserve(required_capacity);
+}
+
 ClientFrameDecoder::~ClientFrameDecoder() noexcept {
   secure_cleanse(payload_, cleanse_observer_);
+  secure_cleanse(reusable_payload_, cleanse_observer_);
   secure_cleanse(fragment_payload_, cleanse_observer_);
 }
 
 DecodeError ClientFrameDecoder::fail(DecodeError error) {
   terminal_ = true;
   secure_cleanse(payload_, cleanse_observer_);
+  secure_cleanse(reusable_payload_, cleanse_observer_);
   secure_cleanse(fragment_payload_, cleanse_observer_);
   payload_.clear();
+  reusable_payload_.clear();
   fragment_payload_.clear();
   return error;
 }
@@ -418,9 +436,8 @@ DecodeError ClientFrameDecoder::finish_length() {
         fragment_payload_.reserve(max_message_bytes_);
       }
     } else {
-      fragment_payload_.reserve(
-          fragment_payload_.size() +
-          static_cast<std::size_t>(payload_length_));
+      prepare_fragment_storage(
+          fragment_payload_.size() + static_cast<std::size_t>(payload_length_));
     }
   } else if (!control_) {
     if (fragment_open_) {
@@ -439,12 +456,20 @@ DecodeError ClientFrameDecoder::finish_length() {
           fragment_payload_.reserve(max_message_bytes_);
         }
       } else {
-        fragment_payload_.reserve(static_cast<std::size_t>(payload_length_));
+        prepare_fragment_storage(static_cast<std::size_t>(payload_length_));
       }
     } else {
+      if (payload_.capacity() < payload_length_ &&
+          reusable_payload_.capacity() >= payload_length_) {
+        payload_.swap(reusable_payload_);
+      }
       payload_.reserve(static_cast<std::size_t>(payload_length_));
     }
   } else {
+    if (payload_.capacity() < payload_length_ &&
+        reusable_payload_.capacity() >= payload_length_) {
+      payload_.swap(reusable_payload_);
+    }
     payload_.reserve(static_cast<std::size_t>(payload_length_));
   }
   state_ = State::Mask;
@@ -497,7 +522,42 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
     return DecodeError::Terminal;
   }
 
-  for (const auto byte : bytes) {
+  std::size_t position = 0;
+  while (position < bytes.size()) {
+    if (state_ == State::Payload) {
+      const std::size_t remaining =
+          static_cast<std::size_t>(payload_length_) - payload_received_;
+      const std::size_t count = std::min(remaining, bytes.size() - position);
+      std::vector<std::byte>& destination =
+          !control_ && (!final_ || opcode_ == Opcode::Continuation)
+              ? fragment_payload_
+              : payload_;
+      const std::size_t destination_offset = destination.size();
+      destination.resize(destination_offset + count);
+      const std::byte* const source = bytes.data() + position;
+      std::byte* const target = destination.data() + destination_offset;
+      const std::size_t phase = payload_received_ & 3U;
+      std::size_t index = 0;
+      for (; index + 4 <= count; index += 4) {
+        target[index] = source[index] ^ mask_[phase];
+        target[index + 1] = source[index + 1] ^ mask_[(phase + 1) & 3U];
+        target[index + 2] = source[index + 2] ^ mask_[(phase + 2) & 3U];
+        target[index + 3] = source[index + 3] ^ mask_[(phase + 3) & 3U];
+      }
+      for (; index < count; ++index) {
+        target[index] = source[index] ^ mask_[(phase + index) & 3U];
+      }
+      position += count;
+      payload_received_ += count;
+      if (payload_received_ == payload_length_) {
+        if (const auto error = finish_frame(output); error != DecodeError::None) {
+          return error;
+        }
+      }
+      continue;
+    }
+
+    const auto byte = bytes[position++];
     const auto raw = std::to_integer<std::uint8_t>(byte);
     switch (state_) {
       case State::FirstHeaderByte: {
@@ -558,24 +618,22 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
           }
         }
         break;
-      case State::Payload: {
-        const auto unmasked = byte ^ mask_[payload_received_ % mask_.size()];
-        if (!control_ && (!final_ || opcode_ == Opcode::Continuation)) {
-          fragment_payload_.push_back(unmasked);
-        } else {
-          payload_.push_back(unmasked);
-        }
-        ++payload_received_;
-        if (payload_received_ == payload_length_) {
-          if (const auto error = finish_frame(output); error != DecodeError::None) {
-            return error;
-          }
-        }
+      case State::Payload:
         break;
-      }
     }
   }
   return DecodeError::None;
+}
+
+void ClientFrameDecoder::recycle_payload(std::vector<std::byte>& payload) noexcept {
+  if (sensitivity_ == PayloadSensitivity::Sensitive ||
+      payload.capacity() > max_reusable_payload_bytes_) {
+    return;
+  }
+  payload.clear();
+  if (payload.capacity() > reusable_payload_.capacity()) {
+    reusable_payload_.swap(payload);
+  }
 }
 
 void cleanse_message_payloads(std::span<Message> messages,

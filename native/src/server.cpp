@@ -39,7 +39,7 @@ constexpr std::size_t kMaximumPairingCooldowns = 64;
 constexpr std::size_t kMaximumControlMessageBytes = 16U * 1024U;
 constexpr std::size_t kMaximumDataMessageBytes = 64U * 1024U * 1024U + 64U;
 constexpr std::size_t kMaximumQueuedWriteBytes = 64U * 1024U;
-constexpr std::size_t kReadBufferBytes = 16U * 1024U;
+constexpr std::size_t kReadBufferBytes = 64U * 1024U;
 constexpr std::uint64_t kHttpHeaderDeadlineMs = 1000;
 constexpr std::uint64_t kControlHelloDeadlineMs = 1000;
 constexpr std::uint64_t kPairingRequestDeadlineMs = 1000;
@@ -96,6 +96,7 @@ struct Connection {
   DeadlineKind deadline_kind = DeadlineKind::None;
   std::uint64_t deadline_ms = 0;
   std::size_t pending_write_bytes = 0;
+  std::array<char, kReadBufferBytes> read_buffer{};
   std::string http_buffer;
   std::unique_ptr<websocket::ClientFrameDecoder> decoder;
   std::optional<std::size_t> sender_slot;
@@ -572,12 +573,20 @@ class Server {
   }
 
   static void on_deadline_sweep(uv_timer_t* timer) {
-    static_cast<Server*>(timer->data)->sweep_deadlines();
+    auto *server = static_cast<Server *>(timer->data);
+    if (server->options_.platform_event_pump != nullptr) {
+      server->options_.platform_event_pump(
+          server->options_.platform_event_pump_context);
+    }
+    server->sweep_deadlines();
   }
 
-  static void allocate_read_buffer(uv_handle_t*, std::size_t, uv_buf_t* buffer) {
-    char* bytes = new (std::nothrow) char[kReadBufferBytes];
-    *buffer = uv_buf_init(bytes, bytes == nullptr ? 0 : static_cast<unsigned int>(kReadBufferBytes));
+  static void allocate_read_buffer(uv_handle_t* handle,
+                                   std::size_t,
+                                   uv_buf_t* buffer) {
+    auto* connection = static_cast<Connection*>(handle->data);
+    *buffer = uv_buf_init(connection->read_buffer.data(),
+                          static_cast<unsigned int>(connection->read_buffer.size()));
   }
 
   static void on_read(uv_stream_t* stream, ssize_t count, const uv_buf_t* buffer) {
@@ -593,7 +602,6 @@ class Server {
     } else if (count < 0) {
       connection->server.close_connection(*connection);
     }
-    delete[] buffer->base;
   }
 
   static void on_write(uv_write_t *request, int status) {
@@ -1397,6 +1405,7 @@ class Server {
           start_websocket_close(connection, 1003);
         } else {
           handle_data_message(connection, message.payload);
+          connection.decoder->recycle_payload(message.payload);
         }
       }
     }

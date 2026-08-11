@@ -5,6 +5,7 @@
 #include <sync/server.hpp>
 
 #if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
 #include <sync/platform/metal_frame_consumer.hpp>
 #include <sync/platform/metal_frame_publisher.hpp>
 #include <sync/platform/pairing_prompt.hpp>
@@ -23,6 +24,18 @@
 namespace {
 
 #if defined(__APPLE__)
+void pump_macos_events(void *) noexcept {
+  @autoreleasepool {
+    constexpr std::size_t kMaximumSourcesPerPump = 16;
+    for (std::size_t index = 0; index < kMaximumSourcesPerPump; ++index) {
+      if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true) !=
+          kCFRunLoopRunHandledSource) {
+        break;
+      }
+    }
+  }
+}
+
 int run_syphon(noisefactor::sync::ServerOptions& options,
                std::string_view framework_path) {
   noisefactor::sync::SyphonMetalConsumer syphon({
@@ -40,6 +53,7 @@ int run_syphon(noisefactor::sync::ServerOptions& options,
       .selected = true,
   };
   options.provider_count = 1;
+  options.platform_event_pump = pump_macos_events;
   return noisefactor::sync::run_server(options, &hub);
 }
 #endif

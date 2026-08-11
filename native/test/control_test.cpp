@@ -301,7 +301,7 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
   SYNC_REQUIRE(
       control::encode_welcome(1, noisefactor::sync::kProductVersion,
                               "instance-a", providers) ==
-      "{\"type\":\"welcome\",\"protocolVersion\":1,\"version\":\"0.1.0\","
+      "{\"type\":\"welcome\",\"protocolVersion\":1,\"version\":\"0.1.2\","
       "\"instanceId\":\"instance-a\",\"capabilities\":{\"send\":true,"
       "\"receive\":false,\"providers\":[{\"id\":\"test\",\"direction\":"
       "\"send\","
@@ -309,7 +309,7 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
   SYNC_REQUIRE(
       control::encode_health(noisefactor::sync::kProductVersion, "instance-a",
                              providers) ==
-      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"0.1.0\","
+      "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"0.1.2\","
       "\"protocolVersions\":[1],\"instanceId\":\"instance-a\","
       "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[{"
       "\"id\":\"test\",\"direction\":\"send\",\"available\":true,"

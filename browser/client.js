@@ -422,18 +422,35 @@ function validatePairingName(name) {
   }
 }
 
-function validateSinkOptions({ exportQueue, maxBufferedBytes, clock = globalThis.performance } = {}) {
+function validateSinkOptions({
+  exportQueue,
+  maxBufferedBytes,
+  maxBufferedFrames,
+  clock = globalThis.performance,
+} = {}) {
   if (!exportQueue || typeof exportQueue.available !== 'boolean' ||
       !['configure', 'enqueue', 'poll', 'close'].every((method) => typeof exportQueue[method] === 'function')) {
     throw new SyncConfigurationError('exportQueue is invalid');
   }
-  if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes <= 0) {
+  const hasByteBudget = maxBufferedBytes !== undefined;
+  const hasFrameBudget = maxBufferedFrames !== undefined;
+  if (hasByteBudget === hasFrameBudget) {
+    throw new SyncConfigurationError(
+      'exactly one buffered-byte or buffered-frame limit is required',
+    );
+  }
+  if (hasByteBudget &&
+      (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes <= 0)) {
     throw new SyncConfigurationError('maxBufferedBytes must be a positive safe integer');
+  }
+  if (hasFrameBudget &&
+      (!Number.isSafeInteger(maxBufferedFrames) || maxBufferedFrames <= 0)) {
+    throw new SyncConfigurationError('maxBufferedFrames must be a positive safe integer');
   }
   if (!clock || typeof clock.timeOrigin !== 'number' || !Number.isFinite(clock.timeOrigin) || clock.timeOrigin < 0) {
     throw new SyncConfigurationError('clock.timeOrigin must be finite and non-negative');
   }
-  return { exportQueue, maxBufferedBytes, clock };
+  return { exportQueue, maxBufferedBytes, maxBufferedFrames, clock };
 }
 
 function runWithTimeout(operation, timeoutMs, description, onTimeout, signal) {

@@ -7,6 +7,7 @@ import {
 
 const SOCKET_OPEN = 1;
 const MAX_UINT32 = 0xffffffff;
+const HEADER_BYTES = 64;
 
 const COLOR_SPACE_ENUM = Object.freeze({
   srgb: COLOR_SPACE.SRGB,
@@ -79,11 +80,27 @@ function validFrame(frame, descriptor) {
 }
 
 export class SyncFrameSink {
-  constructor({ socket, exportQueue, maxBufferedBytes, clock = globalThis.performance } = {}) {
+  constructor({
+    socket,
+    exportQueue,
+    maxBufferedBytes,
+    maxBufferedFrames,
+    clock = globalThis.performance,
+  } = {}) {
     validateSocket(socket);
     validateExportQueue(exportQueue);
-    if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes <= 0) {
+    const hasByteBudget = maxBufferedBytes !== undefined;
+    const hasFrameBudget = maxBufferedFrames !== undefined;
+    if (hasByteBudget === hasFrameBudget) {
+      throw new RangeError('exactly one buffered-byte or buffered-frame limit is required');
+    }
+    if (hasByteBudget &&
+        (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes <= 0)) {
       throw new RangeError('maxBufferedBytes must be a positive safe integer');
+    }
+    if (hasFrameBudget &&
+        (!Number.isSafeInteger(maxBufferedFrames) || maxBufferedFrames <= 0)) {
+      throw new RangeError('maxBufferedFrames must be a positive safe integer');
     }
     if (!clock || typeof clock.timeOrigin !== 'number' ||
         !Number.isFinite(clock.timeOrigin) || clock.timeOrigin < 0) {
@@ -92,9 +109,11 @@ export class SyncFrameSink {
 
     this._socket = socket;
     this._exportQueue = exportQueue;
-    this._maxBufferedBytes = maxBufferedBytes;
+    this._maxBufferedBytes = maxBufferedBytes ?? null;
+    this._maxBufferedFrames = maxBufferedFrames ?? null;
     this._timeOrigin = clock.timeOrigin;
     this._descriptor = null;
+    this._encodedFrameBytes = null;
     this._sequence = 0;
     this._closed = false;
     this._onFrame = (frame, timestamp, sequence) => {
@@ -112,6 +131,10 @@ export class SyncFrameSink {
   configure(descriptor) {
     validateDescriptor(descriptor);
     this._descriptor = descriptor;
+    const payloadBytes = descriptor.width * descriptor.height * 4;
+    this._encodedFrameBytes = Number.isSafeInteger(payloadBytes)
+      ? HEADER_BYTES + payloadBytes
+      : Number.MAX_SAFE_INTEGER;
     this._exportQueue.configure(descriptor);
   }
 
@@ -128,7 +151,8 @@ export class SyncFrameSink {
       this.stats.failed += 1;
       return false;
     }
-    if (this._socket.bufferedAmount > this._maxBufferedBytes) {
+    if (this._encodedFrameBytes !== null &&
+        this._wouldExceedBufferedBudget(this._encodedFrameBytes)) {
       this.stats.droppedBackpressure += 1;
       return false;
     }
@@ -178,7 +202,8 @@ export class SyncFrameSink {
         this.stats.failed += 1;
         return;
       }
-      if (this._socket.bufferedAmount > this._maxBufferedBytes) {
+      const encodedFrameBytes = HEADER_BYTES + frame.data.byteLength;
+      if (this._wouldExceedBufferedBudget(encodedFrameBytes)) {
         this.stats.droppedBackpressure += 1;
         return;
       }
@@ -198,7 +223,7 @@ export class SyncFrameSink {
         this.stats.failed += 1;
         return;
       }
-      if (this._socket.bufferedAmount > this._maxBufferedBytes) {
+      if (this._wouldExceedBufferedBudget(message.byteLength)) {
         this.stats.droppedBackpressure += 1;
         return;
       }
@@ -208,5 +233,16 @@ export class SyncFrameSink {
     } catch {
       this.stats.failed += 1;
     }
+  }
+
+  _wouldExceedBufferedBudget(additionalBytes) {
+    const frameBudget = this._encodedFrameBytes === null
+      ? 0
+      : this._encodedFrameBytes * this._maxBufferedFrames;
+    const limit = this._maxBufferedBytes ?? (
+      Number.isSafeInteger(frameBudget) ? frameBudget : Number.MAX_SAFE_INTEGER
+    );
+    return additionalBytes > limit ||
+      this._socket.bufferedAmount > limit - additionalBytes;
   }
 }

@@ -150,10 +150,62 @@ test('constructor validates transport dependencies, pressure limit, and clock', 
   for (const maxBufferedBytes of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => new SyncFrameSink({ ...valid, maxBufferedBytes }), RangeError);
   }
+  for (const maxBufferedFrames of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => new SyncFrameSink({
+      socket,
+      exportQueue,
+      maxBufferedFrames,
+      clock: { timeOrigin: 0 },
+    }), RangeError);
+  }
+  assert.throws(() => new SyncFrameSink({
+    ...valid,
+    maxBufferedFrames: 1,
+  }), RangeError);
+  assert.doesNotThrow(() => new SyncFrameSink({
+    socket,
+    exportQueue,
+    maxBufferedFrames: 1,
+    clock: { timeOrigin: 0 },
+  }));
   for (const timeOrigin of [-1, Infinity, Number.NaN, '0']) {
     assert.throws(() => new SyncFrameSink({ ...valid, clock: { timeOrigin } }), RangeError);
   }
   assert.doesNotThrow(() => new SyncFrameSink(valid));
+});
+
+test('one-frame pressure budget follows live resize in both directions', () => {
+  const socket = new MemorySocket();
+  const exportQueue = new MemoryExportQueue();
+  const sink = new SyncFrameSink({
+    socket,
+    exportQueue,
+    maxBufferedFrames: 1,
+    clock: { timeOrigin: 0 },
+  });
+  const configure = (width, height) => sink.configure({
+    ...DESCRIPTOR,
+    width,
+    height,
+  });
+  const complete = (width, height) => exportQueue.complete({
+    width,
+    height,
+    rowStride: width * 4,
+    data: new Uint8Array(width * height * 4),
+  });
+
+  configure(2, 2);
+  configure(4, 4);
+  assert.equal(sink.submit('larger', 1), true);
+  complete(4, 4);
+  assert.equal(socket.sent.length, 1);
+
+  configure(2, 2);
+  socket.bufferedAmount = 1;
+  assert.equal(sink.submit('smaller', 2), false);
+  assert.equal(exportQueue.pending.length, 0);
+  assert.equal(sink.stats.droppedBackpressure, 1);
 });
 
 test('configure validates one v1 descriptor and forwards the identical object', () => {
@@ -198,6 +250,16 @@ test('submit is synchronous, polls first, and drops before readback under socket
   });
 });
 
+test('submit reserves the full encoded frame budget before starting readback', () => {
+  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 80 });
+  socket.bufferedAmount = 1;
+
+  assert.equal(sink.submit('texture', 12.5), false);
+  assert.equal(exportQueue.polls, 1);
+  assert.equal(exportQueue.pending.length, 0);
+  assert.equal(sink.stats.droppedBackpressure, 1);
+});
+
 test('submit drops busy when the bounded export ring has no slot', () => {
   const exportQueue = new MemoryExportQueue({ capacity: 1 });
   const { sink } = configuredSink({ exportQueue });
@@ -229,9 +291,9 @@ test('enqueue failure is contained and counted as failed', () => {
 });
 
 test('post-readback pressure drops a frame immediately without sending it', () => {
-  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 10 });
+  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 80 });
   assert.equal(sink.submit('texture', 10), true);
-  socket.bufferedAmount = 11;
+  socket.bufferedAmount = 1;
 
   assert.doesNotThrow(() => exportQueue.complete(FRAME));
   assert.equal(socket.sent.length, 0);
@@ -282,11 +344,11 @@ test('accepted completion sends the exact v1 header and payload', () => {
 });
 
 test('two dropped attempts produce a visible sequence gap and reuse one completion callback', () => {
-  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 10 });
+  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 80 });
 
   assert.equal(sink.submit('first', 1), true);
   exportQueue.complete(FRAME);
-  socket.bufferedAmount = 11;
+  socket.bufferedAmount = 1;
   assert.equal(sink.submit('drop-one', 2), false);
   assert.equal(sink.submit('drop-two', 3), false);
   socket.bufferedAmount = 0;

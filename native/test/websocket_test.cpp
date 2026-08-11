@@ -116,6 +116,30 @@ std::vector<std::byte> masked_frame(bool final,
   return frame;
 }
 
+std::vector<std::byte> masked_binary_frame(std::size_t payload_size) {
+  const std::array<std::uint8_t, 4> mask = {0x11, 0x22, 0x33, 0x44};
+  std::vector<std::byte> frame = {std::byte{0x82}};
+  if (payload_size <= 65'535) {
+    frame.push_back(std::byte{0xfe});
+    frame.push_back(static_cast<std::byte>((payload_size >> 8U) & 0xffU));
+    frame.push_back(static_cast<std::byte>(payload_size & 0xffU));
+  } else {
+    frame.push_back(std::byte{0xff});
+    for (int shift = 56; shift >= 0; shift -= 8) {
+      frame.push_back(static_cast<std::byte>((payload_size >> shift) & 0xffU));
+    }
+  }
+  for (const std::uint8_t byte : mask) {
+    frame.push_back(static_cast<std::byte>(byte));
+  }
+  frame.reserve(frame.size() + payload_size);
+  for (std::size_t index = 0; index < payload_size; ++index) {
+    const auto value = static_cast<std::uint8_t>(index & 0xffU);
+    frame.push_back(static_cast<std::byte>(value ^ mask[index % mask.size()]));
+  }
+  return frame;
+}
+
 void require_invalid_client_close(std::initializer_list<std::uint8_t> payload) {
   ws::ClientFrameDecoder decoder(256);
   std::vector<ws::Message> output;
@@ -341,6 +365,86 @@ SYNC_TEST(client_decoder_accepts_a_literal_64_bit_65536_byte_length) {
   SYNC_REQUIRE(output[0].payload.size() == 65536);
   SYNC_REQUIRE(value(output[0].payload.front()) == 0xc3);
   SYNC_REQUIRE(value(output[0].payload.back()) == 0xc3);
+}
+
+SYNC_TEST(client_decoder_preserves_mask_alignment_across_large_tcp_chunks) {
+  constexpr std::size_t kPayloadBytes = 100'003;
+  const auto input = masked_binary_frame(kPayloadBytes);
+  ws::ClientFrameDecoder decoder(kPayloadBytes);
+  std::vector<ws::Message> output;
+  constexpr std::array<std::size_t, 7> chunk_sizes = {1, 2, 7, 16'381, 5, 32'769, 8191};
+  std::size_t offset = 0;
+  std::size_t chunk_index = 0;
+  while (offset < input.size()) {
+    const std::size_t count =
+        std::min(chunk_sizes[chunk_index++ % chunk_sizes.size()], input.size() - offset);
+    SYNC_REQUIRE(decoder.feed(std::span(input).subspan(offset, count), output) ==
+                 ws::DecodeError::None);
+    offset += count;
+  }
+
+  SYNC_REQUIRE(output.size() == 1);
+  SYNC_REQUIRE(output[0].payload.size() == kPayloadBytes);
+  for (std::size_t index = 0; index < output[0].payload.size(); ++index) {
+    SYNC_REQUIRE(value(output[0].payload[index]) == (index & 0xffU));
+  }
+}
+
+SYNC_TEST(client_decoder_reuses_recycled_nonsensitive_message_storage) {
+  constexpr std::size_t kPayloadBytes = 65'537;
+  const auto input = masked_binary_frame(kPayloadBytes);
+  ws::ClientFrameDecoder decoder(kPayloadBytes);
+  std::vector<ws::Message> output;
+
+  SYNC_REQUIRE(decoder.feed(input, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  const std::byte* const first_storage = output[0].payload.data();
+  decoder.recycle_payload(output[0].payload);
+  SYNC_REQUIRE(output[0].payload.empty());
+
+  output.clear();
+  SYNC_REQUIRE(decoder.feed(input, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  SYNC_REQUIRE(output[0].payload.data() == first_storage);
+  SYNC_REQUIRE(value(output[0].payload[65'536]) == 0);
+}
+
+SYNC_TEST(client_decoder_does_not_retain_recycled_storage_above_its_reuse_limit) {
+  constexpr std::size_t kPayloadBytes = 257;
+  const auto input = masked_binary_frame(kPayloadBytes);
+  ws::ClientFrameDecoder decoder(
+      1024, ws::PayloadSensitivity::NonSensitive, nullptr, 256);
+  std::vector<ws::Message> output;
+
+  SYNC_REQUIRE(decoder.feed(input, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  decoder.recycle_payload(output[0].payload);
+
+  SYNC_REQUIRE(output[0].payload.size() == kPayloadBytes);
+}
+
+SYNC_TEST(client_decoder_consumes_recycled_storage_for_a_fragmented_message) {
+  const auto complete = masked_frame(
+      true, ws::Opcode::Binary, std::string(64, 'x'));
+  ws::ClientFrameDecoder decoder(
+      128, ws::PayloadSensitivity::NonSensitive, nullptr, 128);
+  std::vector<ws::Message> output;
+
+  SYNC_REQUIRE(decoder.feed(complete, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  const std::byte* const recycled_storage = output[0].payload.data();
+  decoder.recycle_payload(output[0].payload);
+  output.clear();
+
+  const auto first = masked_frame(false, ws::Opcode::Binary,
+                                  "0123456789abcdefghijklmnopqrstuv");
+  const auto final = masked_frame(true, ws::Opcode::Continuation,
+                                  "wxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01");
+  SYNC_REQUIRE(decoder.feed(first, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(decoder.feed(final, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  SYNC_REQUIRE(output[0].payload.size() == 64);
+  SYNC_REQUIRE(output[0].payload.data() == recycled_storage);
 }
 
 SYNC_TEST(client_decoder_reassembles_fragmented_binary_around_an_interleaved_ping) {

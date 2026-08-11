@@ -13,7 +13,7 @@ class PairingAuthority;
 class PairingPrompt;
 } // namespace pairing
 
-inline constexpr std::string_view kProductVersion = "0.1.0";
+inline constexpr std::string_view kProductVersion = "0.1.2";
 inline constexpr std::size_t kMaximumProviderCapabilities = 4;
 inline constexpr std::size_t kMaximumProviderIdBytes = 32;
 
@@ -38,6 +38,8 @@ struct ServerOptions {
   std::size_t provider_count = 0;
   pairing::PairingAuthority *pairing_authority = nullptr;
   pairing::PairingPrompt *pairing_prompt = nullptr;
+  void (*platform_event_pump)(void *context) noexcept = nullptr;
+  void *platform_event_pump_context = nullptr;
 };
 
 class FramePublisher;

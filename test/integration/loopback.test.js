@@ -1235,7 +1235,7 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     const expectedHealth = {
       product: "Sync",
       status: "ok",
-      version: "0.1.0",
+      version: "0.1.2",
       protocolVersions: [1],
       instanceId: ready.instanceId,
       capabilities: {
@@ -1291,7 +1291,7 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     assert.deepEqual(await control.client.nextJson("welcome"), {
       type: "welcome",
       protocolVersion: 1,
-      version: "0.1.0",
+      version: "0.1.2",
       instanceId: ready.instanceId,
       capabilities: expectedHealth.capabilities,
     });
@@ -1725,7 +1725,7 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     const response = await health("127.0.0.1", daemon.ready.port, ORIGIN);
     assert.equal(response.status, 200);
     const healthBody = JSON.parse(response.body.toString("utf8"));
-    assert.equal(healthBody.version, "0.1.0");
+    assert.equal(healthBody.version, "0.1.2");
     assert.equal(healthBody.capabilities.receive, false);
     assert.deepEqual(healthBody.capabilities.providers, [{
       id: "syphon",
@@ -1744,7 +1744,7 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     sockets.add(control.client);
     control.client.sendJson({ type: "hello", token: TOKEN, protocolVersions: [1] });
     const welcome = await control.client.nextJson("Syphon welcome");
-    assert.equal(welcome.version, "0.1.0");
+    assert.equal(welcome.version, "0.1.2");
     assert.deepEqual(welcome.capabilities, healthBody.capabilities);
     control.client.sendJson({ type: "createSender", name: "Syphon Integration" });
     const creation = await control.client.nextJson("Syphon sender result");
