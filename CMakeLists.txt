@@ -4,6 +4,8 @@ project(noisefactor_sync_protocol VERSION 0.2.0 LANGUAGES CXX)
 
 set(SYNC_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
     "Sync product version reported by the native companion")
+set(SYNC_SYPHON_FRAMEWORK_PATH "" CACHE PATH
+    "Path to the Syphon.framework bundled by the macOS packaging target")
 
 find_package(Threads REQUIRED)
 
@@ -162,6 +164,38 @@ if(APPLE)
     sync_companion_process ${APPKIT_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK} ${SERVICE_MANAGEMENT_FRAMEWORK}
   )
+
+  set(SYNC_PACKAGE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/package)
+  set(SYNC_BUNDLE_STAMP ${SYNC_PACKAGE_DIRECTORY}/.sync-bundle-complete)
+  set(SYNC_DMG_PATH
+      ${SYNC_PACKAGE_DIRECTORY}/Sync-${SYNC_PRODUCT_VERSION}-arm64.dmg)
+  add_custom_command(
+    OUTPUT ${SYNC_BUNDLE_STAMP}
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-macos.sh bundle
+      ${CMAKE_CURRENT_BINARY_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${SYNC_PRODUCT_VERSION}
+      ${SYNC_SYPHON_FRAMEWORK_PATH}
+    DEPENDS
+      sync_menu syncd
+      LICENSE
+      packaging/macos/Sync.svg
+      packaging/macos/Third-Party-Notices.txt
+      scripts/package-macos.sh
+      scripts/verify-macos-bundle.sh
+    VERBATIM
+  )
+  add_custom_target(sync_macos_bundle DEPENDS ${SYNC_BUNDLE_STAMP})
+  add_custom_command(
+    OUTPUT ${SYNC_DMG_PATH}
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-macos.sh dmg
+      ${CMAKE_CURRENT_BINARY_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${SYNC_PRODUCT_VERSION}
+    DEPENDS ${SYNC_BUNDLE_STAMP}
+    VERBATIM
+  )
+  add_custom_target(sync_macos_dmg DEPENDS ${SYNC_DMG_PATH})
 
   add_library(sync_pairing_prompt
     native/src/platform/macos/pairing_prompt.mm

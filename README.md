@@ -15,11 +15,13 @@ Sync is under active development. This source tree currently includes:
   and sender-data sockets;
 - a native C++20 loopback daemon with per-origin, revocable authorization;
 - bounded sender and connection ownership with non-blocking browser submission;
-- a macOS Metal publisher and dynamically discovered Syphon integration; and
+- a macOS Metal publisher and dynamically discovered Syphon integration;
+- an Apple Silicon menu-bar companion with bounded helper supervision; and
 - native, browser, protocol, security-boundary, and real-loopback tests.
 
-Signed desktop packaging, Windows/Spout, NDI, and reverse-direction native
-sources are not part of the current public implementation.
+The macOS companion is a preview and is not ready for general use. Windows/
+Spout, NDI, reverse-direction native sources, and automatic updates are not
+part of the current public implementation.
 
 ## Building the native daemon
 
@@ -42,9 +44,31 @@ The daemon binds only to IPv4 and IPv6 loopback. Production mode uses port
 ./build/syncd --revoke-origin https://visuals.example
 ```
 
-Syphon is discovered dynamically rather than linked or bundled. See
-[docs/dependencies/syphon.md](docs/dependencies/syphon.md) for the runtime and
-license boundary.
+The daemon discovers Syphon dynamically rather than linking against it. The
+installable companion supplies a pinned framework inside its private bundle.
+See [docs/dependencies/syphon.md](docs/dependencies/syphon.md) for the runtime
+and license boundary.
+
+## Packaging the macOS preview
+
+Packaging requires macOS 13 or newer, an Apple Silicon build, `dylibbundler`,
+`librsvg`, and a locally built `Syphon.framework`. The release workflow pins
+Syphon source revision `71351d4b484cd2d1917867f7846a5cdca724552d`; use that
+same revision for local release-equivalent packages.
+
+```bash
+cmake -S . -B build-package \
+  -DSYNC_PRODUCT_VERSION=0.2.0 \
+  -DSYNC_SYPHON_FRAMEWORK_PATH=/absolute/path/to/Syphon.framework
+cmake --build build-package --target sync_macos_dmg -j4
+SYNC_PACKAGE_DIR=build-package/package \
+  node --test test/packaging/macos-package.test.js
+scripts/smoke-macos-app.sh "$PWD/build-package/package/Sync.app"
+```
+
+The local target creates an unsigned app and DMG. Developer ID signing,
+notarization, stapling, and public publication belong to the Noise Factor
+release workflow so credentials never enter this public repository.
 
 ## Browser SDK
 

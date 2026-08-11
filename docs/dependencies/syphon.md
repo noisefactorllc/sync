@@ -1,8 +1,13 @@
 # Syphon runtime integration
 
-Sync discovers `Syphon.framework` dynamically at runtime on macOS. This source tree does not import
-Syphon headers, link `Syphon.framework` at build time, or bundle Syphon source or binaries. Packaging
-that supplies the framework must separately satisfy Syphon's license and distribution requirements.
+Sync discovers `Syphon.framework` dynamically at runtime on macOS. The native
+code does not import Syphon headers or link `Syphon.framework` at build time.
+The installable preview builds official Syphon revision
+`71351d4b484cd2d1917867f7846a5cdca724552d`, embeds the resulting framework in
+`Sync.app/Contents/Frameworks`, and preserves its complete redistribution
+license in `packaging/macos/Third-Party-Notices.txt` and in every app and DMG.
+Source-only daemon builds may continue to supply another compatible framework
+at runtime.
 
 The runtime boundary is based on the documented `SyphonMetalServer` selectors in the official
 [`SyphonMetalServer.h`](https://github.com/Syphon/Syphon-Framework/blob/main/SyphonMetalServer.h).

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="surface" x1="120" y1="80" x2="880" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#171a24"/>
+      <stop offset="1" stop-color="#05060a"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="265" y1="284" x2="787" y2="741" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#55f5cf"/>
+      <stop offset="0.5" stop-color="#5ca9ff"/>
+      <stop offset="1" stop-color="#b46cff"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="20" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.25 0 0 0 0 0.7 0 0 0 0 1 0 0 0 0.55 0"/>
+    </filter>
+  </defs>
+  <rect x="56" y="56" width="912" height="912" rx="220" fill="url(#surface)"/>
+  <path d="M286 426c43-119 175-183 294-140 38 14 72 36 99 65l52-52 27 177-177-27 55-55c-22-21-48-37-78-48-88-32-186 15-218 103z"
+        fill="url(#signal)" opacity="0.38" filter="url(#glow)"/>
+  <path d="M738 598c-43 119-175 183-294 140-38-14-72-36-99-65l-52 52-27-177 177 27-55 55c22 21 48 37 78 48 88 32 186-15 218-103z"
+        fill="url(#signal)" opacity="0.38" filter="url(#glow)"/>
+  <path d="M286 426c43-119 175-183 294-140 38 14 72 36 99 65l52-52 27 177-177-27 55-55c-22-21-48-37-78-48-88-32-186 15-218 103z"
+        fill="url(#signal)"/>
+  <path d="M738 598c-43 119-175 183-294 140-38-14-72-36-99-65l-52 52-27-177 177 27-55 55c22 21 48 37 78 48 88 32 186-15 218-103z"
+        fill="url(#signal)"/>
+  <circle cx="512" cy="512" r="68" fill="#0b0d14" stroke="#d6fff8" stroke-width="18"/>
+</svg>
