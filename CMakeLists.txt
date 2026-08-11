@@ -92,17 +92,76 @@ target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol PkgConfig::
 if(APPLE)
   enable_language(OBJCXX)
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+  find_library(SERVICE_MANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
   find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
   find_library(METAL_FRAMEWORK Metal REQUIRED)
 
+  add_library(sync_companion_model
+    native/src/platform/macos/companion_model.cpp
+  )
+  target_compile_features(sync_companion_model PUBLIC cxx_std_20)
+  target_include_directories(sync_companion_model PUBLIC native/include)
+
   add_executable(sync_companion_model_tests
     native/test/macos/companion_model_test.cpp
-    native/src/platform/macos/companion_model.cpp
     native/test/test_main.cpp
   )
   target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)
-  target_include_directories(sync_companion_model_tests PRIVATE native/include)
+  target_link_libraries(sync_companion_model_tests PRIVATE sync_companion_model)
   add_test(NAME sync_companion_model_tests COMMAND sync_companion_model_tests)
+
+  add_library(sync_companion_process
+    native/src/platform/macos/companion_process.mm
+  )
+  target_compile_features(sync_companion_process PUBLIC cxx_std_20)
+  set_target_properties(sync_companion_process PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_companion_process PUBLIC
+    native/include native/src/platform/macos
+  )
+  target_compile_options(sync_companion_process PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_companion_process
+    PUBLIC sync_companion_model
+    PRIVATE sync_protocol ${FOUNDATION_FRAMEWORK}
+  )
+
+  add_executable(sync_companion_process_tests
+    native/test/macos/companion_process_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_companion_process_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_companion_process_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_companion_process_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_companion_process_tests PRIVATE
+    sync_companion_process ${FOUNDATION_FRAMEWORK}
+  )
+  add_test(NAME sync_companion_process_tests COMMAND sync_companion_process_tests)
+
+  configure_file(
+    packaging/macos/Info.plist.in
+    ${CMAKE_CURRENT_BINARY_DIR}/Sync-Info.plist
+    @ONLY
+  )
+  add_executable(sync_menu MACOSX_BUNDLE
+    native/src/platform/macos/app_main.mm
+  )
+  target_compile_features(sync_menu PRIVATE cxx_std_20)
+  set_target_properties(sync_menu PROPERTIES
+    OBJCXX_STANDARD 20
+    OUTPUT_NAME Sync
+    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Sync-Info.plist
+  )
+  target_compile_options(sync_menu PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_menu PRIVATE
+    sync_companion_process ${APPKIT_FRAMEWORK}
+    ${FOUNDATION_FRAMEWORK} ${SERVICE_MANAGEMENT_FRAMEWORK}
+  )
 
   add_library(sync_pairing_prompt
     native/src/platform/macos/pairing_prompt.mm
