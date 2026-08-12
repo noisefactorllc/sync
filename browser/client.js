@@ -407,20 +407,25 @@ function permissionState(value) {
   throw new SyncUnavailableError('Loopback permission state is unavailable');
 }
 
+// Labels reach surfaces the user reads to make a decision: the pairing name in
+// the daemon's native trust prompt, and the sender name in other applications'
+// source pickers. The daemon rejects invisible and bidirectional formatting
+// characters in both; reject them here too so callers see why rather than a
+// generic bad_request.
+const FORMATTING_CHARACTERS =
+  /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/u;
+
 function validateSenderName(name) {
   if (typeof name !== 'string' || name.length === 0 || !isWellFormedUnicode(name) ||
       utf8Length(name) > MAX_SENDER_NAME_BYTES ||
-      /[\u0000-\u001f\u007f-\u009f]/u.test(name)) {
-    throw new SyncConfigurationError('sender name must be 1-64 UTF-8 bytes without control characters');
+      /[\u0000-\u001f\u007f-\u009f]/u.test(name) ||
+      FORMATTING_CHARACTERS.test(name)) {
+    throw new SyncConfigurationError(
+      'sender name must be 1-64 UTF-8 bytes without control or formatting characters',
+    );
   }
 }
 
-// The daemon renders the pairing name inside its native trust prompt, directly
-// beneath the origin the user is asked to trust. It rejects invisible and
-// bidirectional formatting characters there; reject them here too so callers
-// see why rather than a generic bad_request.
-const FORMATTING_CHARACTERS =
-  /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/u;
 
 function validatePairingName(name) {
   if (typeof name !== 'string' || name.length === 0 || !isWellFormedUnicode(name) ||

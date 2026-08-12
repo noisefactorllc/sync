@@ -1,0 +1,85 @@
+name: CI
+
+# Every change to Sync is built and tested here before it can be released.
+# This repository is public and holds no deployment credential: releasing is
+# the Scaffold release harness's job, and it re-runs all of these gates against
+# the exact commit it is asked to ship.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: sync-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.name }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            build_type: Release
+            cxx_flags: ''
+          - name: Warnings as errors
+            build_type: Debug
+            cxx_flags: '-Wall -Wextra -Wpedantic -Werror'
+          - name: Address and undefined sanitizers
+            build_type: Debug
+            cxx_flags: '-fsanitize=address,undefined -fno-omit-frame-pointer'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install build dependencies
+        run: brew install cmake pkg-config openssl@3 libuv
+
+      - name: Configure and build
+        shell: bash
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+          EXTRA_CXX_FLAGS: ${{ matrix.cxx_flags }}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS"
+          cmake --build build --parallel 4
+
+      - name: Run native tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run browser SDK tests
+        run: npm run test:browser
+
+      - name: Run real-daemon loopback tests
+        run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint packaging and smoke scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning scripts/*.sh
+          for SCRIPT in scripts/*.sh; do bash -n "$SCRIPT"; done

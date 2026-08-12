@@ -1250,8 +1250,16 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
   try {
     daemon = await spawnDaemon();
     const { child, ready } = daemon;
-    assert.deepEqual(Object.keys(ready).sort(), ["instanceId", "port", "protocolVersions", "type"]);
+    assert.deepEqual(Object.keys(ready).sort(),
+                     ["instanceId", "loopback", "port", "protocolVersions", "type"]);
     assert.equal(ready.type, "ready");
+    // The daemon reports the stacks it actually bound, so a host that fell back
+    // to IPv4 is distinguishable from a dual-stack one instead of both looking
+    // identical. IPv4 is the contract and is always present.
+    assert.ok(Array.isArray(ready.loopback));
+    assert.ok(ready.loopback.includes("127.0.0.1"));
+    assert.deepEqual(ready.loopback, ready.loopback.filter(
+      (address) => address === "127.0.0.1" || address === "::1"));
     assert.ok(Number.isInteger(ready.port) && ready.port > 0 && ready.port <= 65_535);
     assert.deepEqual(ready.protocolVersions, [1]);
     assert.equal(typeof ready.instanceId, "string");

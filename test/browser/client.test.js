@@ -682,6 +682,20 @@ test('pair validates a bounded UTF-8 app label before any network operation', as
   }
 });
 
+test('createSender validates the label the daemon hands to other applications', async () => {
+  // The sender name becomes a Syphon server name in other applications' source
+  // pickers, so it carries the same rule as the pairing label.
+  const bridge = client({});
+  for (const name of ['', 'x'.repeat(65), 'bad\\nname',
+                      'Deck\u202e', 'Deck\u200b', 'Deck\u200f', 'Deck\u2066', 'Deck\u2060', 'Deck\ufeff']) {
+    assert.throws(() => bridge.createSender(name, {}), SyncConfigurationError,
+                  JSON.stringify(name));
+  }
+  assert.throws(() => bridge.createSender('Noisedeck Deck', {}), SyncConfigurationError,
+                'a valid label still reaches sink-option validation');
+  bridge.close();
+});
+
 test('pair performs health first and sends the exact request on a separate credentialless socket', async () => {
   const events = [];
   const permission = permissionScript(['prompt']);

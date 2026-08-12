@@ -13,12 +13,29 @@ fi
 
 app_pid=""
 helper_pid=""
+notice_default_existed=false
+notice_default_previous=""
+restore_notice_default() {
+  if [[ "$notice_default_existed" = true ]]; then
+    defaults write io.noisefactor.sync SyncPreviewNoticeShown \
+      -bool "$notice_default_previous" >/dev/null 2>&1 || true
+  else
+    defaults delete io.noisefactor.sync SyncPreviewNoticeShown >/dev/null 2>&1 || true
+  fi
+}
 cleanup() {
   [[ -n "$helper_pid" ]] && kill "$helper_pid" >/dev/null 2>&1 || true
   [[ -n "$app_pid" ]] && kill "$app_pid" >/dev/null 2>&1 || true
+  restore_notice_default
 }
 trap cleanup EXIT
 
+# This runs on developer machines as well as CI, so the preview-notice default
+# is borrowed rather than taken: whatever the user had is put back on exit.
+if notice_default_previous="$(defaults read io.noisefactor.sync \
+    SyncPreviewNoticeShown 2>/dev/null)"; then
+  notice_default_existed=true
+fi
 defaults write io.noisefactor.sync SyncPreviewNoticeShown -bool true
 "$bundle/Contents/MacOS/Sync" >/tmp/sync-preview-app.out 2>/tmp/sync-preview-app.err &
 app_pid=$!
@@ -52,6 +69,13 @@ if [[ -z "$helper_pid" ]]; then
   exit 1
 fi
 
+# `tell application ... to quit` LAUNCHES the target when it is not already
+# running, so a app that died early would be resurrected here and the quit
+# assertions below would test a process this script started by accident.
+if ! kill -0 "$app_pid" >/dev/null 2>&1; then
+  echo "smoke-macos-app: Sync exited before the quit check" >&2
+  exit 1
+fi
 osascript -e 'tell application id "io.noisefactor.sync" to quit'
 for _ in $(seq 1 50); do
   if ! kill -0 "$app_pid" >/dev/null 2>&1; then break; fi

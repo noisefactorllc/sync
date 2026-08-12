@@ -1,5 +1,7 @@
 #include <sync/control.hpp>
 
+#include <sync/label.hpp>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -491,7 +493,9 @@ private:
     return ParseError::MalformedJson;
   }
 
-  static bool has_control_code_point(std::string_view text) {
+  // A sender name reaches other applications as a Syphon server name in their
+  // source pickers, so it carries the same label rule as the pairing prompt.
+  static bool has_disallowed_label_code_point(std::string_view text) {
     for (std::size_t position = 0; position < text.size();) {
       const auto first = static_cast<std::uint8_t>(text[position]);
       std::uint32_t code_point = first;
@@ -506,12 +510,13 @@ private:
         code_point = first & 0x07U;
         count = 4;
       }
+      if (count > text.size() - position) return true;
       for (std::size_t index = 1; index < count; ++index) {
         code_point =
             (code_point << 6U) |
             (static_cast<std::uint8_t>(text[position + index]) & 0x3fU);
       }
-      if (code_point <= 0x1f || (code_point >= 0x7f && code_point <= 0x9f)) {
+      if (control_code_point(code_point) || formatting_code_point(code_point)) {
         return true;
       }
       position += count;
@@ -579,7 +584,7 @@ private:
       return failure(ParseError::InvalidValue);
     }
     if (message_.type == MessageType::CreateSender &&
-        (message_.name.empty() || has_control_code_point(message_.name))) {
+        (message_.name.empty() || has_disallowed_label_code_point(message_.name))) {
       return failure(ParseError::InvalidValue);
     }
     if ((message_.type == MessageType::GetStats ||

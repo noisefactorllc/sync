@@ -493,11 +493,17 @@ DecodeError ClientFrameDecoder::finish_frame(std::vector<Message>& output) {
   if (opcode_ == Opcode::Close && !valid_close_payload(payload_)) {
     return fail(DecodeError::InvalidControlFrame);
   }
+  // RFC 6455 section 5.6: a text message carries UTF-8. Validating the
+  // assembled message keeps fragmented and unfragmented text on one rule; the
+  // message limit already bounds how much is held before the check runs.
   if (control_) {
     output.reserve(output.size() + 1);
     output.push_back({.opcode = opcode_, .payload = std::move(payload_)});
   } else if (opcode_ == Opcode::Continuation) {
     if (final_) {
+      if (fragmented_opcode_ == Opcode::Text && !valid_utf8(fragment_payload_)) {
+        return fail(DecodeError::InvalidTextPayload);
+      }
       output.reserve(output.size() + 1);
       output.push_back({.opcode = fragmented_opcode_, .payload = std::move(fragment_payload_)});
       fragment_payload_.clear();
@@ -505,6 +511,9 @@ DecodeError ClientFrameDecoder::finish_frame(std::vector<Message>& output) {
       fragmented_opcode_ = Opcode::Continuation;
     }
   } else if (final_) {
+    if (opcode_ == Opcode::Text && !valid_utf8(payload_)) {
+      return fail(DecodeError::InvalidTextPayload);
+    }
     output.reserve(output.size() + 1);
     output.push_back({.opcode = opcode_, .payload = std::move(payload_)});
   } else {
@@ -550,15 +559,22 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
       const std::byte* const source = bytes.data() + position;
       std::byte* const target = destination.data() + destination_offset;
       const std::size_t phase = payload_received_ & 3U;
+      // The mask is copied into a local, already rotated to this frame's phase.
+      // Reading it straight from the member forces the compiler to assume every
+      // store through `target` may alias `mask_`, so it reloads the mask byte
+      // after each store and neither vectorizes nor pipelines the unmask.
+      const std::array<std::byte, 4> mask = {
+          mask_[phase], mask_[(phase + 1) & 3U], mask_[(phase + 2) & 3U],
+          mask_[(phase + 3) & 3U]};
       std::size_t index = 0;
       for (; index + 4 <= count; index += 4) {
-        target[index] = source[index] ^ mask_[phase];
-        target[index + 1] = source[index + 1] ^ mask_[(phase + 1) & 3U];
-        target[index + 2] = source[index + 2] ^ mask_[(phase + 2) & 3U];
-        target[index + 3] = source[index + 3] ^ mask_[(phase + 3) & 3U];
+        target[index] = source[index] ^ mask[0];
+        target[index + 1] = source[index + 1] ^ mask[1];
+        target[index + 2] = source[index + 2] ^ mask[2];
+        target[index + 3] = source[index + 3] ^ mask[3];
       }
       for (; index < count; ++index) {
-        target[index] = source[index] ^ mask_[(phase + index) & 3U];
+        target[index] = source[index] ^ mask[index & 3U];
       }
       position += count;
       payload_received_ += count;

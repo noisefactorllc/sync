@@ -125,10 +125,11 @@ struct SyphonMetalConsumer::Impl {
         if (private_frameworks != nil) {
           add_path([private_frameworks stringByAppendingPathComponent:@"Syphon.framework"]);
         }
-        NSString* home = NSHomeDirectory();
-        if (home != nil) {
-          add_path([home stringByAppendingPathComponent:@"Library/Frameworks/Syphon.framework"]);
-        }
+        // Deliberately no per-user ~/Library/Frameworks entry. Loading a
+        // bundle executes its code, and a user-writable search path gives any
+        // process running as this user a standing injection point into the
+        // daemon. The packaged app ships a pinned framework in its own bundle;
+        // a developer build passes --syphon-framework explicitly.
         add_path(@"/Library/Frameworks/Syphon.framework");
 
         for (std::size_t index = 0; index < path_count; ++index) {

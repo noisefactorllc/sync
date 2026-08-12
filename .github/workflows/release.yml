@@ -1,0 +1,89 @@
+name: Request Sync preview release
+
+# Sync is public and holds no deployment credential. Building, signing,
+# notarizing, and publishing to downloads.noisefactor.io all happen in the
+# Scaffold release harness, which is the sole holder of the Developer ID
+# certificate, the Apple notarization credentials, and SCAFFOLD_SSH_KEY.
+# This workflow only asks that harness to release a specific commit, using an
+# EHSRE App token scoped to dispatching it.
+#
+# It runs on CI completion rather than on push, so a commit can only be
+# proposed for release after every native, browser, and loopback gate has
+# already passed against that exact SHA. The harness independently re-runs
+# those gates, plus notarization and physical-hardware acceptance, and refuses
+# any SHA that is not an ancestor of this repository's public main.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: sync-release-request
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  request:
+    name: Ask Scaffold to release this commit
+    # Only a green CI run on main may propose a release.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Decide whether this commit changes the shipped product
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A docs-only commit must not mint a new signed build, burn a
+          # notarization round trip, or advance the public preview version.
+          if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          else
+            CHANGED=$(git ls-tree -r --name-only HEAD)
+          fi
+          echo "$CHANGED"
+          if grep -qE '^(native/|browser/|packaging/|scripts/|test/|CMakeLists\.txt$|package\.json$)' <<<"$CHANGED"; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "No product paths changed; skipping the release request."
+          fi
+
+      - name: Generate a Scaffold-scoped dispatch token
+        if: steps.scope.outputs.release == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 2959521
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+          repositories: scaffold
+
+      - name: Dispatch the release harness for this exact commit
+        if: steps.scope.outputs.release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh workflow run build-sync-preview.yml \
+            --repo noisefactorllc/scaffold \
+            --ref main \
+            -f sync_sha="$RELEASE_SHA"
+          echo "Requested a signed Sync preview release of $RELEASE_SHA"

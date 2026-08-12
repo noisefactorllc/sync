@@ -423,6 +423,43 @@ SYNC_TEST(client_decoder_does_not_retain_recycled_storage_above_its_reuse_limit)
   SYNC_REQUIRE(output[0].payload.size() == kPayloadBytes);
 }
 
+SYNC_TEST(client_decoder_rejects_text_payloads_that_are_not_utf8) {
+  // RFC 6455 section 5.6. Binary carries arbitrary bytes; text does not.
+  const std::string invalid("bad\xC0\xAFtext");
+  ws::ClientFrameDecoder text_decoder(1024);
+  std::vector<ws::Message> output;
+  SYNC_REQUIRE(text_decoder.feed(masked_frame(true, ws::Opcode::Text, invalid),
+                                 output) == ws::DecodeError::InvalidTextPayload);
+  SYNC_REQUIRE(output.empty());
+
+  ws::ClientFrameDecoder binary_decoder(1024);
+  output.clear();
+  SYNC_REQUIRE(binary_decoder.feed(masked_frame(true, ws::Opcode::Binary, invalid),
+                                   output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+
+  // A split sequence is only judged once the message is whole, so valid text
+  // that straddles a fragment boundary still decodes.
+  ws::ClientFrameDecoder split_decoder(1024);
+  output.clear();
+  SYNC_REQUIRE(split_decoder.feed(masked_frame(false, ws::Opcode::Text, "\xE2\x82"),
+                                  output) == ws::DecodeError::None);
+  SYNC_REQUIRE(split_decoder.feed(masked_frame(true, ws::Opcode::Continuation, "\xAC ok"),
+                                  output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  SYNC_REQUIRE(output[0].payload.size() == 6);
+
+  // The same rule applies to a message assembled from fragments.
+  ws::ClientFrameDecoder fragmented_decoder(1024);
+  output.clear();
+  SYNC_REQUIRE(fragmented_decoder.feed(masked_frame(false, ws::Opcode::Text, "ok"),
+                                       output) == ws::DecodeError::None);
+  SYNC_REQUIRE(fragmented_decoder.feed(
+                   masked_frame(true, ws::Opcode::Continuation, "\xED\xA0\x80"),
+                   output) == ws::DecodeError::InvalidTextPayload);
+  SYNC_REQUIRE(output.empty());
+}
+
 SYNC_TEST(fragment_capacity_grows_geometrically_within_the_message_limit) {
   constexpr std::size_t kMaximum = 64U * 1024U * 1024U;
   // Never below what the next fragment needs, never above the message limit.

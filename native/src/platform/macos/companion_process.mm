@@ -384,8 +384,11 @@ struct CompanionProcess::Impl {
                                            NSEC_PER_SEC)),
         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
           if (state->completed.exchange(true)) return;
+          // NSTask reaps the child itself, after which processIdentifier names
+          // a pid the kernel may have reused. Ask NSTask to signal the process
+          // it still owns rather than racing a raw kill against reuse.
           if (task.running) {
-            ::kill(task.processIdentifier, SIGKILL);
+            [task terminate];
           }
           on_main([completion] { completion(-1, {}, {}, true); });
         });

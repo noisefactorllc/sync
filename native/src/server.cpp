@@ -427,9 +427,12 @@ class Server {
       return 1;
     }
 
+    // `loopback` reports the stacks actually bound so a host that degraded to
+    // IPv4 says so rather than looking identical to a dual-stack daemon.
     std::cout << "{\"type\":\"ready\",\"port\":" << port_
-              << ",\"protocolVersions\":[1],\"instanceId\":\"" << instance_id_
-              << "\"}" << std::endl;
+              << ",\"protocolVersions\":[1],\"loopback\":[\"127.0.0.1\""
+              << (ipv6_listening_ ? ",\"::1\"" : "") << "],\"instanceId\":\""
+              << instance_id_ << "\"}" << std::endl;
     uv_run(&loop_, UV_RUN_DEFAULT);
     const int close_result = uv_loop_close(&loop_);
     if (close_result != 0) {
@@ -579,6 +582,12 @@ class Server {
     static_cast<Server*>(signal->data)->begin_shutdown();
   }
 
+  static void on_authority_ready(uv_async_t* handle) {
+    auto* server = static_cast<Server*>(handle->data);
+    server->poll_pairing_prompt();
+    server->poll_authority_results();
+  }
+
   static void on_deadline_sweep(uv_timer_t* timer) {
     auto *server = static_cast<Server *>(timer->data);
     if (server->options_.platform_event_pump != nullptr) {
@@ -679,29 +688,39 @@ class Server {
     }
     port_ = ntohs(reinterpret_cast<const sockaddr_in*>(&selected)->sin_port);
 
+    // IPv4 loopback is the contract. IPv6 loopback is served when the host
+    // offers it, but a host with IPv6 disabled must still get a working daemon
+    // rather than a process that refuses to start.
     sockaddr_in6 address6{};
-    if (uv_ip6_addr("::1", port_, &address6) != 0 ||
-        uv_tcp_init(&loop_, &listener6_) != 0) {
-      std::cerr << "syncd: failed to initialize IPv6 listener\n";
-      return false;
-    }
-    listener6_initialized_ = true;
-    listener6_.data = this;
-    result = uv_tcp_bind(&listener6_, reinterpret_cast<const sockaddr*>(&address6), UV_TCP_IPV6ONLY);
-    if (result != 0) {
-      std::cerr << "syncd: failed to bind IPv6 loopback: " << uv_strerror(result) << '\n';
-      return false;
+    bool ipv6_ready = uv_ip6_addr("::1", port_, &address6) == 0 &&
+                      uv_tcp_init(&loop_, &listener6_) == 0;
+    if (ipv6_ready) {
+      listener6_initialized_ = true;
+      listener6_.data = this;
+      result =
+          uv_tcp_bind(&listener6_, reinterpret_cast<const sockaddr*>(&address6), UV_TCP_IPV6ONLY);
+      if (result != 0) {
+        std::cerr << "syncd: IPv6 loopback unavailable, serving IPv4 only: "
+                  << uv_strerror(result) << '\n';
+        ipv6_ready = false;
+      }
+    } else {
+      std::cerr << "syncd: IPv6 loopback unavailable, serving IPv4 only\n";
     }
     result = uv_listen(reinterpret_cast<uv_stream_t*>(&listener4_), 64, on_listener_connection);
     if (result != 0) {
       std::cerr << "syncd: failed to listen on IPv4 loopback: " << uv_strerror(result) << '\n';
       return false;
     }
-    result = uv_listen(reinterpret_cast<uv_stream_t*>(&listener6_), 64, on_listener_connection);
-    if (result != 0) {
-      std::cerr << "syncd: failed to listen on IPv6 loopback: " << uv_strerror(result) << '\n';
-      return false;
+    if (ipv6_ready) {
+      result = uv_listen(reinterpret_cast<uv_stream_t*>(&listener6_), 64, on_listener_connection);
+      if (result != 0) {
+        std::cerr << "syncd: IPv6 loopback unavailable, serving IPv4 only: "
+                  << uv_strerror(result) << '\n';
+        ipv6_ready = false;
+      }
     }
+    ipv6_listening_ = ipv6_ready;
 
     if (uv_signal_init(&loop_, &signal_int_) != 0) return false;
     signal_int_initialized_ = true;
@@ -711,6 +730,20 @@ class Server {
     signal_term_initialized_ = true;
     signal_term_.data = this;
     if (uv_signal_start(&signal_term_, on_signal, SIGTERM) != 0) return false;
+    // Authority results are produced on the worker thread. Waking the loop the
+    // moment one lands keeps hello-to-welcome off the sweep interval; the
+    // sweep remains as the deadline and prompt-polling path.
+    if (uv_async_init(&loop_, &authority_async_, on_authority_ready) != 0) return false;
+    authority_async_initialized_ = true;
+    authority_async_.data = this;
+    uv_unref(reinterpret_cast<uv_handle_t*>(&authority_async_));
+    if (authority_worker_ != nullptr) {
+      authority_worker_->set_result_notifier(
+          [](void* context) noexcept {
+            uv_async_send(&static_cast<Server*>(context)->authority_async_);
+          },
+          this);
+    }
     if (uv_timer_init(&loop_, &deadline_timer_) != 0) return false;
     deadline_timer_initialized_ = true;
     deadline_timer_.data = this;
@@ -724,9 +757,18 @@ class Server {
   }
 
   void close_initialized_handles() {
+    // Retire the notifier before the async handle goes away; the worker
+    // publishes results under its own lock, so clearing here cannot race a
+    // uv_async_send already on its way to a closing handle.
+    if (authority_worker_ != nullptr) {
+      authority_worker_->set_result_notifier(nullptr, nullptr);
+    }
     auto close_handle = [](uv_handle_t* handle) {
       if (!uv_is_closing(handle)) uv_close(handle, nullptr);
     };
+    if (authority_async_initialized_) {
+      close_handle(reinterpret_cast<uv_handle_t*>(&authority_async_));
+    }
     if (listener4_initialized_) close_handle(reinterpret_cast<uv_handle_t*>(&listener4_));
     if (listener6_initialized_) close_handle(reinterpret_cast<uv_handle_t*>(&listener6_));
     if (signal_int_initialized_) {
@@ -1294,7 +1336,11 @@ class Server {
       return;
     }
     const std::string expected = "sync.sender." + sender->ticket;
-    if (request.subprotocols.front() != expected) {
+    const std::string_view presented = request.subprotocols.front();
+    // The ticket is a bearer credential for this sender's data socket, so the
+    // comparison must not leak a prefix match through timing.
+    if (presented.size() != expected.size() ||
+        CRYPTO_memcmp(presented.data(), expected.data(), expected.size()) != 0) {
       send_http(connection, 401, "Unauthorized",
                 "{\"error\":\"unauthorized_sender\"}");
       return;
@@ -1395,7 +1441,11 @@ class Server {
         if (connection.websocket_close_write_completed)
           close_connection(connection);
       } else {
-        start_websocket_close(connection, 1002, {}, true);
+        // RFC 6455 section 7.4.1: inconsistent payload data closes 1007, every
+        // other framing violation closes 1002.
+        const std::uint16_t code =
+            error == websocket::DecodeError::InvalidTextPayload ? 1007 : 1002;
+        start_websocket_close(connection, code, {}, true);
       }
       return;
     }
@@ -1759,6 +1809,8 @@ class Server {
   uv_signal_t signal_int_{};
   uv_signal_t signal_term_{};
   uv_timer_t deadline_timer_{};
+  uv_async_t authority_async_{};
+  bool authority_async_initialized_ = false;
   bool loop_initialized_ = false;
   bool listener4_initialized_ = false;
   bool listener6_initialized_ = false;
@@ -1766,6 +1818,7 @@ class Server {
   bool signal_term_initialized_ = false;
   bool deadline_timer_initialized_ = false;
   bool stopping_ = false;
+  bool ipv6_listening_ = false;
   std::uint16_t port_ = 0;
   std::string instance_id_;
   std::array<Connection *, kMaximumConnections> connections_{};

@@ -287,8 +287,18 @@ struct AuthorityWorker::Impl {
         result_slots[tail] = completed_slot;
         ++result_count;
         slots[completed_slot].lifecycle = SlotLifecycle::Result;
+        // Delivered under the lock so that clearing the notifier cannot race a
+        // call already in flight against a torn-down target.
+        if (result_notifier != nullptr) result_notifier(result_notifier_context);
       }
     }
+  }
+
+  void set_result_notifier(AuthorityWorker::ResultNotifier notifier,
+                           void *context) noexcept {
+    std::lock_guard lock(mutex);
+    result_notifier = notifier;
+    result_notifier_context = context;
   }
 
   [[nodiscard]] std::size_t allocate_slot(
@@ -374,6 +384,8 @@ struct AuthorityWorker::Impl {
   std::size_t outstanding = 0;
   bool active = false;
   bool stopping = false;
+  AuthorityWorker::ResultNotifier result_notifier = nullptr;
+  void *result_notifier_context = nullptr;
   std::thread thread;
 };
 
@@ -405,6 +417,11 @@ bool AuthorityWorker::has_result(std::uint64_t generation) noexcept {
 
 bool AuthorityWorker::cancel(std::uint64_t generation) noexcept {
   return impl_ != nullptr && impl_->cancel(generation);
+}
+
+void AuthorityWorker::set_result_notifier(ResultNotifier notifier,
+                                          void *context) noexcept {
+  if (impl_ != nullptr) impl_->set_result_notifier(notifier, context);
 }
 
 void AuthorityWorker::shutdown() noexcept {

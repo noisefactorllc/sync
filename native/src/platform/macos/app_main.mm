@@ -55,6 +55,8 @@ void show_error(NSString* title, NSString* message) {
   NSTimer* _pollTimer;
   std::unique_ptr<companion::CompanionModel> _model;
   std::unique_ptr<companion::CompanionProcess> _process;
+  NSMenu* _pairingsMenu;
+  NSDate* _pairingsFetchedAt;
   std::vector<std::string> _pairings;
   std::string _pairingError;
   BOOL _pairingsLoading;
@@ -188,30 +190,9 @@ void show_error(NSString* title, NSString* message) {
   NSMenuItem* pairingsItem = [[NSMenuItem alloc] initWithTitle:@"Pairings"
                                                        action:nil
                                                 keyEquivalent:@""];
-  NSMenu* pairingsMenu = [[NSMenu alloc] initWithTitle:@"Pairings"];
-  if (_pairingsLoading) {
-    [pairingsMenu addItem:disabled_item(@"Loading…")];
-  } else if (!_pairingError.empty()) {
-    [pairingsMenu addItem:disabled_item(ns_string(_pairingError))];
-  } else if (_pairings.empty()) {
-    [pairingsMenu addItem:disabled_item(@"No paired apps")];
-  } else {
-    for (const std::string& origin : _pairings) {
-      NSMenuItem* revoke = [[NSMenuItem alloc] initWithTitle:ns_string(origin)
-                                                     action:@selector(revokePairing:)
-                                              keyEquivalent:@""];
-      revoke.target = self;
-      revoke.representedObject = ns_string(origin);
-      [pairingsMenu addItem:revoke];
-    }
-  }
-  [pairingsMenu addItem:NSMenuItem.separatorItem];
-  NSMenuItem* refresh = [[NSMenuItem alloc] initWithTitle:@"Refresh"
-                                                   action:@selector(refreshPairingsAction:)
-                                            keyEquivalent:@""];
-  refresh.target = self;
-  [pairingsMenu addItem:refresh];
-  pairingsItem.submenu = pairingsMenu;
+  _pairingsMenu = [[NSMenu alloc] initWithTitle:@"Pairings"];
+  [self populatePairingsMenu];
+  pairingsItem.submenu = _pairingsMenu;
   [_menu addItem:pairingsItem];
 
   NSMenuItem* login = [[NSMenuItem alloc] initWithTitle:@"Launch at Login"
@@ -252,7 +233,46 @@ void show_error(NSString* title, NSString* message) {
   quit.target = self;
   [_menu addItem:quit];
 
-  if (!_pairingsLoading) [self refreshPairings];
+  // Opening the menu used to spawn a management subprocess every time and
+  // still render the previous result. Refresh only when the cache is actually
+  // stale, and repaint the submenu in place when the answer lands.
+  [self refreshPairingsIfStale];
+}
+
+- (void)populatePairingsMenu {
+  if (_pairingsMenu == nil) return;
+  [_pairingsMenu removeAllItems];
+  if (_pairingsLoading && _pairingsFetchedAt == nil) {
+    [_pairingsMenu addItem:disabled_item(@"Loading…")];
+  } else if (!_pairingError.empty()) {
+    [_pairingsMenu addItem:disabled_item(ns_string(_pairingError))];
+  } else if (_pairings.empty()) {
+    [_pairingsMenu addItem:disabled_item(@"No paired apps")];
+  } else {
+    for (const std::string& origin : _pairings) {
+      NSMenuItem* revoke = [[NSMenuItem alloc] initWithTitle:ns_string(origin)
+                                                     action:@selector(revokePairing:)
+                                              keyEquivalent:@""];
+      revoke.target = self;
+      revoke.representedObject = ns_string(origin);
+      [_pairingsMenu addItem:revoke];
+    }
+  }
+  [_pairingsMenu addItem:NSMenuItem.separatorItem];
+  NSMenuItem* refresh = [[NSMenuItem alloc] initWithTitle:@"Refresh"
+                                                   action:@selector(refreshPairingsAction:)
+                                            keyEquivalent:@""];
+  refresh.target = self;
+  [_pairingsMenu addItem:refresh];
+}
+
+- (void)refreshPairingsIfStale {
+  static const NSTimeInterval kPairingCacheSeconds = 5.0;
+  if (_pairingsFetchedAt != nil &&
+      -[_pairingsFetchedAt timeIntervalSinceNow] < kPairingCacheSeconds) {
+    return;
+  }
+  [self refreshPairings];
 }
 
 - (void)restartSync:(id)sender {
@@ -274,6 +294,8 @@ void show_error(NSString* title, NSString* message) {
 
 - (void)refreshPairingsAction:(id)sender {
   (void)sender;
+  // An explicit Refresh always re-reads, however fresh the cache looks.
+  _pairingsFetchedAt = nil;
   [self refreshPairings];
 }
 
@@ -288,6 +310,10 @@ void show_error(NSString* title, NSString* message) {
         self->_pairings = std::move(origins);
         self->_pairingError = std::move(error);
         self->_pairingsLoading = NO;
+        self->_pairingsFetchedAt = [NSDate date];
+        // The menu may be open right now; repaint rather than leaving the
+        // previous answer on screen until the next time it is built.
+        [self populatePairingsMenu];
       });
 }
 
@@ -310,6 +336,7 @@ void show_error(NSString* title, NSString* message) {
     if (!revoked) {
       show_error(@"Could not revoke pairing", ns_string(error));
     }
+    self->_pairingsFetchedAt = nil;
     [self refreshPairings];
   });
 }

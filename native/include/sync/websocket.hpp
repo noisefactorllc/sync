@@ -85,6 +85,7 @@ enum class DecodeError {
   FragmentAlreadyOpen,
   MessageTooLarge,
   InvalidLengthEncoding,
+  InvalidTextPayload,
 };
 
 class ClientFrameDecoder {

@@ -119,6 +119,12 @@ struct AuthorityResult {
 
 class AuthorityWorker {
 public:
+  // Invoked on the worker thread the moment a result becomes pollable, so the
+  // owning event loop can collect it instead of waiting for its next sweep.
+  // It runs while the worker holds its lock, so it must be non-blocking and
+  // safe to call from another thread (uv_async_send is the intended use).
+  using ResultNotifier = void (*)(void *) noexcept;
+
   explicit AuthorityWorker(PairingAuthority &authority,
                            CleanseObserver *cleanse_observer = nullptr);
   ~AuthorityWorker() noexcept;
@@ -133,6 +139,9 @@ public:
   [[nodiscard]] bool poll(AuthorityResult &result) noexcept;
   [[nodiscard]] bool has_result(std::uint64_t generation) noexcept;
   [[nodiscard]] bool cancel(std::uint64_t generation) noexcept;
+  // Clearing the notifier is ordered against any concurrent delivery, so a
+  // caller can retire the target before tearing it down.
+  void set_result_notifier(ResultNotifier notifier, void *context) noexcept;
   void shutdown() noexcept;
 
 private:

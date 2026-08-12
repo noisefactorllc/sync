@@ -132,6 +132,20 @@ SYNC_TEST(
   require_error(std::string("{\"type\":\"createSender\",\"name\":\"") +
                     static_cast<char>(0xc0) + static_cast<char>(0xaf) + "\"}",
                 control::ParseError::MalformedJson);
+
+  // A sender name becomes a Syphon server name in other applications'
+  // source pickers, so it carries the pairing prompt's label rule.
+  require_error("{\"type\":\"createSender\",\"name\":\"Deck\\u202E\"}",
+                control::ParseError::InvalidValue);  // RIGHT-TO-LEFT OVERRIDE
+  require_error("{\"type\":\"createSender\",\"name\":\"Deck\\u200B\"}",
+                control::ParseError::InvalidValue);  // ZERO WIDTH SPACE
+  require_error("{\"type\":\"createSender\",\"name\":\"Deck\\u2066\"}",
+                control::ParseError::InvalidValue);  // LEFT-TO-RIGHT ISOLATE
+  require_error("{\"type\":\"createSender\",\"name\":\"Deck\\uFEFF\"}",
+                control::ParseError::InvalidValue);  // ZERO WIDTH NO-BREAK SPACE
+  require_error(std::string("{\"type\":\"createSender\",\"name\":\"D") +
+                    "\xE2\x80\xAEk\"}",
+                control::ParseError::InvalidValue);  // raw UTF-8 U+202E
 }
 
 SYNC_TEST(control_rejects_every_duplicate_field) {
