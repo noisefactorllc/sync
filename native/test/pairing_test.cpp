@@ -171,6 +171,36 @@ SYNC_TEST(
     SYNC_REQUIRE(!parse_request(value).ok());
 }
 
+SYNC_TEST(pairing_parser_rejects_invisible_and_bidirectional_label_characters) {
+  // The label is rendered in the native trust prompt beneath the origin the
+  // user is asked to trust, so characters whose only effect is to make
+  // rendered text disagree with its bytes are rejected however they are
+  // spelled. Written as escapes so every case stays visible in source.
+  const std::array rejected = {
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\u202E"})",  // RIGHT-TO-LEFT OVERRIDE
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\u200B"})",  // ZERO WIDTH SPACE
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\u200F"})",  // RIGHT-TO-LEFT MARK
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\u2066"})",  // LEFT-TO-RIGHT ISOLATE
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\u2060"})",  // WORD JOINER
+      R"({"type":"pair","protocolVersions":[1],"name":"Deck\uFEFF"})",  // ZERO WIDTH NO-BREAK SPACE
+      // Raw UTF-8 for U+202E, not only the JSON-escaped spelling.
+      "{\"type\":\"pair\",\"protocolVersions\":[1],\"name\":\"D\xE2\x80\xAEk\"}",
+  };
+  for (const std::string_view value : rejected)
+    SYNC_REQUIRE(!parse_request(value).ok());
+
+  // Ordinary non-ASCII labels stay valid.
+  SYNC_REQUIRE(parse_request(
+                   R"({"type":"pair","protocolVersions":[1],"name":"D\u00e9ck"})")
+                   .ok());
+
+  noisefactor::sync::pairing::PromptRequest request;
+  const auto origin = noisefactor::sync::normalize_origin("https://one.example");
+  SYNC_REQUIRE(origin.ok());
+  SYNC_REQUIRE(!request.assign(1, origin.origin, "Deck\xE2\x80\xAEk"));
+  SYNC_REQUIRE(request.assign(1, origin.origin, "Deck"));
+}
+
 SYNC_TEST(pairing_encoders_are_exact_and_never_put_tokens_in_errors) {
   const std::string token(64, 'a');
   SYNC_REQUIRE(noisefactor::sync::pairing::encode_paired(1, token) ==

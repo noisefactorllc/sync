@@ -486,14 +486,21 @@ class Server {
       return;
     }
 
-    if (bytes.size() > websocket::kMaximumHttpUpgradeBytes - connection.http_buffer.size()) {
-      send_http(connection, 431, "Request Header Fields Too Large", "{\"error\":\"headers_too_large\"}");
-      return;
-    }
     connection.http_buffer.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     const std::size_t header_end = connection.http_buffer.find("\r\n\r\n");
+    // Only the request head counts against the header budget. Bytes past the
+    // terminator belong to the WebSocket stream a client may pipeline behind
+    // its upgrade, and rejecting those as oversized headers drops valid
+    // connections.
+    const std::size_t header_bytes =
+        header_end == std::string::npos ? connection.http_buffer.size() : header_end + 4;
+    if (header_bytes > websocket::kMaximumHttpUpgradeBytes) {
+      connection.http_buffer.clear();
+      send_http(connection, 431, "Request Header Fields Too Large",
+                "{\"error\":\"headers_too_large\"}");
+      return;
+    }
     if (header_end == std::string::npos) return;
-    const std::size_t header_bytes = header_end + 4;
     std::vector<std::byte> remainder;
     remainder.reserve(connection.http_buffer.size() - header_bytes);
     const auto* first = reinterpret_cast<const std::byte*>(connection.http_buffer.data());

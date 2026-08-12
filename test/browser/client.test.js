@@ -664,6 +664,9 @@ test('connect retains the direct socket path when both permission descriptors ar
 
 test('pair validates a bounded UTF-8 app label before any network operation', async () => {
   for (const name of ['', 'x'.repeat(65), 'bad\nname', 'bad\u0085name', '\ud800',
+                      // Invisible and bidirectional formatting characters:
+                      // the daemon renders this label in its native trust prompt.
+                      'Deck\u202e', 'Deck\u200b', 'Deck\u200f', 'Deck\u2066', 'Deck\u2060', 'Deck\ufeff',
                       '😀'.repeat(17)]) {
     let fetchCalls = 0;
     FakeWebSocket.reset(() => {});

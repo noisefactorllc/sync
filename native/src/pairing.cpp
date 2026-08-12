@@ -8,6 +8,23 @@
 
 namespace noisefactor::sync::pairing {
 
+namespace {
+
+// The label is attacker-supplied text rendered inside the native pairing
+// prompt, directly beneath the origin the user is being asked to trust.
+// Invisible and bidirectional formatting characters carry no meaning in an app
+// label and exist only to make rendered text disagree with its bytes, so they
+// are rejected rather than stripped.
+bool formatting_code_point(std::uint32_t code_point) noexcept {
+  return (code_point >= 0x200bU && code_point <= 0x200fU) ||  // ZWSP..RLM
+         (code_point >= 0x202aU && code_point <= 0x202eU) ||  // LRE..RLO
+         (code_point >= 0x2060U && code_point <= 0x2064U) ||  // WJ..invisible ops
+         (code_point >= 0x2066U && code_point <= 0x2069U) ||  // LRI..PDI
+         code_point == 0xfeffU;                               // ZWNBSP
+}
+
+}  // namespace
+
 bool valid_pairing_name(std::string_view name) noexcept {
   if (name.empty() || name.size() > kMaximumPairingNameBytes)
     return false;
@@ -45,7 +62,8 @@ bool valid_pairing_name(std::string_view name) noexcept {
         (count == 3 && code_point < 0x800) ||
         (count == 4 && code_point < 0x10000) ||
         (code_point >= 0xd800 && code_point <= 0xdfff) ||
-        code_point > 0x10ffff || (code_point >= 0x80 && code_point <= 0x9f))
+        code_point > 0x10ffff || (code_point >= 0x80 && code_point <= 0x9f) ||
+        formatting_code_point(code_point))
       return false;
     position += count;
   }

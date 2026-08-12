@@ -423,6 +423,60 @@ SYNC_TEST(client_decoder_does_not_retain_recycled_storage_above_its_reuse_limit)
   SYNC_REQUIRE(output[0].payload.size() == kPayloadBytes);
 }
 
+SYNC_TEST(fragment_capacity_grows_geometrically_within_the_message_limit) {
+  constexpr std::size_t kMaximum = 64U * 1024U * 1024U;
+  // Never below what the next fragment needs, never above the message limit.
+  SYNC_REQUIRE(ws::next_fragment_capacity(0, 1, kMaximum) ==
+               ws::kMinimumFragmentCapacityBytes);
+  SYNC_REQUIRE(ws::next_fragment_capacity(4096, 4097, kMaximum) == 8192);
+  SYNC_REQUIRE(ws::next_fragment_capacity(8192, 8193, kMaximum) == 16384);
+  SYNC_REQUIRE(ws::next_fragment_capacity(0, kMaximum, kMaximum) == kMaximum);
+  SYNC_REQUIRE(ws::next_fragment_capacity(kMaximum / 2, kMaximum / 2 + 1,
+                                          kMaximum) == kMaximum);
+  // A decoder whose limit is under the growth floor never over-reserves.
+  SYNC_REQUIRE(ws::next_fragment_capacity(0, 32, 128) == 128);
+
+  // Reaching a target from zero must take a logarithmic number of steps, which
+  // is what bounds total copying while a fragmented message is reassembled.
+  std::size_t capacity = 0;
+  std::size_t steps = 0;
+  while (capacity < 1U << 20U) {
+    capacity = ws::next_fragment_capacity(capacity, capacity + 1, kMaximum);
+    ++steps;
+    SYNC_REQUIRE(steps < 32);
+  }
+}
+
+SYNC_TEST(client_decoder_reassembles_many_small_fragments_without_quadratic_copying) {
+  constexpr std::size_t kFragments = 512;
+  constexpr std::size_t kFragmentBytes = 64;
+  const std::string chunk(kFragmentBytes, 'q');
+
+  ws::ClientFrameDecoder decoder(1U << 20U, ws::PayloadSensitivity::NonSensitive);
+  std::vector<ws::Message> output;
+  for (std::size_t index = 0; index < kFragments; ++index) {
+    const bool final = index + 1 == kFragments;
+    const ws::Opcode opcode =
+        index == 0 ? ws::Opcode::Binary : ws::Opcode::Continuation;
+    SYNC_REQUIRE(decoder.feed(masked_frame(final, opcode, chunk), output) ==
+                 ws::DecodeError::None);
+    // Reserving only what the next fragment needs leaves capacity tracking size
+    // exactly, which reallocates and copies on every continuation frame. The
+    // final frame moves the buffer out, so it has no capacity to check.
+    if (!final) {
+      SYNC_REQUIRE(decoder.fragment_capacity() >=
+                   ws::kMinimumFragmentCapacityBytes);
+    }
+  }
+
+  SYNC_REQUIRE(output.size() == 1);
+  SYNC_REQUIRE(output[0].opcode == ws::Opcode::Binary);
+  SYNC_REQUIRE(output[0].payload.size() == kFragments * kFragmentBytes);
+  for (const std::byte byte : output[0].payload) {
+    SYNC_REQUIRE(byte == std::byte{'q'});
+  }
+}
+
 SYNC_TEST(client_decoder_consumes_recycled_storage_for_a_fragmented_message) {
   const auto complete = masked_frame(
       true, ws::Opcode::Binary, std::string(64, 'x'));

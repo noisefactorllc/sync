@@ -150,7 +150,15 @@ function parseHeaderBlock(headerBytes) {
   return { status, headers };
 }
 
-async function upgrade({ host = "127.0.0.1", port, route, origin, subprotocol, socket: suppliedSocket }) {
+async function upgrade({
+  host = "127.0.0.1",
+  port,
+  route,
+  origin,
+  subprotocol,
+  socket: suppliedSocket,
+  pipelined,
+}) {
   const socket = suppliedSocket ?? await connect(host, port);
   try {
     const key = randomBytes(16).toString("base64");
@@ -158,7 +166,7 @@ async function upgrade({ host = "127.0.0.1", port, route, origin, subprotocol, s
     const protocolHeader = subprotocol === undefined
       ? ""
       : `Sec-WebSocket-Protocol: ${subprotocol}\r\n`;
-    socket.write(
+    const head = Buffer.from(
       `GET ${route} HTTP/1.1\r\n` +
       `Host: ${hostHeader}\r\n` +
       "Upgrade: websocket\r\n" +
@@ -169,6 +177,9 @@ async function upgrade({ host = "127.0.0.1", port, route, origin, subprotocol, s
       protocolHeader +
       "\r\n",
     );
+    // `pipelined` lands in the same write as the handshake so the daemon reads
+    // request head and WebSocket payload together.
+    socket.write(pipelined === undefined ? head : Buffer.concat([head, pipelined]));
 
     const chunks = [];
     let total = 0;
@@ -1579,6 +1590,62 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     await stopDaemon(child, daemon.stderr, daemon.stdout, daemon.ready);
   } finally {
     for (const client of sockets) client.destroy();
+    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("an upgrade pipelined with WebSocket payload is not judged an oversized header", async () => {
+  let daemon;
+  const sockets = new Set();
+  try {
+    daemon = await spawnDaemon();
+    const { ready } = daemon;
+
+    // A client may send its first WebSocket frames in the same segment as the
+    // handshake. Only the request head belongs to the header budget; counting
+    // the trailing payload against it rejects a valid connection.
+    const hello = maskedClientFrame(
+      0x1,
+      Buffer.from(JSON.stringify({ type: "hello", token: TOKEN, protocolVersions: [1] }), "utf8"),
+    );
+    const pingCount = 200;
+    const filler = maskedClientFrame(0x9, Buffer.alloc(125, 0x70));
+    const pipelined = Buffer.concat([
+      hello,
+      ...Array.from({ length: pingCount }, () => filler),
+    ]);
+    assert.ok(pipelined.length > 16_384, "payload exceeds the header budget on its own");
+
+    const accepted = await upgrade({
+      port: ready.port,
+      route: "/control",
+      origin: ORIGIN,
+      pipelined,
+    });
+    sockets.add(accepted.socket);
+    assert.equal(accepted.status, 101);
+    const welcome = await accepted.client.nextJson("welcome after pipelined hello");
+    assert.equal(welcome.type, "welcome");
+    // Every pipelined frame is processed, not just the ones that fit the head.
+    for (let index = 0; index < pingCount; index += 1) {
+      const pong = await accepted.client.nextFrame(`pong ${index}`);
+      assert.equal(pong.opcode, 0xa);
+      assert.equal(pong.payload.length, 125);
+    }
+
+    // A request head that genuinely exceeds the budget still gets 431.
+    const socket = await connect("127.0.0.1", ready.port);
+    sockets.add(socket);
+    socket.write(
+      "GET /control HTTP/1.1\r\n" +
+      `Host: 127.0.0.1:${ready.port}\r\n` +
+      `X-Padding: ${"p".repeat(20_000)}\r\n`,
+    );
+    const rejected = await withTimeout(readHttpResponse(socket), "oversized header response");
+    assert.equal(rejected.status, 431);
+    assert.deepEqual(JSON.parse(rejected.body.toString("utf8")), { error: "headers_too_large" });
+  } finally {
+    for (const socket of sockets) socket.destroy();
     if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
 });

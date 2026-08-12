@@ -58,11 +58,20 @@ SYNC_TEST(companion_model_distinguishes_startup_failure_conflict_and_exit) {
   SYNC_REQUIRE(model.last_exit_status() == std::optional<int>(70));
   SYNC_REQUIRE(!model.owned_pid().has_value());
 
+  // An unexpected exit already dropped the pid, so the polls that follow must
+  // not repaint the crash as a clean stop.
+  model.observe_health_failure();
+  SYNC_REQUIRE(model.state() == CompanionState::Failed);
+  model.observe_health_failure();
+  SYNC_REQUIRE(model.state() == CompanionState::Failed);
+
   model.manual_restart();
   SYNC_REQUIRE(model.state() == CompanionState::Starting);
   SYNC_REQUIRE(!model.last_exit_status().has_value());
   model.helper_started(100);
   model.helper_exited(0, true);
+  SYNC_REQUIRE(model.state() == CompanionState::Stopped);
+  model.observe_health_failure();
   SYNC_REQUIRE(model.state() == CompanionState::Stopped);
 }
 

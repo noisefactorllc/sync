@@ -276,6 +276,49 @@ PairingsResult parse_pairings_json(std::string_view json) {
   return result;
 }
 
+RevocationResult classify_revocation(int exit_status, std::string_view json) {
+  RevocationResult result;
+  if (exit_status != 0 && exit_status != 3) {
+    result.error = "Could not revoke Sync pairing.";
+    return result;
+  }
+  NSError* error = nil;
+  NSData* data = [NSData dataWithBytes:json.data() length:json.size()];
+  id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+  NSSet<NSString*>* keys =
+      [NSSet setWithObjects:@"type", @"origin", @"status", nil];
+  NSString* status = [object isKindOfClass:NSDictionary.class]
+                         ? object[@"status"]
+                         : nil;
+  if (error != nil || ![object isKindOfClass:NSDictionary.class] ||
+      !exact_keys(object, keys) ||
+      ![object[@"type"] isEqualToString:@"revocation"] ||
+      ![object[@"origin"] isKindOfClass:NSString.class] ||
+      ![status isKindOfClass:NSString.class]) {
+    result.error = "Sync returned malformed revocation data.";
+    return result;
+  }
+  if ([status isEqualToString:@"revoked_durability_uncertain"]) {
+    result.error =
+        "Sync removed the pairing but could not confirm it was written to "
+        "disk. Revoke again after checking free disk space.";
+    return result;
+  }
+  if (![status isEqualToString:@"revoked"] &&
+      ![status isEqualToString:@"not_found"]) {
+    result.error = "Sync returned malformed revocation data.";
+    return result;
+  }
+  // Exit 0 with a well-formed record is the only durable outcome. `revoked`
+  // means the origin is confirmed absent, which "not_found" also satisfies.
+  if (exit_status != 0) {
+    result.error = "Sync could not confirm the pairing was revoked.";
+    return result;
+  }
+  result.revoked = true;
+  return result;
+}
+
 struct CompanionProcess::Impl {
   explicit Impl(CompanionProcessOptions value) : options(std::move(value)) {}
 
@@ -573,23 +616,12 @@ void CompanionProcess::revoke_pairing(std::string origin,
           completion(false, "Sync management command timed out.");
           return;
         }
-        if ((status != 0 && status != 3) || output.size() > 65'536) {
-          completion(false, error.empty() ? "Could not revoke Sync pairing."
-                                          : error);
+        if (status != 0 && status != 3 && !error.empty()) {
+          completion(false, error);
           return;
         }
-        NSError* json_error = nil;
-        NSData* data = [NSData dataWithBytes:output.data() length:output.size()];
-        id object = [NSJSONSerialization JSONObjectWithData:data
-                                                    options:0
-                                                      error:&json_error];
-        const bool valid = json_error == nil &&
-                           [object isKindOfClass:NSDictionary.class] &&
-                           [object[@"type"] isEqualToString:@"revocation"] &&
-                           [object[@"origin"] isKindOfClass:NSString.class] &&
-                           [object[@"status"] isKindOfClass:NSString.class];
-        completion(valid, valid ? std::string{}
-                                : "Sync returned malformed revocation data.");
+        RevocationResult parsed = classify_revocation(status, output);
+        completion(parsed.revoked, std::move(parsed.error));
       });
 }
 

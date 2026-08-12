@@ -64,6 +64,16 @@ struct Message {
 
 enum class PayloadSensitivity { NonSensitive, Sensitive };
 
+inline constexpr std::size_t kMinimumFragmentCapacityBytes = 4096;
+
+// Capacity to reserve for a growing fragment buffer. Reserving only what the
+// next fragment needs reallocates and copies on every continuation frame, so a
+// message split into many small fragments costs quadratic time to reassemble.
+// Growth is geometric and clamped to the already-enforced message limit.
+[[nodiscard]] std::size_t next_fragment_capacity(std::size_t current_capacity,
+                                                 std::size_t required_capacity,
+                                                 std::size_t maximum) noexcept;
+
 enum class DecodeError {
   None,
   Terminal,
@@ -89,6 +99,9 @@ class ClientFrameDecoder {
 
   DecodeError feed(std::span<const std::byte> bytes, std::vector<Message>& output);
   void recycle_payload(std::vector<std::byte>& payload) noexcept;
+  [[nodiscard]] std::size_t fragment_capacity() const noexcept {
+    return fragment_payload_.capacity();
+  }
 
  private:
   enum class State {

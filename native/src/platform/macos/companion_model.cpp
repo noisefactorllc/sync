@@ -42,6 +42,11 @@ void CompanionModel::observe_health(HealthSnapshot health) {
 
 void CompanionModel::observe_health_failure() {
   health_ = {};
+  // A helper that exited unexpectedly already dropped its pid, so treating a
+  // missing pid as a clean stop would repaint Failed as Stopped on the next
+  // poll and erase the only visible sign that it crashed. Failed is terminal
+  // until the operator restarts.
+  if (state_ == CompanionState::Failed) return;
   if (!owned_pid_.has_value()) {
     state_ = CompanionState::Stopped;
   } else if (state_ != CompanionState::Starting) {

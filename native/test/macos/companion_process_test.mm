@@ -176,6 +176,54 @@ SYNC_TEST(companion_process_pairing_parser_requires_normalized_origins) {
   SYNC_REQUIRE(!malformed.ok());
 }
 
+SYNC_TEST(companion_process_revocation_requires_a_durable_committed_record) {
+  using noisefactor::sync::companion::classify_revocation;
+  const std::string_view revoked =
+      R"({"type":"revocation","origin":"https://one.example","status":"revoked"})";
+
+  const auto durable = classify_revocation(0, revoked);
+  SYNC_REQUIRE(durable.ok());
+  SYNC_REQUIRE(durable.revoked);
+
+  const auto absent = classify_revocation(
+      0,
+      R"({"type":"revocation","origin":"https://one.example","status":"not_found"})");
+  SYNC_REQUIRE(absent.ok());
+  SYNC_REQUIRE(absent.revoked);
+
+  // syncd exits 3 when the record reached the store but was never confirmed
+  // durable. Reporting that as a clean revocation tells the operator a pairing
+  // is gone when a crash could bring it back.
+  const auto uncertain = classify_revocation(
+      3,
+      R"({"type":"revocation","origin":"https://one.example","status":"revoked_durability_uncertain"})");
+  SYNC_REQUIRE(!uncertain.revoked);
+  SYNC_REQUIRE(!uncertain.ok());
+
+  // A durable-looking body cannot launder a nonzero exit, and a zero exit
+  // cannot launder an uncertain body.
+  SYNC_REQUIRE(!classify_revocation(3, revoked).revoked);
+  SYNC_REQUIRE(
+      !classify_revocation(
+           0,
+           R"({"type":"revocation","origin":"https://one.example","status":"revoked_durability_uncertain"})")
+           .revoked);
+
+  SYNC_REQUIRE(!classify_revocation(1, revoked).revoked);
+  SYNC_REQUIRE(!classify_revocation(0, "not json").revoked);
+  SYNC_REQUIRE(!classify_revocation(0, R"({"type":"revocation"})").revoked);
+  SYNC_REQUIRE(
+      !classify_revocation(
+           0,
+           R"({"type":"revocation","origin":"https://one.example","status":"invented"})")
+           .revoked);
+  SYNC_REQUIRE(
+      !classify_revocation(
+           0,
+           R"({"type":"revocation","origin":"https://one.example","status":"revoked","extra":1})")
+           .revoked);
+}
+
 SYNC_TEST(companion_process_bounds_management_and_never_owns_external_processes) {
   TemporaryFixture fixture;
   fixture.write_helper("exec sleep 5\n");

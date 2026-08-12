@@ -378,6 +378,18 @@ ClientFrameDecoder::ClientFrameDecoder(std::size_t max_message_bytes,
   }
 }
 
+std::size_t next_fragment_capacity(std::size_t current_capacity,
+                                   std::size_t required_capacity,
+                                   std::size_t maximum) noexcept {
+  if (required_capacity >= maximum) return required_capacity;
+  std::size_t target = std::min(
+      std::max(current_capacity, kMinimumFragmentCapacityBytes), maximum);
+  while (target < required_capacity) {
+    target = target > maximum / 2 ? maximum : target * 2;
+  }
+  return target;
+}
+
 void ClientFrameDecoder::prepare_fragment_storage(
     std::size_t required_capacity) {
   if (fragment_payload_.capacity() >= required_capacity) return;
@@ -387,7 +399,8 @@ void ClientFrameDecoder::prepare_fragment_storage(
     return;
   }
   std::vector<std::byte>().swap(reusable_payload_);
-  fragment_payload_.reserve(required_capacity);
+  fragment_payload_.reserve(next_fragment_capacity(
+      fragment_payload_.capacity(), required_capacity, max_message_bytes_));
 }
 
 ClientFrameDecoder::~ClientFrameDecoder() noexcept {

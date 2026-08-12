@@ -415,10 +415,20 @@ function validateSenderName(name) {
   }
 }
 
+// The daemon renders the pairing name inside its native trust prompt, directly
+// beneath the origin the user is asked to trust. It rejects invisible and
+// bidirectional formatting characters there; reject them here too so callers
+// see why rather than a generic bad_request.
+const FORMATTING_CHARACTERS =
+  /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/u;
+
 function validatePairingName(name) {
   if (typeof name !== 'string' || name.length === 0 || !isWellFormedUnicode(name) ||
-      utf8Length(name) > 64 || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) {
-    throw new SyncConfigurationError('pairing name must be 1-64 UTF-8 bytes without control characters');
+      utf8Length(name) > 64 || /[\u0000-\u001f\u007f-\u009f]/u.test(name) ||
+      FORMATTING_CHARACTERS.test(name)) {
+    throw new SyncConfigurationError(
+      'pairing name must be 1-64 UTF-8 bytes without control or formatting characters',
+    );
   }
 }
 

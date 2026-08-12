@@ -19,6 +19,17 @@ struct PairingsResult {
 
 [[nodiscard]] PairingsResult parse_pairings_json(std::string_view json);
 
+struct RevocationResult {
+  bool revoked = false;
+  std::string error;
+  [[nodiscard]] bool ok() const noexcept { return error.empty(); }
+};
+
+// syncd exits 3 when a revocation reached the store but could not be confirmed
+// durable, so exit status alone cannot classify the outcome.
+[[nodiscard]] RevocationResult classify_revocation(int exit_status,
+                                                   std::string_view json);
+
 struct CompanionProcessOptions {
   std::string helper_path;
   std::string framework_path;
