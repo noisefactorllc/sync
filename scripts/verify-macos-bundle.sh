@@ -60,9 +60,9 @@ while IFS= read -r -d '' candidate; do
     BEGIN {
       split(actual, actual_parts, ".")
       split(maximum, maximum_parts, ".")
-      for (index = 1; index <= 3; index++) {
-        actual_part = actual_parts[index] + 0
-        maximum_part = maximum_parts[index] + 0
+      for (part_index = 1; part_index <= 3; part_index++) {
+        actual_part = actual_parts[part_index] + 0
+        maximum_part = maximum_parts[part_index] + 0
         if (actual_part < maximum_part) exit 0
         if (actual_part > maximum_part) exit 1
       }

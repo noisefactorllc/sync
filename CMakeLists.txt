@@ -6,6 +6,8 @@ set(SYNC_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
     "Sync product version reported by the native companion")
 set(SYNC_SYPHON_FRAMEWORK_PATH "" CACHE PATH
     "Path to the Syphon.framework bundled by the macOS packaging target")
+set(SYNC_DYLIB_SEARCH_PATH "" CACHE PATH
+    "Additional directory searched for macOS bundle dependencies")
 
 find_package(Threads REQUIRED)
 
@@ -176,6 +178,7 @@ if(APPLE)
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${SYNC_PRODUCT_VERSION}
       ${SYNC_SYPHON_FRAMEWORK_PATH}
+      ${SYNC_DYLIB_SEARCH_PATH}
     DEPENDS
       sync_menu syncd
       LICENSE

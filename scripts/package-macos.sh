@@ -7,7 +7,7 @@ source_dir="${3:-}"
 version="${4:-}"
 
 if [[ "$mode" != "bundle" && "$mode" != "dmg" ]]; then
-  echo "usage: $0 <bundle|dmg> <build-dir> <source-dir> <version> [Syphon.framework]" >&2
+  echo "usage: $0 <bundle|dmg> <build-dir> <source-dir> <version> [Syphon.framework] [dylib-search-path]" >&2
   exit 2
 fi
 if [[ -z "$build_dir" || -z "$source_dir" || -z "$version" ||
@@ -42,6 +42,7 @@ if [[ "$mode" == "dmg" ]]; then
 fi
 
 syphon_framework="${5:-}"
+dylib_search_path="${6:-}"
 for command in ditto dylibbundler rsvg-convert sips iconutil; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "package-macos: missing required command: $command" >&2
@@ -55,6 +56,11 @@ fi
 if [[ -z "$syphon_framework" || "$syphon_framework" != /* ||
       ! -d "$syphon_framework" ]]; then
   echo "package-macos: an absolute Syphon.framework path is required" >&2
+  exit 1
+fi
+if [[ -n "$dylib_search_path" &&
+      ("$dylib_search_path" != /* || ! -d "$dylib_search_path") ]]; then
+  echo "package-macos: dylib search path must be an absolute directory" >&2
   exit 1
 fi
 
@@ -84,9 +90,16 @@ iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Sync.icns"
 rm -rf "$iconset"
 
 for executable in "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd"; do
-  dylibbundler -b -cd -of -ns -x "$executable" \
-    -d "$bundle/Contents/Frameworks" \
+  dylibbundler_arguments=(
+    -b -cd -of -ns
+    -x "$executable"
+    -d "$bundle/Contents/Frameworks"
     -p '@executable_path/../Frameworks'
+  )
+  if [[ -n "$dylib_search_path" ]]; then
+    dylibbundler_arguments+=(-s "$dylib_search_path")
+  fi
+  printf 'quit\n' | dylibbundler "${dylibbundler_arguments[@]}"
 done
 
 "$source_dir/scripts/verify-macos-bundle.sh" "$bundle" "$version"

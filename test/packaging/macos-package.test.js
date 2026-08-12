@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -83,6 +93,31 @@ test("macOS packaging enforces the advertised deployment target", () => {
   assert.match(verifier, /newer than the bundle minimum/);
 });
 
+test("macOS bundle verifier accepts Mach-O targets below the advertised minimum", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-verify-test-"));
+  const copiedApp = path.join(temporaryDirectory, "Sync.app");
+  try {
+    execFileSync("/usr/bin/ditto", [app, copiedApp]);
+    execFileSync("/usr/bin/plutil", [
+      "-replace",
+      "LSMinimumSystemVersion",
+      "-string",
+      "99.0",
+      path.join(copiedApp, "Contents", "Info.plist"),
+    ]);
+    const result = spawnSync(path.join(sourceDirectory, "scripts/verify-macos-bundle.sh"), [
+      copiedApp,
+      plist("CFBundleShortVersionString"),
+    ], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("distributed third-party notices cover every linked native dependency", () => {
   const notices = readFileSync(
     path.join(sourceDirectory, "packaging/macos/Third-Party-Notices.txt"), "utf8",
@@ -115,4 +150,59 @@ test("managed helper callbacks are owned and sequenced per child process", () =>
   assert.doesNotMatch(processSource, /Impl[\s\S]*StderrCallback stderr_callback;/);
   assert.doesNotMatch(processSource, /Impl[\s\S]*ExitCallback exit_callback;/);
   assert.equal((processSource.match(/waitUntilExit/g) || []).length, 1);
+});
+
+test("macOS dependency bundling is non-interactive and uses its pinned search path", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-package-test-"));
+  try {
+    const buildDirectory = path.join(temporaryDirectory, "build");
+    const appExecutableDirectory = path.join(buildDirectory, "Sync.app", "Contents", "MacOS");
+    const framework = path.join(temporaryDirectory, "Syphon.framework");
+    const searchDirectory = path.join(temporaryDirectory, "deps", "lib");
+    const fakeBin = path.join(temporaryDirectory, "bin");
+    const argumentsFile = path.join(temporaryDirectory, "dylibbundler-arguments");
+    mkdirSync(appExecutableDirectory, { recursive: true });
+    mkdirSync(framework, { recursive: true });
+    mkdirSync(searchDirectory, { recursive: true });
+    mkdirSync(fakeBin, { recursive: true });
+    for (const executable of [
+      path.join(appExecutableDirectory, "Sync"),
+      path.join(buildDirectory, "syncd"),
+    ]) {
+      writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    writeFileSync(path.join(fakeBin, "dylibbundler"), [
+      "#!/bin/sh",
+      "printf '%s\\n' \"$@\" > \"$FAKE_DYLIB_ARGS_FILE\"",
+      "IFS= read -r answer",
+      "[ \"$answer\" = quit ] || exit 91",
+      "exit 23",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = spawnSync(path.join(sourceDirectory, "scripts/package-macos.sh"), [
+      "bundle",
+      buildDirectory,
+      sourceDirectory,
+      "0.2.3",
+      framework,
+      searchDirectory,
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FAKE_DYLIB_ARGS_FILE: argumentsFile,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      timeout: 10_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 23, result.stderr);
+    const arguments_ = readFileSync(argumentsFile, "utf8").trim().split("\n");
+    assert.deepEqual(arguments_.slice(-2), ["-s", searchDirectory]);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
