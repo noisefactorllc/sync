@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { assertLatencyAcceptance } from './latency-acceptance-contract.js';
+import {
+  assertLatencyAcceptance,
+  normalizeAcceptanceBackend,
+} from './latency-acceptance-contract.js';
 
 const REQUIREMENTS = Object.freeze({
   width: 1024,
   height: 1024,
   fps: 60,
+  backend: 'glsl',
   durationMs: 20_000,
   minimumObservedRenderFps: 55,
   minimumSamples: 120,
@@ -19,6 +23,8 @@ function passingResult() {
       width: 1024,
       height: 1024,
       fps: 60,
+      backend: 'glsl',
+      actualBackend: 'WebGL2',
       durationMs: 20_000,
     },
     browser: {
@@ -61,11 +67,20 @@ test('acceptance contract passes a sustained 1024x1024 60 fps run under 66 ms p9
   ));
 });
 
+test('acceptance backend accepts only explicit WebGL2 and WebGPU modes', () => {
+  assert.equal(normalizeAcceptanceBackend('glsl'), 'glsl');
+  assert.equal(normalizeAcceptanceBackend('wgsl'), 'wgsl');
+  assert.throws(() => normalizeAcceptanceBackend(undefined), /glsl or wgsl/);
+  assert.throws(() => normalizeAcceptanceBackend('webgpu'), /glsl or wgsl/);
+});
+
 test('acceptance contract rejects every shortcut that could make one bad frame green', async (t) => {
   const mutations = [
     ['wrong width', (result) => { result.configuration.width = 640; }, /width/],
     ['wrong height', (result) => { result.configuration.height = 480; }, /height/],
     ['wrong declared fps', (result) => { result.configuration.fps = 30; }, /fps/],
+    ['wrong requested backend', (result) => { result.configuration.backend = 'wgsl'; }, /backend/],
+    ['backend fallback', (result) => { result.configuration.actualBackend = 'WebGPU'; }, /actual backend/],
     ['short duration', (result) => { result.browser.telemetry.observedDurationMs = 1_000; }, /duration/],
     ['slow renderer', (result) => { result.browser.telemetry.observedRenderFps = 12; }, /render fps/],
     ['one sample', (result) => { result.receiver.markers = 1; }, /samples/],

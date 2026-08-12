@@ -201,6 +201,61 @@ SYNC_TEST(companion_process_bounds_management_and_never_owns_external_processes)
   SYNC_REQUIRE(!process.owned_pid().has_value());
 }
 
+SYNC_TEST(companion_process_drains_large_management_stdout_before_exit) {
+  TemporaryFixture fixture;
+  fixture.write_helper(
+      "i=0\n"
+      "while [ \"$i\" -lt 4096 ]; do\n"
+      "  printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'\n"
+      "  i=$((i + 1))\n"
+      "done\n");
+  CompanionProcess process({
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+      .management_timeout_seconds = 1.0,
+  });
+
+  bool completed = false;
+  std::string error;
+  process.list_pairings([&](std::vector<std::string>, std::string result_error) {
+    error = std::move(result_error);
+    completed = true;
+  });
+
+  SYNC_REQUIRE(wait_until([&] { return completed; }));
+  SYNC_REQUIRE(error == "Sync returned malformed pairing data.");
+}
+
+SYNC_TEST(companion_process_drains_large_management_stderr_before_exit) {
+  TemporaryFixture fixture;
+  fixture.write_helper(
+      "i=0\n"
+      "while [ \"$i\" -lt 4096 ]; do\n"
+      "  printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2\n"
+      "  i=$((i + 1))\n"
+      "done\n"
+      "printf '%s\\n' '{\"type\":\"pairings\",\"origins\":[]}'\n");
+  CompanionProcess process({
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+      .management_timeout_seconds = 1.0,
+  });
+
+  bool completed = false;
+  std::vector<std::string> origins;
+  std::string error;
+  process.list_pairings(
+      [&](std::vector<std::string> result_origins, std::string result_error) {
+        origins = std::move(result_origins);
+        error = std::move(result_error);
+        completed = true;
+      });
+
+  SYNC_REQUIRE(wait_until([&] { return completed; }));
+  SYNC_REQUIRE(error.empty());
+  SYNC_REQUIRE(origins.empty());
+}
+
 SYNC_TEST(companion_process_reports_an_unrelated_listener_as_a_port_conflict) {
   TemporaryHttpServer server;
   CompanionProcess process({

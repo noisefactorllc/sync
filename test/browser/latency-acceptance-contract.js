@@ -1,9 +1,26 @@
 import assert from 'node:assert/strict';
 
+export function normalizeAcceptanceBackend(value) {
+  if (value !== 'glsl' && value !== 'wgsl') {
+    throw new Error('SYNC_ACCEPTANCE_BACKEND must be glsl or wgsl');
+  }
+  return value;
+}
+
 export function assertLatencyAcceptance(result, requirements, { transportOnly }) {
   assert.equal(result.configuration.width, requirements.width, 'acceptance width mismatch');
   assert.equal(result.configuration.height, requirements.height, 'acceptance height mismatch');
   assert.equal(result.configuration.fps, requirements.fps, 'acceptance fps mismatch');
+  assert.equal(
+    result.configuration.backend,
+    requirements.backend,
+    'acceptance backend mismatch',
+  );
+  assert.equal(
+    result.configuration.actualBackend,
+    requirements.backend === 'wgsl' ? 'WebGPU' : 'WebGL2',
+    'acceptance actual backend mismatch',
+  );
   assert.equal(
     result.configuration.durationMs,
     requirements.durationMs,

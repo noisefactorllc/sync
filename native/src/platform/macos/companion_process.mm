@@ -208,6 +208,23 @@ struct ManagementState {
   __strong NSTask* task = nil;
 };
 
+constexpr std::size_t kManagementOutputLimit = 65'536;
+
+std::string drain_bounded(NSFileHandle* handle, std::size_t limit) {
+  std::string output;
+  output.reserve(limit);
+  while (true) {
+    @autoreleasepool {
+      NSData* data = [handle readDataOfLength:8192];
+      if (data.length == 0) break;
+      const std::size_t available = limit - output.size();
+      const std::size_t copied = std::min<std::size_t>(available, data.length);
+      output.append(static_cast<const char*>(data.bytes), copied);
+    }
+  }
+  return output;
+}
+
 struct OwnedTaskState {
   __strong NSTask* task = nil;
   __strong NSPipe* stderr_pipe = nil;
@@ -291,16 +308,27 @@ struct CompanionProcess::Impl {
       return;
     }
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    auto stdout_capture = std::make_shared<std::string>();
+    auto stderr_capture = std::make_shared<std::string>();
+    dispatch_queue_t queue =
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_async(group, queue, ^{
+      *stdout_capture =
+          drain_bounded(output.fileHandleForReading, kManagementOutputLimit);
+    });
+    dispatch_group_async(group, queue, ^{
+      *stderr_capture =
+          drain_bounded(error.fileHandleForReading, kManagementOutputLimit);
+    });
+    dispatch_group_async(group, queue, ^{
       [task waitUntilExit];
-      NSData* stdout_data = [output.fileHandleForReading readDataToEndOfFile];
-      NSData* stderr_data = [error.fileHandleForReading readDataToEndOfFile];
+    });
+    dispatch_group_notify(group, queue, ^{
       if (state->completed.exchange(true)) return;
       const int status = task.terminationStatus;
-      std::string stdout_text(
-          static_cast<const char*>(stdout_data.bytes), stdout_data.length);
-      std::string stderr_text(
-          static_cast<const char*>(stderr_data.bytes), stderr_data.length);
+      std::string stdout_text = std::move(*stdout_capture);
+      std::string stderr_text = std::move(*stderr_capture);
       on_main([completion, status, stdout_text = std::move(stdout_text),
                stderr_text = std::move(stderr_text)]() mutable {
         completion(status, std::move(stdout_text), std::move(stderr_text), false);

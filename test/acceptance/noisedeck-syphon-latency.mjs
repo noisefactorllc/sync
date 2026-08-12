@@ -4,13 +4,19 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { assertLatencyAcceptance } from '../browser/latency-acceptance-contract.js';
+import {
+  assertLatencyAcceptance,
+  normalizeAcceptanceBackend,
+} from '../browser/latency-acceptance-contract.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const NOISEDECK_ROOT = path.resolve(
   process.env.NOISEDECK_ROOT || path.join(ROOT, '..', 'noisedeck'),
 );
 const NOISEDECK_URL = process.env.NOISEDECK_URL || 'http://127.0.0.1:8000/';
+const NOISEMAKER_BASE_URL = process.env.NOISEMAKER_BASE_URL ||
+  'https://shaders.noisedeck.app/1';
+const BACKEND = normalizeAcceptanceBackend(process.env.SYNC_ACCEPTANCE_BACKEND);
 const SYPHON_FRAMEWORK_PATH = process.env.SYPHON_FRAMEWORK_PATH;
 const ACCEPTANCE_TOKEN = process.env.SYNC_ACCEPTANCE_TOKEN;
 const TRANSPORT_ONLY = process.env.SYNC_ACCEPTANCE_TRANSPORT_ONLY === '1';
@@ -64,6 +70,8 @@ if (BUFFER_LIMIT_OVERRIDE !== null &&
 const requireFromNoisedeck = createRequire(path.join(NOISEDECK_ROOT, 'package.json'));
 const { chromium } = requireFromNoisedeck('@playwright/test');
 const noisedeckOrigin = new URL(NOISEDECK_URL).origin;
+const noisedeckPageUrl = new URL(NOISEDECK_URL);
+noisedeckPageUrl.searchParams.set('backend', BACKEND);
 
 function runReceiver() {
   if (TRANSPORT_ONLY) {
@@ -108,7 +116,12 @@ function runReceiver() {
   });
 }
 
-const browser = await chromium.launch({ headless: !HEADFUL });
+const browser = await chromium.launch({
+  headless: !HEADFUL,
+  args: BACKEND === 'wgsl'
+    ? ['--enable-unsafe-webgpu', '--enable-webgpu-developer-features']
+    : [],
+});
 const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
 await context.grantPermissions(['local-network-access'], { origin: noisedeckOrigin });
 const page = await context.newPage();
@@ -157,7 +170,8 @@ async function waitForStatus(text, timeout = 10_000) {
   }
 }
 
-await page.addInitScript(() => {
+await page.addInitScript((noisemakerBaseUrl) => {
+  window.__NOISEDECK_SHADER_BASE_PATH__ = noisemakerBaseUrl;
   localStorage.setItem(
     'noisedeck-app-settings',
     JSON.stringify({ showStartupDialog: false }),
@@ -198,16 +212,20 @@ await page.addInitScript(() => {
     }
     return originalSend.call(this, data);
   };
-});
+}, NOISEMAKER_BASE_URL);
 
 let startedState;
 let finalState;
 let browserSamples = [];
 let receiverResult;
 let graphics;
+let actualBackend;
 let observedDurationMs = 0;
 try {
-  await page.goto(NOISEDECK_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.goto(noisedeckPageUrl.href, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30_000,
+  });
   await page.waitForFunction(() => {
     const app = document.getElementById('app-container');
     const loading = document.getElementById('loadingOverlay');
@@ -223,6 +241,9 @@ try {
   }, null, {
     timeout: 30_000,
   });
+  actualBackend = await page.evaluate(
+    () => window.__noisemakerCanvasRenderer.pipeline.backend.getName(),
+  );
   await page.locator('#menu .hf-menubar-trigger', { hasText: 'view' }).click();
   await page.locator('#syncOutputMenuItem').click();
   await page.locator('#syncOutputAction').filter({ hasText: 'Connect Sync' }).waitFor({
@@ -314,6 +335,9 @@ const output = {
     width: startedState.width,
     height: startedState.height,
     fps: startedState.fps,
+    backend: BACKEND,
+    actualBackend,
+    noisemakerBaseUrl: NOISEMAKER_BASE_URL,
     durationMs: DURATION_MS,
     maxBufferedBytesOverride: BUFFER_LIMIT_OVERRIDE,
     headful: HEADFUL,
@@ -344,6 +368,7 @@ assertLatencyAcceptance(output, {
   width: EXPECTED_WIDTH,
   height: EXPECTED_HEIGHT,
   fps: EXPECTED_FPS,
+  backend: BACKEND,
   durationMs: DURATION_MS,
   minimumObservedRenderFps: MINIMUM_OBSERVED_RENDER_FPS,
   minimumSamples: MINIMUM_SAMPLES,
