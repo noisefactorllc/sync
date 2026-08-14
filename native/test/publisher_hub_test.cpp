@@ -14,6 +14,8 @@
 namespace {
 
 using noisefactor::sync::FramePublisher;
+using noisefactor::sync::ProviderFailure;
+using noisefactor::sync::ProviderFailureKind;
 using noisefactor::sync::PublishResult;
 using noisefactor::sync::PublisherHub;
 using noisefactor::sync::protocol::FrameView;
@@ -62,13 +64,23 @@ class RecordingProvider final : public FramePublisher {
     return checksum;
   }
 
+  auto poll_failure(std::uint64_t now_ms) noexcept
+      -> std::optional<ProviderFailure> override {
+    ++poll_calls;
+    last_poll_ms = now_ms;
+    return failure;
+  }
+
   bool open_result = true;
   PublishResult publish_result = PublishResult::Accepted;
   std::uint64_t checksum = 0;
+  std::optional<ProviderFailure> failure;
+  std::uint64_t last_poll_ms = 0;
   std::size_t open_calls = 0;
   std::size_t close_calls = 0;
   std::size_t publish_calls = 0;
   mutable std::size_t checksum_calls = 0;
+  std::size_t poll_calls = 0;
   std::vector<std::string> opened_ids;
   std::vector<std::string> opened_names;
   std::vector<std::string> closed_ids;
@@ -301,4 +313,30 @@ SYNC_TEST(publisher_hub_closed_senders_receive_no_calls_and_churn_has_no_stale_p
   hub.close_sender("reused");
   SYNC_REQUIRE(first.close_calls == 3);
   SYNC_REQUIRE(second.close_calls == 2);
+}
+
+SYNC_TEST(publisher_hub_propagates_the_first_provider_failure_in_stable_order) {
+  RecordingProvider first;
+  RecordingProvider second;
+  first.failure = ProviderFailure{
+      .kind = ProviderFailureKind::MetalCommandFailed,
+      .native_status = 5,
+      .native_error_code = -9,
+  };
+  second.failure = ProviderFailure{
+      .kind = ProviderFailureKind::MetalWatchdogTimeout,
+  };
+  std::array<FramePublisher*, 2> providers{&first, &second};
+  PublisherHub hub(providers);
+
+  const auto observed = hub.poll_failure(1'234);
+  SYNC_REQUIRE(observed.has_value());
+  SYNC_REQUIRE(observed->kind == ProviderFailureKind::MetalCommandFailed);
+  SYNC_REQUIRE(observed->native_status == 5);
+  SYNC_REQUIRE(observed->native_error_code == -9);
+  SYNC_REQUIRE(first.last_poll_ms == 1'234);
+  SYNC_REQUIRE(first.poll_calls == 1);
+  SYNC_REQUIRE(second.poll_calls == 0);
+  SYNC_REQUIRE(first.publish_calls == 0);
+  SYNC_REQUIRE(second.publish_calls == 0);
 }

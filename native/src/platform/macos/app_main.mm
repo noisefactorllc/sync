@@ -7,6 +7,7 @@
 #include <sync/server.hpp>
 
 #include <memory>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -42,6 +43,11 @@ void show_error(NSString* title, NSString* message) {
   alert.informativeText = message;
   [alert addButtonWithTitle:@"OK"];
   [alert runModal];
+}
+
+std::uint64_t monotonic_milliseconds() noexcept {
+  return static_cast<std::uint64_t>(
+      NSProcessInfo.processInfo.systemUptime * 1'000.0);
 }
 
 } // namespace
@@ -102,14 +108,20 @@ void show_error(NSString* title, NSString* message) {
 }
 
 - (void)probeThenStart {
+  const std::uint64_t generation = _model->recovery_generation();
   __weak SyncAppDelegate* weakSelf = self;
-  _process->probe([weakSelf](std::optional<companion::HealthSnapshot> health,
-                            std::string error) {
+  _process->probe([weakSelf, generation](
+                      std::optional<companion::HealthSnapshot> health,
+                      std::string error) {
     (void)error;
     SyncAppDelegate* self = weakSelf;
-    if (self == nil || self->_quitting) return;
+    if (self == nil || self->_quitting ||
+        self->_model->recovery_generation() != generation) {
+      return;
+    }
     if (health.has_value()) {
-      self->_model->observe_health(std::move(*health));
+      self->_model->observe_health(std::move(*health),
+                                   monotonic_milliseconds());
       return;
     }
     [self startHelper];
@@ -131,12 +143,16 @@ void show_error(NSString* title, NSString* message) {
         if (self == nil) return;
         const bool expected = self->_expectedExit || self->_quitting;
         self->_expectedExit = NO;
-        self->_model->helper_exited(status, expected);
+        const auto recovery = self->_model->helper_exited(
+            status, expected, monotonic_milliseconds());
+        if (recovery.has_value()) [self scheduleRecovery:*recovery];
       },
       error);
   if (!started) {
-    _model->helper_exited(-1, false);
+    const auto recovery = _model->helper_exited(
+        -1, false, monotonic_milliseconds());
     _model->append_stderr(error);
+    if (recovery.has_value()) [self scheduleRecovery:*recovery];
     return;
   }
   if (const auto pid = _process->owned_pid(); pid.has_value()) {
@@ -144,19 +160,131 @@ void show_error(NSString* title, NSString* message) {
   }
 }
 
+- (void)scheduleRecovery:(companion::RecoverySchedule)schedule {
+  if (_quitting || !_model->recovery_active() ||
+      _model->recovery_generation() != schedule.generation) {
+    return;
+  }
+  const std::uint64_t now = monotonic_milliseconds();
+  const std::uint64_t delay_ms = schedule.due_ms > now
+                                     ? schedule.due_ms - now
+                                     : 0;
+  __weak SyncAppDelegate* weakSelf = self;
+  dispatch_after(
+      dispatch_time(DISPATCH_TIME_NOW,
+                    static_cast<int64_t>(delay_ms * NSEC_PER_MSEC)),
+      dispatch_get_main_queue(), ^{
+        SyncAppDelegate* self = weakSelf;
+        if (self == nil || self->_quitting) return;
+        const std::uint64_t observed_at = monotonic_milliseconds();
+        if (observed_at < schedule.due_ms) {
+          [self scheduleRecovery:schedule];
+          return;
+        }
+        if (!self->_model->begin_recovery_attempt(schedule, observed_at)) {
+          return;
+        }
+        [self preflightRecovery:schedule.generation];
+      });
+}
+
+- (void)preflightRecovery:(std::uint64_t)generation {
+  if (_quitting || _model->recovery_generation() != generation) return;
+  __weak SyncAppDelegate* weakSelf = self;
+  _process->probe([weakSelf, generation](
+                      std::optional<companion::HealthSnapshot> health,
+                      std::string error) {
+    (void)error;
+    SyncAppDelegate* self = weakSelf;
+    if (self == nil || self->_quitting ||
+        self->_model->recovery_generation() != generation) {
+      return;
+    }
+    if (health.has_value()) {
+      if (!health->compatible) {
+        const auto retry = self->_model->recovery_preflight_conflict(
+            std::move(*health), monotonic_milliseconds());
+        if (retry.has_value()) [self scheduleRecovery:*retry];
+        return;
+      }
+      self->_model->observe_health(std::move(*health),
+                                   monotonic_milliseconds());
+      return;
+    }
+    [self startRecoveryHelper:generation];
+  });
+}
+
+- (void)startRecoveryHelper:(std::uint64_t)generation {
+  if (_quitting || _model->recovery_generation() != generation ||
+      _process->owned_pid().has_value()) {
+    return;
+  }
+  __weak SyncAppDelegate* weakSelf = self;
+  std::string error;
+  const bool started = _process->start(
+      [weakSelf](std::string_view bytes) {
+        SyncAppDelegate* self = weakSelf;
+        if (self != nil) self->_model->append_stderr(bytes);
+      },
+      [weakSelf](int status) {
+        SyncAppDelegate* self = weakSelf;
+        if (self == nil) return;
+        const bool expected = self->_expectedExit || self->_quitting;
+        self->_expectedExit = NO;
+        const auto recovery = self->_model->helper_exited(
+            status, expected, monotonic_milliseconds());
+        if (recovery.has_value()) [self scheduleRecovery:*recovery];
+      },
+      error);
+  if (!started) {
+    _model->append_stderr(error);
+    const auto recovery = _model->recovery_launch_failed(
+        -1, monotonic_milliseconds());
+    if (recovery.has_value()) [self scheduleRecovery:*recovery];
+    return;
+  }
+  if (const auto pid = _process->owned_pid(); pid.has_value()) {
+    _model->helper_started(*pid, monotonic_milliseconds());
+  } else {
+    const auto recovery = _model->recovery_launch_failed(
+        -1, monotonic_milliseconds());
+    if (recovery.has_value()) [self scheduleRecovery:*recovery];
+  }
+}
+
 - (void)pollStatus:(NSTimer*)timer {
   (void)timer;
   if (_quitting) return;
+  // While no replacement task exists, the generation-bound recovery preflight
+  // is the sole owner of discovery. This prevents the periodic poll from
+  // consuming or cancelling the same attempt concurrently.
+  if (_model->recovery_active() && !_process->owned_pid().has_value()) return;
+  const std::uint64_t generation = _model->recovery_generation();
   __weak SyncAppDelegate* weakSelf = self;
-  _process->probe([weakSelf](std::optional<companion::HealthSnapshot> health,
-                            std::string error) {
+  _process->probe([weakSelf, generation](
+                      std::optional<companion::HealthSnapshot> health,
+                      std::string error) {
     (void)error;
     SyncAppDelegate* self = weakSelf;
-    if (self == nil || self->_quitting) return;
+    if (self == nil || self->_quitting ||
+        self->_model->recovery_generation() != generation) {
+      return;
+    }
     if (health.has_value()) {
-      self->_model->observe_health(std::move(*health));
+      if (self->_model->recovery_active() &&
+          self->_process->owned_pid().has_value() && !health->compatible) {
+        const bool terminate_owned = self->_model->observe_health_failure(
+            monotonic_milliseconds());
+        if (terminate_owned) self->_process->terminate([] {});
+        return;
+      }
+      self->_model->observe_health(std::move(*health),
+                                   monotonic_milliseconds());
     } else {
-      self->_model->observe_health_failure();
+      const bool terminate_owned = self->_model->observe_health_failure(
+          monotonic_milliseconds());
+      if (terminate_owned) self->_process->terminate([] {});
     }
   });
 }
@@ -277,17 +405,16 @@ void show_error(NSString* title, NSString* message) {
 
 - (void)restartSync:(id)sender {
   (void)sender;
+  _model->manual_restart();
   if (_process->owned_pid().has_value()) {
     _expectedExit = YES;
     __weak SyncAppDelegate* weakSelf = self;
     _process->terminate([weakSelf] {
       SyncAppDelegate* self = weakSelf;
       if (self == nil || self->_quitting) return;
-      self->_model->manual_restart();
       [self startHelper];
     });
   } else {
-    _model->manual_restart();
     [self probeThenStart];
   }
 }
@@ -349,8 +476,9 @@ void show_error(NSString* title, NSString* message) {
   const BOOL changed = enabled ? [service unregisterAndReturnError:&error]
                                : [service registerAndReturnError:&error];
   if (!changed) {
+    NSString* description = error.localizedDescription;
     show_error(@"Could not update Launch at Login",
-               error.localizedDescription ?: @"Unknown error");
+               description != nil ? description : @"Unknown error");
   }
 }
 
@@ -392,6 +520,7 @@ void show_error(NSString* title, NSString* message) {
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
   (void)sender;
   _quitting = YES;
+  _model->cancel_recovery();
   [_pollTimer invalidate];
   if (!_process->owned_pid().has_value()) return NSTerminateNow;
   _expectedExit = YES;

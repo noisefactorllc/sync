@@ -132,4 +132,15 @@ auto PublisherHub::diagnostic_checksum(std::string_view sender_id) const noexcep
   return 0;
 }
 
+auto PublisherHub::poll_failure(std::uint64_t now_ms) noexcept
+    -> std::optional<ProviderFailure> {
+  for (std::size_t index = 0; index < provider_count_; ++index) {
+    if (auto failure = providers_[index]->poll_failure(now_ms);
+        failure.has_value()) {
+      return failure;
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace noisefactor::sync

@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <memory_resource>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -136,6 +138,28 @@ std::vector<std::byte> masked_binary_frame(std::size_t payload_size) {
   for (std::size_t index = 0; index < payload_size; ++index) {
     const auto value = static_cast<std::uint8_t>(index & 0xffU);
     frame.push_back(static_cast<std::byte>(value ^ mask[index % mask.size()]));
+  }
+  return frame;
+}
+
+std::vector<std::byte> masked_binary_header(std::size_t payload_size) {
+  const std::array<std::uint8_t, 4> mask = {0x11, 0x22, 0x33, 0x44};
+  std::vector<std::byte> frame = {std::byte{0x82}};
+  if (payload_size <= 125) {
+    frame.push_back(static_cast<std::byte>(0x80U | payload_size));
+  } else if (payload_size <= 65'535) {
+    frame.push_back(std::byte{0xfe});
+    frame.push_back(static_cast<std::byte>((payload_size >> 8U) & 0xffU));
+    frame.push_back(static_cast<std::byte>(payload_size & 0xffU));
+  } else {
+    frame.push_back(std::byte{0xff});
+    for (int shift = 56; shift >= 0; shift -= 8) {
+      frame.push_back(
+          static_cast<std::byte>((payload_size >> shift) & 0xffU));
+    }
+  }
+  for (const std::uint8_t byte : mask) {
+    frame.push_back(static_cast<std::byte>(byte));
   }
   return frame;
 }
@@ -304,6 +328,100 @@ SYNC_TEST(client_decoder_rejects_a_zero_message_limit) {
     threw = true;
   }
   SYNC_REQUIRE(threw);
+}
+
+SYNC_TEST(payload_memory_resource_counts_transient_reallocation) {
+  ws::PayloadMemoryResource budget(12);
+  std::pmr::vector<std::byte> payload(&budget);
+  payload.reserve(8);
+  SYNC_REQUIRE(budget.limit_bytes() == 12);
+  SYNC_REQUIRE(budget.used_bytes() == 8);
+  SYNC_REQUIRE(budget.peak_bytes() == 8);
+
+  bool threw = false;
+  try {
+    payload.reserve(12);
+  } catch (const std::bad_alloc&) {
+    threw = true;
+  }
+  SYNC_REQUIRE(threw);
+  SYNC_REQUIRE(payload.capacity() == 8);
+  SYNC_REQUIRE(budget.used_bytes() == 8);
+  SYNC_REQUIRE(budget.peak_bytes() == 8);
+}
+
+SYNC_TEST(client_decoders_share_a_bounded_payload_resource) {
+  ws::PayloadMemoryResource budget(128);
+  std::vector<ws::Message> first_output;
+  std::vector<ws::Message> second_output;
+  const auto header = masked_binary_header(80);
+
+  auto first = std::make_unique<ws::ClientFrameDecoder>(
+      128, ws::PayloadSensitivity::NonSensitive, nullptr,
+      ws::kMaximumReusablePayloadBytes, &budget);
+  ws::ClientFrameDecoder second(
+      128, ws::PayloadSensitivity::NonSensitive, nullptr,
+      ws::kMaximumReusablePayloadBytes, &budget);
+
+  SYNC_REQUIRE(first->feed(header, first_output) == ws::DecodeError::None);
+  SYNC_REQUIRE(budget.used_bytes() == 80);
+  SYNC_REQUIRE(second.feed(header, second_output) ==
+               ws::DecodeError::ResourceExhausted);
+  SYNC_REQUIRE(budget.used_bytes() == 80);
+
+  first.reset();
+  ws::ClientFrameDecoder replacement(
+      128, ws::PayloadSensitivity::NonSensitive, nullptr,
+      ws::kMaximumReusablePayloadBytes, &budget);
+  SYNC_REQUIRE(replacement.feed(header, first_output) == ws::DecodeError::None);
+  SYNC_REQUIRE(budget.peak_bytes() <= budget.limit_bytes());
+}
+
+SYNC_TEST(client_decoder_tracks_absolute_fragmented_message_liveness) {
+  ws::ClientFrameDecoder decoder(128);
+  std::vector<ws::Message> output;
+  const auto first = masked_frame(false, ws::Opcode::Binary, "first");
+  const auto ping = masked_frame(true, ws::Opcode::Ping, "p");
+  const auto last = masked_frame(true, ws::Opcode::Continuation, "last");
+
+  SYNC_REQUIRE(!decoder.message_in_progress());
+  SYNC_REQUIRE(decoder.message_generation() == 0);
+  SYNC_REQUIRE(decoder.feed(std::span(first).first(1), output) ==
+               ws::DecodeError::None);
+  const auto generation = decoder.message_generation();
+  SYNC_REQUIRE(generation != 0);
+  SYNC_REQUIRE(decoder.message_in_progress());
+
+  SYNC_REQUIRE(decoder.feed(std::span(first).subspan(1), output) ==
+               ws::DecodeError::None);
+  SYNC_REQUIRE(decoder.message_in_progress());
+  SYNC_REQUIRE(decoder.feed(ping, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(decoder.message_generation() == generation);
+  SYNC_REQUIRE(decoder.message_in_progress());
+
+  SYNC_REQUIRE(decoder.feed(last, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(!decoder.message_in_progress());
+  SYNC_REQUIRE(decoder.message_generation() == generation);
+}
+
+SYNC_TEST(client_decoder_exposes_a_new_partial_message_started_in_the_same_feed) {
+  ws::ClientFrameDecoder decoder(128);
+  std::vector<ws::Message> output;
+  const auto first = masked_frame(true, ws::Opcode::Binary, "one");
+  const auto second = masked_frame(true, ws::Opcode::Binary, "two");
+  const auto third = masked_frame(true, ws::Opcode::Binary, "three");
+
+  SYNC_REQUIRE(decoder.feed(first, output) == ws::DecodeError::None);
+  const auto first_generation = decoder.message_generation();
+  SYNC_REQUIRE(first_generation != 0);
+  SYNC_REQUIRE(!decoder.message_in_progress());
+
+  auto combined = second;
+  combined.push_back(third.front());
+  SYNC_REQUIRE(decoder.feed(combined, output) == ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 2);
+  SYNC_REQUIRE(decoder.message_in_progress());
+  SYNC_REQUIRE(decoder.message_generation() != first_generation);
 }
 
 SYNC_TEST(client_decoder_accepts_text_and_binary_frames_one_tcp_byte_at_a_time) {

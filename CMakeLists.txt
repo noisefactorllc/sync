@@ -235,6 +235,7 @@ if(APPLE)
   )
 
   add_library(sync_metal_publisher
+    native/src/platform/macos/metal_completion_tracker.cpp
     native/src/platform/macos/metal_frame_publisher.mm
   )
   target_compile_features(sync_metal_publisher PUBLIC cxx_std_20)
@@ -249,6 +250,7 @@ if(APPLE)
   )
 
   add_executable(sync_metal_publisher_tests
+    native/test/macos/metal_completion_tracker_test.cpp
     native/test/macos/metal_frame_publisher_test.mm
     native/test/test_main.cpp
   )

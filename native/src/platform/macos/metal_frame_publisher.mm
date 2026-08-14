@@ -4,34 +4,19 @@
 #include <sync/platform/metal_frame_consumer.hpp>
 #include <sync/platform/metal_frame_publisher.hpp>
 
+#include "metal_completion_tracker.hpp"
 #include "metal_device_selection.hpp"
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <utility>
-
-@interface SyncMetalCompletionToken : NSObject {
- @public
-  std::atomic<bool> busy;
-}
-@end
-
-@implementation SyncMetalCompletionToken
-- (instancetype)init {
-  self = [super init];
-  if (self != nil) {
-    busy.store(false, std::memory_order_relaxed);
-  }
-  return self;
-}
-@end
 
 namespace noisefactor::sync {
 namespace {
@@ -41,6 +26,7 @@ constexpr std::size_t kMaximumSenderNameBytes = 64;
 constexpr std::uint32_t kMaximumDimension = 4096;
 constexpr std::uint32_t kMaximumPayloadBytes = 64U * 1024U * 1024U;
 constexpr std::size_t kMetalRowAlignment = 256;
+constexpr std::uint64_t kMetalWatchdogTimeoutMs = 1'000;
 
 auto select_metal_device() noexcept -> id<MTLDevice> {
   @try {
@@ -130,7 +116,7 @@ struct MetalFramePublisher::Impl {
   struct Slot {
     id<MTLBuffer> __strong staging_buffer = nil;
     id<MTLTexture> __strong texture = nil;
-    SyncMetalCompletionToken* __strong token = nil;
+    std::shared_ptr<detail::MetalCompletionTracker> completion;
   };
 
   struct Ring {
@@ -143,7 +129,7 @@ struct MetalFramePublisher::Impl {
 
     [[nodiscard]] auto idle() const noexcept -> bool {
       for (const Slot& slot : slots) {
-        if (slot.token != nil && slot.token->busy.load(std::memory_order_acquire)) {
+        if (slot.completion != nullptr && !slot.completion->available()) {
           return false;
         }
       }
@@ -173,6 +159,9 @@ struct MetalFramePublisher::Impl {
   std::size_t allocation_budget_bytes = 0;
   std::size_t allocated_bytes = 0;
   bool configuration_valid = true;
+  std::shared_ptr<detail::MetalFailureLatch> failure_latch =
+      std::make_shared<detail::MetalFailureLatch>();
+  std::uint64_t observed_now_ms = 0;
   std::array<SenderEntry, MetalFramePublisher::kMaximumSenderEntries> senders{};
 
   void reap_drained() noexcept {
@@ -220,6 +209,15 @@ struct MetalFramePublisher::Impl {
     result.staging_stride = stride;
     result.resource_bytes = ring_bytes;
 
+    try {
+      for (Slot& slot : result.slots) {
+        slot.completion =
+            std::make_shared<detail::MetalCompletionTracker>(failure_latch);
+      }
+    } catch (const std::exception&) {
+      return false;
+    }
+
     @try {
       MTLTextureDescriptor* descriptor =
           [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -233,8 +231,7 @@ struct MetalFramePublisher::Impl {
         slot.staging_buffer =
             [device newBufferWithLength:staging_bytes options:MTLResourceStorageModeShared];
         slot.texture = [device newTextureWithDescriptor:descriptor];
-        slot.token = [[SyncMetalCompletionToken alloc] init];
-        if (slot.staging_buffer == nil || slot.texture == nil || slot.token == nil) {
+        if (slot.staging_buffer == nil || slot.texture == nil) {
           return false;
         }
       }
@@ -464,7 +461,8 @@ void MetalFramePublisher::close_sender(std::string_view sender_id) noexcept {
 auto MetalFramePublisher::publish(std::string_view sender_id,
                                   const protocol::FrameView& frame) noexcept -> PublishResult {
   @autoreleasepool {
-    if (!available() || !view_is_valid(frame)) {
+    if (!available() || impl_->failure_latch->failed() ||
+        !view_is_valid(frame)) {
       return PublishResult::Failed;
     }
     impl_->reap_drained();
@@ -480,9 +478,7 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
 
     Impl::Slot* claimed_slot = nullptr;
     for (Impl::Slot& slot : entry->ring.slots) {
-      bool expected = false;
-      if (slot.token->busy.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                    std::memory_order_acquire)) {
+      if (slot.completion->try_begin(impl_->observed_now_ms)) {
         claimed_slot = &slot;
         break;
       }
@@ -494,7 +490,7 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
     const std::size_t packed_row_bytes = static_cast<std::size_t>(frame.width) * 4U;
     auto* destination = static_cast<std::byte*>(claimed_slot->staging_buffer.contents);
     if (destination == nullptr) {
-      claimed_slot->token->busy.store(false, std::memory_order_release);
+      claimed_slot->completion->cancel_before_commit();
       return PublishResult::Failed;
     }
     if (static_cast<std::size_t>(frame.row_stride) == entry->ring.staging_stride) {
@@ -509,15 +505,16 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
 
     id<MTLCommandBuffer> command_buffer = nil;
     bool encoded = false;
+    bool completion_installed = false;
     @try {
       command_buffer = [impl_->command_queue commandBuffer];
       if (command_buffer == nil) {
-        claimed_slot->token->busy.store(false, std::memory_order_release);
+        claimed_slot->completion->cancel_before_commit();
         return PublishResult::Failed;
       }
       id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
       if (blit == nil) {
-        claimed_slot->token->busy.store(false, std::memory_order_release);
+        claimed_slot->completion->cancel_before_commit();
         return PublishResult::Failed;
       }
       [blit copyFromBuffer:claimed_slot->staging_buffer
@@ -550,23 +547,53 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
         }
       }
       if (!encoded) {
-        claimed_slot->token->busy.store(false, std::memory_order_release);
+        claimed_slot->completion->cancel_before_commit();
         return PublishResult::Failed;
       }
 
-      SyncMetalCompletionToken* completion_token = claimed_slot->token;
-      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+      auto completion = claimed_slot->completion;
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         @autoreleasepool {
-          completion_token->busy.store(false, std::memory_order_release);
+          if (completed.status == MTLCommandBufferStatusCompleted) {
+            completion->complete_success();
+          } else {
+            const std::int64_t error_code =
+                completed.error == nil
+                    ? 0
+                    : static_cast<std::int64_t>(completed.error.code);
+            completion->complete_failure(
+                static_cast<std::uint32_t>(completed.status), error_code);
+          }
         }
       }];
+      completion_installed = true;
       [command_buffer commit];
     } @catch (NSException*) {
-      claimed_slot->token->busy.store(false, std::memory_order_release);
+      if (completion_installed) {
+        claimed_slot->completion->complete_failure(0, 0);
+      } else {
+        claimed_slot->completion->cancel_before_commit();
+      }
       return PublishResult::Failed;
     }
     return PublishResult::Accepted;
   }
+}
+
+auto MetalFramePublisher::poll_failure(std::uint64_t now_ms) noexcept
+    -> std::optional<ProviderFailure> {
+  if (impl_ == nullptr) return std::nullopt;
+  impl_->observed_now_ms = now_ms;
+  for (Impl::SenderEntry& entry : impl_->senders) {
+    if (!entry.ring.allocated) continue;
+    for (Impl::Slot& slot : entry.ring.slots) {
+      if (slot.completion != nullptr) {
+        (void)slot.completion->poll_watchdog(now_ms,
+                                             kMetalWatchdogTimeoutMs);
+      }
+    }
+  }
+  return impl_->failure_latch->failure();
 }
 
 }  // namespace noisefactor::sync

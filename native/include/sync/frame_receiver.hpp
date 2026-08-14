@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -15,6 +16,28 @@ enum class PublishResult {
   Backpressured,
   Failed,
 };
+
+enum class ProviderFailureKind : std::uint8_t {
+  MetalCommandFailed,
+  MetalWatchdogTimeout,
+};
+
+struct ProviderFailure {
+  ProviderFailureKind kind = ProviderFailureKind::MetalCommandFailed;
+  std::uint32_t native_status = 0;
+  std::int64_t native_error_code = 0;
+};
+
+[[nodiscard]] constexpr std::string_view provider_failure_name(
+    ProviderFailureKind kind) noexcept {
+  switch (kind) {
+    case ProviderFailureKind::MetalCommandFailed:
+      return "metal_command_failed";
+    case ProviderFailureKind::MetalWatchdogTimeout:
+      return "metal_watchdog_timeout";
+  }
+  return "unknown_provider_failure";
+}
 
 class FramePublisher {
  public:
@@ -40,6 +63,12 @@ class FramePublisher {
       -> std::uint64_t {
     (void)sender_id;
     return 0;
+  }
+
+  virtual auto poll_failure(std::uint64_t now_ms) noexcept
+      -> std::optional<ProviderFailure> {
+    (void)now_ms;
+    return std::nullopt;
   }
 };
 

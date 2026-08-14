@@ -11,6 +11,7 @@ import {
   SyncLifecycleError,
   SyncPermissionDeniedError,
   SyncPermissionRequiredError,
+  SyncSenderLostError,
   SyncPairingBusyError,
   SyncPairingDeniedError,
   SyncPairingDurabilityError,
@@ -141,9 +142,9 @@ class FakeWebSocket {
     this.emit('error', {});
   }
 
-  remoteClose() {
+  remoteClose(code = 1006, reason = '') {
     this.readyState = FakeWebSocket.CLOSED;
-    this.emit('close', { code: 1006, reason: '' });
+    this.emit('close', { code, reason });
   }
 
   send(value) {
@@ -1479,6 +1480,77 @@ test('an unexpected control close synchronously stops every active data sink', a
   await assert.rejects(sender.closed);
 });
 
+test('unexpected data close rejects once with a bounded typed loss descriptor', async () => {
+  const commands = [];
+  scriptedControl({ onControl: (message) => commands.push(message) });
+  const exportQueue = new ExportQueue();
+  const bridge = client();
+  await bridge.connect();
+  const sender = await bridge.createSender('Sender', {
+    exportQueue, maxBufferedBytes: 1024, clock: { timeOrigin: 0 },
+  });
+  const data = FakeWebSocket.instances[1];
+
+  data.remoteClose(1013, 'inbound_budget_exhausted');
+  await assert.rejects(sender.closed, (error) => {
+    assert.ok(error instanceof SyncSenderLostError);
+    assert.equal(error.code, 'SYNC_SENDER_LOST');
+    assert.equal(error.closeCode, 1013);
+    assert.equal(error.closeReason, 'inbound_budget_exhausted');
+    return true;
+  });
+
+  assert.deepEqual(exportQueue.closeOptions, [{ backendLost: true }]);
+  assert.equal(data.closeCalls, 1);
+  assert.equal(commands.filter(({ type }) => type === 'closeSender').length, 1);
+  bridge.close();
+});
+
+test('incomplete-frame policy close preserves its exact bounded recovery descriptor', async () => {
+  scriptedControl();
+  const bridge = client();
+  await bridge.connect();
+  const sender = await bridge.createSender('Sender', {
+    exportQueue: new ExportQueue(), maxBufferedBytes: 1024, clock: { timeOrigin: 0 },
+  });
+
+  FakeWebSocket.instances[1].remoteClose(1008, 'incomplete_frame_timeout');
+  await assert.rejects(sender.closed, (error) => {
+    assert.ok(error instanceof SyncSenderLostError);
+    assert.equal(error.closeCode, 1008);
+    assert.equal(error.closeReason, 'incomplete_frame_timeout');
+    return true;
+  });
+  bridge.close();
+});
+
+test('data error followed by close settles one loss and cleans every resource once', async () => {
+  const commands = [];
+  scriptedControl({ onControl: (message) => commands.push(message) });
+  const exportQueue = new ExportQueue();
+  const bridge = client();
+  await bridge.connect();
+  const sender = await bridge.createSender('Sender', {
+    exportQueue, maxBufferedBytes: 1024, clock: { timeOrigin: 0 },
+  });
+  const data = FakeWebSocket.instances[1];
+
+  data.fail();
+  data.remoteClose(1008, 'incomplete_frame_timeout');
+  await assert.rejects(sender.closed, (error) => {
+    assert.ok(error instanceof SyncSenderLostError);
+    assert.equal(error.closeCode, null);
+    assert.equal(error.closeReason, '');
+    return true;
+  });
+
+  assert.equal(exportQueue.closeCalls, 1);
+  assert.equal(data.closeCalls, 1);
+  assert.equal(data.listenerCount, 0);
+  assert.equal(commands.filter(({ type }) => type === 'closeSender').length, 1);
+  bridge.close();
+});
+
 test('control loss cancels a post-allocation CONNECTING data socket in the same session', async () => {
   FakeWebSocket.reset((socket) => {
     if (!socket.url.endsWith('/control')) return;
@@ -1661,7 +1733,11 @@ test('an unexpected data-socket close releases the native sender through the con
   });
 
   FakeWebSocket.instances[1].remoteClose();
-  await sender.closed;
+  await assert.rejects(sender.closed, (error) => {
+    assert.ok(error instanceof SyncSenderLostError);
+    assert.equal(error.closeCode, 1006);
+    return true;
+  });
   assert.deepEqual(commands.map(({ type }) => type), ['hello', 'createSender', 'closeSender']);
   assert.equal(sender.submit('texture', 0), false);
   bridge.close();

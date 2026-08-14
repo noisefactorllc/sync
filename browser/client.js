@@ -34,6 +34,7 @@ export const SYNC_ERROR_CODE = Object.freeze({
   PAIRING_STORE: 'SYNC_PAIRING_STORE',
   PAIRING_DURABILITY: 'SYNC_PAIRING_DURABILITY',
   PAIRING_ORIGIN_LIMIT: 'SYNC_PAIRING_ORIGIN_LIMIT',
+  SENDER_LOST: 'SYNC_SENDER_LOST',
 });
 
 export class SyncBridgeError extends Error {
@@ -78,6 +79,23 @@ export class SyncCapabilityError extends SyncBridgeError {
 export class SyncLifecycleError extends SyncBridgeError {
   constructor(message = 'Sync client is closed', options = {}) {
     super(message, { ...options, code: SYNC_ERROR_CODE.LIFECYCLE });
+  }
+}
+
+export class SyncSenderLostError extends SyncBridgeError {
+  constructor(message = 'Sync sender connection was lost', {
+    closeCode = null,
+    closeReason = '',
+    cause,
+  } = {}) {
+    super(message, { cause, code: SYNC_ERROR_CODE.SENDER_LOST });
+    this.closeCode = Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 65_535
+      ? closeCode
+      : null;
+    this.closeReason = typeof closeReason === 'string' &&
+      isWellFormedUnicode(closeReason) && utf8Length(closeReason) <= 123
+      ? closeReason
+      : '';
   }
 }
 
@@ -573,7 +591,7 @@ class SyncSenderSink {
     this._completion = deferred();
     this.closed = this._completion.promise;
     this._dataSocket = dataSocket;
-    this._dataEnded = () => this._remoteEnd();
+    this._dataEnded = (event) => this._remoteEnd(event);
     dataSocket.addEventListener('error', this._dataEnded);
     dataSocket.addEventListener('close', this._dataEnded);
   }
@@ -622,9 +640,18 @@ class SyncSenderSink {
     this._frameSink.close(options);
   }
 
-  _remoteEnd() {
+  _remoteEnd(event) {
     if (this._closed) return;
-    try { this.close(); } catch {}
+    this._closed = true;
+    const error = new SyncSenderLostError(undefined, {
+      closeCode: event?.code,
+      closeReason: event?.reason,
+    });
+    try { this._closeLocal({ backendLost: true }); } catch {}
+    this._completion.reject(error);
+    try {
+      this._client._requestSenderClose(this).catch(() => {});
+    } catch {}
   }
 }
 

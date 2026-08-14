@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cctype>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -194,6 +196,38 @@ bool valid_close_payload(std::span<const std::byte> payload) {
 
 }  // namespace
 
+PayloadMemoryResource::PayloadMemoryResource(
+    std::size_t limit_bytes, std::pmr::memory_resource* upstream)
+    : limit_bytes_(limit_bytes), upstream_(upstream) {
+  if (limit_bytes == 0 || upstream == nullptr) {
+    throw std::invalid_argument(
+        "Payload memory resource requires a nonzero limit and upstream");
+  }
+}
+
+void* PayloadMemoryResource::do_allocate(std::size_t bytes,
+                                         std::size_t alignment) {
+  if (bytes > limit_bytes_ - used_bytes_) {
+    throw std::bad_alloc();
+  }
+  void* const allocation = upstream_->allocate(bytes, alignment);
+  used_bytes_ += bytes;
+  peak_bytes_ = std::max(peak_bytes_, used_bytes_);
+  return allocation;
+}
+
+void PayloadMemoryResource::do_deallocate(void* pointer, std::size_t bytes,
+                                          std::size_t alignment) {
+  assert(bytes <= used_bytes_);
+  upstream_->deallocate(pointer, bytes, alignment);
+  used_bytes_ -= bytes;
+}
+
+bool PayloadMemoryResource::do_is_equal(
+    const std::pmr::memory_resource& other) const noexcept {
+  return this == &other;
+}
+
 HttpParseResult parse_upgrade_request(std::string_view bytes) {
   if (bytes.size() > kMaximumHttpUpgradeBytes) {
     return http_failure(HttpError::TooLarge);
@@ -367,12 +401,19 @@ std::string websocket_accept_key(std::string_view key) {
 ClientFrameDecoder::ClientFrameDecoder(std::size_t max_message_bytes,
                                        PayloadSensitivity sensitivity,
                                        CleanseObserver* cleanse_observer,
-                                       std::size_t max_reusable_payload_bytes)
+                                       std::size_t max_reusable_payload_bytes,
+                                       std::pmr::memory_resource* payload_resource)
     : max_message_bytes_(max_message_bytes),
       sensitivity_(sensitivity),
       cleanse_observer_(cleanse_observer),
       max_reusable_payload_bytes_(
-          std::min(max_message_bytes, max_reusable_payload_bytes)) {
+          std::min(max_message_bytes, max_reusable_payload_bytes)),
+      payload_resource_(payload_resource == nullptr
+                            ? std::pmr::get_default_resource()
+                            : payload_resource),
+      payload_(payload_resource_),
+      reusable_payload_(payload_resource_),
+      fragment_payload_(payload_resource_) {
   if (max_message_bytes == 0) {
     throw std::invalid_argument("WebSocket message limit must be nonzero");
   }
@@ -398,7 +439,8 @@ void ClientFrameDecoder::prepare_fragment_storage(
     fragment_payload_.swap(reusable_payload_);
     return;
   }
-  std::vector<std::byte>().swap(reusable_payload_);
+  MessagePayload empty_reusable(payload_resource_);
+  empty_reusable.swap(reusable_payload_);
   fragment_payload_.reserve(next_fragment_capacity(
       fragment_payload_.capacity(), required_capacity, max_message_bytes_));
 }
@@ -409,14 +451,24 @@ ClientFrameDecoder::~ClientFrameDecoder() noexcept {
   secure_cleanse(fragment_payload_, cleanse_observer_);
 }
 
+bool ClientFrameDecoder::message_in_progress() const noexcept {
+  if (terminal_) return false;
+  if (fragment_open_) return true;
+  return state_ != State::FirstHeaderByte && !control_;
+}
+
 DecodeError ClientFrameDecoder::fail(DecodeError error) {
   terminal_ = true;
   secure_cleanse(payload_, cleanse_observer_);
   secure_cleanse(reusable_payload_, cleanse_observer_);
   secure_cleanse(fragment_payload_, cleanse_observer_);
-  payload_.clear();
-  reusable_payload_.clear();
-  fragment_payload_.clear();
+  MessagePayload empty_payload(payload_resource_);
+  MessagePayload empty_reusable(payload_resource_);
+  MessagePayload empty_fragment(payload_resource_);
+  payload_.swap(empty_payload);
+  reusable_payload_.swap(empty_reusable);
+  fragment_payload_.swap(empty_fragment);
+  fragment_open_ = false;
   return error;
 }
 
@@ -540,6 +592,15 @@ void ClientFrameDecoder::reset_frame() {
 
 DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
                                      std::vector<Message>& output) {
+  try {
+    return feed_impl(bytes, output);
+  } catch (const std::bad_alloc&) {
+    return fail(DecodeError::ResourceExhausted);
+  }
+}
+
+DecodeError ClientFrameDecoder::feed_impl(std::span<const std::byte> bytes,
+                                          std::vector<Message>& output) {
   if (terminal_) {
     return DecodeError::Terminal;
   }
@@ -550,7 +611,7 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
       const std::size_t remaining =
           static_cast<std::size_t>(payload_length_) - payload_received_;
       const std::size_t count = std::min(remaining, bytes.size() - position);
-      std::vector<std::byte>& destination =
+      MessagePayload& destination =
           !control_ && (!final_ || opcode_ == Opcode::Continuation)
               ? fragment_payload_
               : payload_;
@@ -603,6 +664,10 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
         if (control_ && !final_) {
           return fail(DecodeError::InvalidControlFrame);
         }
+        if (!control_ && !fragment_open_) {
+          ++message_generation_;
+          if (message_generation_ == 0) ++message_generation_;
+        }
         state_ = State::SecondHeaderByte;
         break;
       }
@@ -654,7 +719,7 @@ DecodeError ClientFrameDecoder::feed(std::span<const std::byte> bytes,
   return DecodeError::None;
 }
 
-void ClientFrameDecoder::recycle_payload(std::vector<std::byte>& payload) noexcept {
+void ClientFrameDecoder::recycle_payload(MessagePayload& payload) noexcept {
   if (sensitivity_ == PayloadSensitivity::Sensitive ||
       payload.capacity() > max_reusable_payload_bytes_) {
     return;

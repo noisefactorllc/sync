@@ -38,6 +38,8 @@ constexpr std::size_t kMaximumConnections =
 constexpr std::size_t kMaximumPairingCooldowns = 64;
 constexpr std::size_t kMaximumControlMessageBytes = 16U * 1024U;
 constexpr std::size_t kMaximumDataMessageBytes = 64U * 1024U * 1024U + 64U;
+constexpr std::size_t kMaximumInboundDataPayloadBytes =
+    128U * 1024U * 1024U;
 constexpr std::size_t kMaximumQueuedWriteBytes = 64U * 1024U;
 constexpr std::size_t kReadBufferBytes = 64U * 1024U;
 constexpr std::uint64_t kHttpHeaderDeadlineMs = 1000;
@@ -52,7 +54,12 @@ constexpr std::uint64_t kPairingPromptDeadlineMs = 30'000;
 #endif
 constexpr std::uint64_t kPairingCooldownMs = 1000;
 constexpr std::uint64_t kWebSocketCloseDeadlineMs = 750;
+constexpr std::uint64_t kDataMessageDeadlineMs = 2'000;
 constexpr std::uint64_t kDeadlineSweepIntervalMs = 50;
+constexpr std::string_view kInboundBudgetReason =
+    "inbound_budget_exhausted";
+constexpr std::string_view kIncompleteFrameReason =
+    "incomplete_frame_timeout";
 
 class Server;
 
@@ -70,6 +77,7 @@ enum class DeadlineKind {
   ControlHello,
   PairingRequest,
   PairingPrompt,
+  DataMessage,
   WebSocketClose,
 };
 
@@ -95,6 +103,7 @@ struct Connection {
   bool decoder_terminal = false;
   DeadlineKind deadline_kind = DeadlineKind::None;
   std::uint64_t deadline_ms = 0;
+  std::uint64_t data_message_generation = 0;
   std::size_t pending_write_bytes = 0;
   std::array<char, kReadBufferBytes> read_buffer{};
   std::string http_buffer;
@@ -401,10 +410,26 @@ std::array<std::byte, 2> close_code(std::uint16_t code) {
           static_cast<std::byte>(code & 0xffU)};
 }
 
+std::vector<std::byte> close_status_payload(std::uint16_t code,
+                                            std::string_view reason) {
+  constexpr std::size_t kMaximumCloseReasonBytes = 123;
+  if (reason.size() > kMaximumCloseReasonBytes) return {};
+  const auto encoded_code = close_code(code);
+  std::vector<std::byte> payload;
+  payload.reserve(encoded_code.size() + reason.size());
+  payload.insert(payload.end(), encoded_code.begin(), encoded_code.end());
+  const auto reason_bytes = as_bytes(reason);
+  payload.insert(payload.end(), reason_bytes.begin(), reason_bytes.end());
+  return payload;
+}
+
 class Server {
  public:
   Server(const ServerOptions& options, FramePublisher& publisher)
-      : options_(options), publisher_(publisher), receiver_(publisher) {
+      : options_(options),
+        data_payload_memory_(kMaximumInboundDataPayloadBytes),
+        publisher_(publisher),
+        receiver_(publisher) {
     if (options_.pairing_authority != nullptr) {
       authority_worker_ =
           std::make_unique<pairing::AuthorityWorker>(*options_.pairing_authority);
@@ -440,7 +465,7 @@ class Server {
                 << '\n';
       return 1;
     }
-    return 0;
+    return fatal_exit_ ? 1 : 0;
   }
 
   void accept_connection(uv_stream_t* listener) {
@@ -570,6 +595,16 @@ class Server {
     for (Connection* connection : snapshot) {
       if (connection != nullptr) close_connection(*connection);
     }
+  }
+
+  void begin_fatal_shutdown(const ProviderFailure& failure) noexcept {
+    if (stopping_ || fatal_exit_) return;
+    fatal_exit_ = true;
+    std::cerr << "syncd: fatal provider failure: "
+              << provider_failure_name(failure.kind)
+              << " status=" << failure.native_status
+              << " error=" << failure.native_error_code << '\n';
+    begin_shutdown();
   }
 
  private:
@@ -816,6 +851,7 @@ class Server {
 
   void sweep_deadlines() noexcept {
     const std::uint64_t now = uv_now(&loop_);
+    if (poll_provider_failure(now)) return;
     for (Connection *connection : connections_) {
       if (connection == nullptr || connection->closing ||
           connection->deadline_kind == DeadlineKind::None ||
@@ -827,6 +863,11 @@ class Server {
       if (expired == DeadlineKind::HttpHeader ||
           expired == DeadlineKind::WebSocketClose) {
         close_connection(*connection);
+      } else if (expired == DeadlineKind::DataMessage) {
+        connection->decoder.reset();
+        connection->decoder_terminal = true;
+        start_reasoned_websocket_close(*connection, 1008,
+                                       kIncompleteFrameReason);
       } else if (expired == DeadlineKind::ControlHello) {
         try {
           start_websocket_close(*connection, 1008);
@@ -864,6 +905,13 @@ class Server {
     }
     poll_pairing_prompt();
     poll_authority_results();
+  }
+
+  [[nodiscard]] bool poll_provider_failure(std::uint64_t now) noexcept {
+    const auto failure = publisher_.poll_failure(now);
+    if (!failure.has_value()) return false;
+    begin_fatal_shutdown(*failure);
+    return true;
   }
 
   void queue_pairing_error(Connection &connection, std::string_view code,
@@ -1164,6 +1212,21 @@ class Server {
         fail_after_write, true);
   }
 
+  void start_reasoned_websocket_close(Connection& connection,
+                                      std::uint16_t code,
+                                      std::string_view reason) noexcept {
+    try {
+      const std::vector<std::byte> payload = close_status_payload(code, reason);
+      if (payload.empty()) {
+        close_connection(connection);
+        return;
+      }
+      start_websocket_close(connection, code, payload);
+    } catch (const std::exception&) {
+      close_connection(connection);
+    }
+  }
+
   void queue_error_and_close(Connection& connection,
                              std::string_view code,
                              std::string_view message) {
@@ -1384,8 +1447,13 @@ class Server {
         role == ConnectionRole::Data
             ? websocket::PayloadSensitivity::NonSensitive
             : websocket::PayloadSensitivity::Sensitive;
+    std::pmr::memory_resource* const payload_resource =
+        role == ConnectionRole::Data
+            ? static_cast<std::pmr::memory_resource*>(&data_payload_memory_)
+            : std::pmr::get_default_resource();
     auto decoder = std::make_unique<websocket::ClientFrameDecoder>(
-        maximum_message_bytes, sensitivity);
+        maximum_message_bytes, sensitivity, nullptr,
+        websocket::kMaximumReusablePayloadBytes, payload_resource);
     if (!queue_write(connection, std::move(bytes), false))
       return false;
     connection.role = role;
@@ -1400,6 +1468,25 @@ class Server {
       clear_deadline(connection);
     }
     return true;
+  }
+
+  void update_data_message_deadline(Connection& connection) noexcept {
+    if (connection.role != ConnectionRole::Data ||
+        connection.decoder == nullptr || connection.websocket_close_sent) {
+      return;
+    }
+    const std::uint64_t generation =
+        connection.decoder->message_generation();
+    if (connection.decoder->message_in_progress()) {
+      if (connection.deadline_kind != DeadlineKind::DataMessage ||
+          connection.data_message_generation != generation) {
+        set_deadline(connection, DeadlineKind::DataMessage,
+                     kDataMessageDeadlineMs);
+      }
+    } else if (connection.deadline_kind == DeadlineKind::DataMessage) {
+      clear_deadline(connection);
+    }
+    connection.data_message_generation = generation;
   }
 
   void consume_websocket(Connection &connection,
@@ -1419,6 +1506,16 @@ class Server {
         connection.decoder->feed(bytes, messages);
     if (error != websocket::DecodeError::None) {
       connection.decoder_terminal = true;
+      if (error == websocket::DecodeError::ResourceExhausted) {
+        connection.decoder.reset();
+        if (connection.role == ConnectionRole::Data) {
+          start_reasoned_websocket_close(connection, 1013,
+                                         kInboundBudgetReason);
+        } else {
+          close_connection(connection);
+        }
+        return;
+      }
       if (connection.role == ConnectionRole::Pairing &&
           connection.pairing_generation != 0 &&
           connection.pairing_generation == active_pairing_generation_) {
@@ -1449,6 +1546,7 @@ class Server {
       }
       return;
     }
+    update_data_message_deadline(connection);
     for (websocket::Message &message : messages) {
       if (connection.closing || connection.transport_close_pending ||
           connection.websocket_close_received) {
@@ -1650,11 +1748,13 @@ class Server {
       start_websocket_close(connection, 1008);
       return;
     }
+    if (poll_provider_failure(uv_now(&loop_))) return;
     const ReceiveResult result = receiver_.receive(sender.id, payload);
     if (result.status == ReceiveStatus::RejectedMalformed ||
         result.status == ReceiveStatus::RejectedSender) {
       start_websocket_close(connection, 1002);
     } else if (result.status == ReceiveStatus::PublishFailed) {
+      if (poll_provider_failure(uv_now(&loop_))) return;
       start_websocket_close(connection, 1011);
     }
   }
@@ -1803,6 +1903,7 @@ class Server {
   }
 
   ServerOptions options_;
+  websocket::PayloadMemoryResource data_payload_memory_;
   uv_loop_t loop_{};
   uv_tcp_t listener4_{};
   uv_tcp_t listener6_{};
@@ -1818,6 +1919,7 @@ class Server {
   bool signal_term_initialized_ = false;
   bool deadline_timer_initialized_ = false;
   bool stopping_ = false;
+  bool fatal_exit_ = false;
   bool ipv6_listening_ = false;
   std::uint16_t port_ = 0;
   std::string instance_id_;

@@ -235,6 +235,27 @@ function maskedClientFrame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([header, mask, masked]);
 }
 
+function maskedClientFrameHeader(opcode, payloadBytes, final = true) {
+  const first = Buffer.from([(final ? 0x80 : 0) | opcode]);
+  let length;
+  if (payloadBytes <= 125) {
+    length = Buffer.from([0x80 | payloadBytes]);
+  } else if (payloadBytes <= 65_535) {
+    length = Buffer.alloc(3);
+    length[0] = 0xfe;
+    length.writeUInt16BE(payloadBytes, 1);
+  } else {
+    length = Buffer.alloc(9);
+    length[0] = 0xff;
+    length.writeBigUInt64BE(BigInt(payloadBytes), 1);
+  }
+  return Buffer.concat([
+    first,
+    length,
+    Buffer.from([0x11, 0x22, 0x33, 0x44]),
+  ]);
+}
+
 class WebSocketClient {
   constructor(socket, initialBytes) {
     this.socket = socket;
@@ -294,10 +315,10 @@ class WebSocketClient {
     this.send(0x1, Buffer.from(JSON.stringify(value), "utf8"));
   }
 
-  async nextFrame(description = "WebSocket frame") {
+  async nextFrame(description = "WebSocket frame", timeoutMs = TIMEOUT_MS) {
     if (this.frames.length > 0) return this.frames.shift();
     const promise = new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
-    return withTimeout(promise, description);
+    return withTimeout(promise, description, timeoutMs);
   }
 
   async nextJson(description = "control response") {
@@ -539,6 +560,20 @@ async function authenticateControl(ready, origin, token) {
   assert.equal(upgraded.status, 101);
   upgraded.client.sendJson({ type: "hello", token, protocolVersions: [1] });
   return upgraded;
+}
+
+async function createTestSender(control, port, name) {
+  control.sendJson({ type: "createSender", name });
+  const created = await control.nextJson(`${name} creation`);
+  assert.equal(created.type, "senderCreated");
+  const upgraded = await upgrade({
+    port,
+    route: created.path,
+    origin: ORIGIN,
+    subprotocol: `sync.sender.${created.ticket}`,
+  });
+  assert.equal(upgraded.status, 101);
+  return { created, data: upgraded.client };
 }
 
 async function stopDaemon(child, stderr, stdout, ready, options) {
@@ -1596,6 +1631,145 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
     sockets.delete(control.client);
 
     await stopDaemon(child, daemon.stderr, daemon.stdout, daemon.ready);
+  } finally {
+    for (const client of sockets) client.destroy();
+    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("aggregate data payload exhaustion isolates the offender and reclaims capacity", async () => {
+  const sockets = new Set();
+  let daemon;
+  try {
+    daemon = await spawnDaemon();
+    const { ready } = daemon;
+    const control = await authenticateControl(ready, ORIGIN, TOKEN);
+    sockets.add(control.client);
+    assert.equal((await control.client.nextJson("budget control welcome")).type,
+                 "welcome");
+
+    const first = await createTestSender(control.client, ready.port, "Budget holder");
+    const second = await createTestSender(control.client, ready.port, "Budget offender");
+    sockets.add(first.data);
+    sockets.add(second.data);
+
+    const declared = 64 * 1024 * 1024 + 64;
+    first.data.socket.write(maskedClientFrameHeader(0x2, declared));
+    second.data.socket.write(maskedClientFrameHeader(0x2, declared));
+
+    const rejected = await second.data.nextFrame("aggregate budget close");
+    assert.equal(rejected.opcode, 0x8);
+    assert.equal(rejected.payload.readUInt16BE(0), 1013);
+    assert.equal(rejected.payload.subarray(2).toString("utf8"),
+                 "inbound_budget_exhausted");
+    second.data.send(0x8, rejected.payload);
+    await second.data.waitClosed();
+    sockets.delete(second.data);
+
+    const concurrentHealth = await health("127.0.0.1", ready.port, ORIGIN);
+    assert.equal(concurrentHealth.status, 200);
+    assert.equal(JSON.parse(concurrentHealth.body).status, "ok");
+    control.client.send(0x9, Buffer.from("budget-control", "ascii"));
+    assert.equal((await control.client.nextFrame("control under exhaustion")).opcode,
+                 0xa);
+
+    control.client.sendJson({ type: "closeSender", senderId: second.created.id });
+    assert.equal((await control.client.nextJson("budget offender cleanup")).type,
+                 "senderClosed");
+    control.client.sendJson({ type: "closeSender", senderId: first.created.id });
+    assert.equal((await control.client.nextJson("budget holder cleanup")).type,
+                 "senderClosed");
+    const holderClose = await first.data.nextFrame("budget holder close");
+    assert.equal(holderClose.opcode, 0x8);
+    first.data.send(0x8, holderClose.payload);
+    await first.data.waitClosed();
+    sockets.delete(first.data);
+
+    const replacement = await createTestSender(
+      control.client, ready.port, "Budget replacement",
+    );
+    sockets.add(replacement.data);
+    replacement.data.socket.write(maskedClientFrameHeader(0x2, declared));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(replacement.data.closed, false,
+                 "reclaimed capacity admits a replacement declaration");
+    assert.equal(replacement.data.frames.length, 0,
+                 "replacement is not rejected as over budget");
+
+    replacement.data.destroy();
+    await replacement.data.waitClosed();
+    sockets.delete(replacement.data);
+    control.client.sendJson({ type: "closeSender", senderId: replacement.created.id });
+    assert.equal((await control.client.nextJson("budget replacement cleanup")).type,
+                 "senderClosed");
+
+    control.client.send(0x8, Buffer.from([0x03, 0xe8]));
+    assert.equal((await control.client.nextFrame("budget control close")).opcode, 0x8);
+    await control.client.waitClosed();
+    sockets.delete(control.client);
+  } finally {
+    for (const client of sockets) client.destroy();
+    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("an incomplete data message times out without expiring an idle sender", async () => {
+  const sockets = new Set();
+  let daemon;
+  try {
+    daemon = await spawnDaemon();
+    const { ready } = daemon;
+    const control = await authenticateControl(ready, ORIGIN, TOKEN);
+    sockets.add(control.client);
+    assert.equal((await control.client.nextJson("timeout control welcome")).type,
+                 "welcome");
+
+    const partial = await createTestSender(control.client, ready.port, "Partial frame");
+    const idle = await createTestSender(control.client, ready.port, "Idle sender");
+    sockets.add(partial.data);
+    sockets.add(idle.data);
+
+    const started = performance.now();
+    partial.data.socket.write(Buffer.from([0x82]));
+
+    const concurrentHealth = await health("127.0.0.1", ready.port, ORIGIN);
+    assert.equal(concurrentHealth.status, 200);
+    control.client.send(0x9, Buffer.from("timeout-control", "ascii"));
+    assert.equal((await control.client.nextFrame("control during partial frame")).opcode,
+                 0xa);
+
+    const timedOut = await partial.data.nextFrame("incomplete frame timeout", 4_000);
+    const elapsed = performance.now() - started;
+    assert.equal(timedOut.opcode, 0x8);
+    assert.equal(timedOut.payload.readUInt16BE(0), 1008);
+    assert.equal(timedOut.payload.subarray(2).toString("utf8"),
+                 "incomplete_frame_timeout");
+    assert.ok(elapsed >= 1_800 && elapsed < 2_900,
+              `incomplete frame timeout was ${elapsed}ms`);
+    partial.data.send(0x8, timedOut.payload);
+    await partial.data.waitClosed();
+    sockets.delete(partial.data);
+
+    idle.data.send(0x9, Buffer.from("idle-survives", "ascii"));
+    assert.equal((await idle.data.nextFrame("idle data pong after timeout")).opcode,
+                 0xa);
+
+    control.client.sendJson({ type: "closeSender", senderId: partial.created.id });
+    assert.equal((await control.client.nextJson("partial sender cleanup")).type,
+                 "senderClosed");
+    control.client.sendJson({ type: "closeSender", senderId: idle.created.id });
+    assert.equal((await control.client.nextJson("idle sender cleanup")).type,
+                 "senderClosed");
+    const idleClose = await idle.data.nextFrame("idle sender close");
+    idle.data.send(0x8, idleClose.payload);
+    await idle.data.waitClosed();
+    sockets.delete(idle.data);
+
+    control.client.send(0x8, Buffer.from([0x03, 0xe8]));
+    assert.equal((await control.client.nextFrame("timeout control close")).opcode,
+                 0x8);
+    await control.client.waitClosed();
+    sockets.delete(control.client);
   } finally {
     for (const client of sockets) client.destroy();
     if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);

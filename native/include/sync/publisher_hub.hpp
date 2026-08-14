@@ -26,6 +26,8 @@ class PublisherHub final : public FramePublisher {
                const protocol::FrameView& frame) noexcept -> PublishResult override;
   auto diagnostic_checksum(std::string_view sender_id) const noexcept
       -> std::uint64_t override;
+  auto poll_failure(std::uint64_t now_ms) noexcept
+      -> std::optional<ProviderFailure> override;
 
  private:
   struct SenderEntry {

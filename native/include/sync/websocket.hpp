@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <optional>
 #include <span>
 #include <string>
@@ -16,6 +17,35 @@ namespace noisefactor::sync::websocket {
 inline constexpr std::size_t kMaximumHttpUpgradeBytes = 16384;
 inline constexpr std::size_t kMaximumReusablePayloadBytes = 8U * 1024U * 1024U;
 inline constexpr std::string_view kSupportedWebSocketVersion = "13";
+
+class PayloadMemoryResource final : public std::pmr::memory_resource {
+ public:
+  explicit PayloadMemoryResource(
+      std::size_t limit_bytes,
+      std::pmr::memory_resource* upstream = std::pmr::get_default_resource());
+
+  [[nodiscard]] std::size_t limit_bytes() const noexcept {
+    return limit_bytes_;
+  }
+  [[nodiscard]] std::size_t used_bytes() const noexcept {
+    return used_bytes_;
+  }
+  [[nodiscard]] std::size_t peak_bytes() const noexcept {
+    return peak_bytes_;
+  }
+
+ private:
+  void* do_allocate(std::size_t bytes, std::size_t alignment) override;
+  void do_deallocate(void* pointer, std::size_t bytes,
+                     std::size_t alignment) override;
+  [[nodiscard]] bool do_is_equal(
+      const std::pmr::memory_resource& other) const noexcept override;
+
+  std::size_t limit_bytes_ = 0;
+  std::size_t used_bytes_ = 0;
+  std::size_t peak_bytes_ = 0;
+  std::pmr::memory_resource* upstream_ = nullptr;
+};
 
 enum class HttpError {
   None,
@@ -57,9 +87,11 @@ enum class Opcode : std::uint8_t {
   Pong = 0xA,
 };
 
+using MessagePayload = std::pmr::vector<std::byte>;
+
 struct Message {
   Opcode opcode = Opcode::Binary;
-  std::vector<std::byte> payload;
+  MessagePayload payload;
 };
 
 enum class PayloadSensitivity { NonSensitive, Sensitive };
@@ -84,6 +116,7 @@ enum class DecodeError {
   UnexpectedContinuation,
   FragmentAlreadyOpen,
   MessageTooLarge,
+  ResourceExhausted,
   InvalidLengthEncoding,
   InvalidTextPayload,
 };
@@ -95,13 +128,19 @@ class ClientFrameDecoder {
                                   PayloadSensitivity::NonSensitive,
                               CleanseObserver* cleanse_observer = nullptr,
                               std::size_t max_reusable_payload_bytes =
-                                  kMaximumReusablePayloadBytes);
+                                  kMaximumReusablePayloadBytes,
+                              std::pmr::memory_resource* payload_resource =
+                                  std::pmr::get_default_resource());
   ~ClientFrameDecoder() noexcept;
 
   DecodeError feed(std::span<const std::byte> bytes, std::vector<Message>& output);
-  void recycle_payload(std::vector<std::byte>& payload) noexcept;
+  void recycle_payload(MessagePayload& payload) noexcept;
   [[nodiscard]] std::size_t fragment_capacity() const noexcept {
     return fragment_payload_.capacity();
+  }
+  [[nodiscard]] bool message_in_progress() const noexcept;
+  [[nodiscard]] std::uint64_t message_generation() const noexcept {
+    return message_generation_;
   }
 
  private:
@@ -114,6 +153,8 @@ class ClientFrameDecoder {
   };
 
   DecodeError fail(DecodeError error);
+  DecodeError feed_impl(std::span<const std::byte> bytes,
+                        std::vector<Message>& output);
   DecodeError finish_length();
   DecodeError finish_frame(std::vector<Message>& output);
   void prepare_fragment_storage(std::size_t required_capacity);
@@ -123,6 +164,7 @@ class ClientFrameDecoder {
   PayloadSensitivity sensitivity_ = PayloadSensitivity::NonSensitive;
   CleanseObserver* cleanse_observer_ = nullptr;
   std::size_t max_reusable_payload_bytes_ = 0;
+  std::pmr::memory_resource* payload_resource_ = nullptr;
   State state_ = State::FirstHeaderByte;
   bool terminal_ = false;
   bool final_ = false;
@@ -136,11 +178,12 @@ class ClientFrameDecoder {
   std::size_t extended_length_received_ = 0;
   std::array<std::byte, 4> mask_{};
   std::size_t mask_received_ = 0;
-  std::vector<std::byte> payload_;
-  std::vector<std::byte> reusable_payload_;
+  MessagePayload payload_;
+  MessagePayload reusable_payload_;
   bool fragment_open_ = false;
   Opcode fragmented_opcode_ = Opcode::Continuation;
-  std::vector<std::byte> fragment_payload_;
+  MessagePayload fragment_payload_;
+  std::uint64_t message_generation_ = 0;
 };
 
 void cleanse_message_payloads(std::span<Message> messages,

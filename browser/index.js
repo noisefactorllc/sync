@@ -23,6 +23,7 @@ export {
   SyncPairingOriginLimitError,
   SyncPairingStoreError,
   SyncProtocolError,
+  SyncSenderLostError,
   SyncTimeoutError,
   SyncUnavailableError,
 } from './client.js';

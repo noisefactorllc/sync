@@ -473,6 +473,33 @@ SYNC_TEST(metal_publisher_saturates_three_slots_and_reuses_after_gpu_completion)
   }));
 }
 
+SYNC_TEST(metal_publisher_reports_a_gated_command_at_the_watchdog_boundary) {
+  GateConsumer gate;
+  std::array<MetalFrameConsumer*, 1> consumers{&gate};
+  MetalFramePublisher publisher(consumers);
+  SYNC_REQUIRE(publisher.open_sender("watchdog", "Watchdog"));
+  auto frame = make_frame(2, 2, 8);
+
+  SYNC_REQUIRE(!publisher.poll_failure(10'000).has_value());
+  SYNC_REQUIRE(publisher.publish("watchdog", frame.view) ==
+               PublishResult::Accepted);
+  SYNC_REQUIRE(!publisher.poll_failure(10'999).has_value());
+
+  const auto failure = publisher.poll_failure(11'000);
+  SYNC_REQUIRE(failure.has_value());
+  SYNC_REQUIRE(failure->kind ==
+               ProviderFailureKind::MetalWatchdogTimeout);
+  SYNC_REQUIRE(publisher.publish("watchdog", frame.view) ==
+               PublishResult::Failed);
+
+  gate.release();
+  SYNC_REQUIRE(wait_until([&] { return gate.completed() == 1; }));
+  const auto after_completion = publisher.poll_failure(12'000);
+  SYNC_REQUIRE(after_completion.has_value());
+  SYNC_REQUIRE(after_completion->kind ==
+               ProviderFailureKind::MetalWatchdogTimeout);
+}
+
 SYNC_TEST(metal_publisher_counts_a_closed_inflight_sender_until_it_drains) {
   GateConsumer gate;
   std::array<MetalFrameConsumer*, 1> consumers{&gate};

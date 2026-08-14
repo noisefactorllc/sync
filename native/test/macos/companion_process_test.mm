@@ -386,4 +386,37 @@ SYNC_TEST(companion_process_sequences_exit_before_restart_completion) {
                               "replacement exit"}));
 }
 
+SYNC_TEST(companion_process_releases_an_unexpected_exit_before_relaunch) {
+  TemporaryFixture fixture;
+  fixture.write_helper("exit 17\n");
+  CompanionProcess process({
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+  });
+
+  std::vector<int> exits;
+  std::string error;
+  SYNC_REQUIRE(process.start(
+      [](std::string_view) {},
+      [&](int status) { exits.push_back(status); }, error));
+  SYNC_REQUIRE(wait_until([&] { return exits.size() == 1; }));
+  SYNC_REQUIRE(exits == std::vector<int>({17}));
+  SYNC_REQUIRE(!process.owned_pid().has_value());
+
+  fixture.write_helper(
+      "trap 'exit 0' TERM\n"
+      "while :; do sleep 1; done\n");
+  SYNC_REQUIRE(process.start(
+      [](std::string_view) {},
+      [&](int status) { exits.push_back(status); }, error));
+  SYNC_REQUIRE(process.owned_pid().has_value());
+
+  bool stopped = false;
+  process.terminate([&] { stopped = true; });
+  SYNC_REQUIRE(wait_until([&] { return stopped; }));
+  SYNC_REQUIRE(exits.size() == 2);
+  SYNC_REQUIRE(exits.front() == 17);
+  SYNC_REQUIRE(!process.owned_pid().has_value());
+}
+
 } // namespace

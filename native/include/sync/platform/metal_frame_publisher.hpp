@@ -40,6 +40,8 @@ class MetalFramePublisher final : public FramePublisher {
   void close_sender(std::string_view sender_id) noexcept override;
   auto publish(std::string_view sender_id, const protocol::FrameView& frame) noexcept
       -> PublishResult override;
+  auto poll_failure(std::uint64_t now_ms) noexcept
+      -> std::optional<ProviderFailure> override;
 
  private:
   struct Impl;

@@ -38,6 +38,27 @@ private:
   bool &destroyed_;
 };
 
+class FatalPublisher final : public noisefactor::sync::FramePublisher {
+public:
+  auto publish(std::string_view,
+               const noisefactor::sync::protocol::FrameView &) noexcept
+      -> noisefactor::sync::PublishResult override {
+    return noisefactor::sync::PublishResult::Accepted;
+  }
+
+  auto poll_failure(std::uint64_t) noexcept
+      -> std::optional<noisefactor::sync::ProviderFailure> override {
+    ++poll_calls;
+    return noisefactor::sync::ProviderFailure{
+        .kind = noisefactor::sync::ProviderFailureKind::MetalCommandFailed,
+        .native_status = 5,
+        .native_error_code = -9,
+    };
+  }
+
+  std::size_t poll_calls = 0;
+};
+
 class StubPairingAuthority final
     : public noisefactor::sync::pairing::PairingAuthority {
 public:
@@ -96,6 +117,9 @@ public:
   [[nodiscard]] auto stdout_text() const -> std::string {
     return stdout_.str();
   }
+  [[nodiscard]] auto stderr_text() const -> std::string {
+    return stderr_.str();
+  }
 
 private:
   std::ostringstream stdout_;
@@ -107,6 +131,13 @@ private:
 void stop_after_platform_pump(void *context) noexcept {
   auto *calls = static_cast<std::atomic<std::size_t> *>(context);
   if (calls->fetch_add(1, std::memory_order_relaxed) == 0) {
+    std::raise(SIGTERM);
+  }
+}
+
+void stop_after_second_platform_pump(void *context) noexcept {
+  auto *calls = static_cast<std::atomic<std::size_t> *>(context);
+  if (calls->fetch_add(1, std::memory_order_relaxed) == 1) {
     std::raise(SIGTERM);
   }
 }
@@ -207,4 +238,21 @@ SYNC_TEST(server_rejects_half_configured_or_mixed_pairing_authority_modes) {
   SYNC_REQUIRE(noisefactor::sync::run_server(static_options, &publisher) == 1);
   SYNC_REQUIRE(capture.stdout_text().empty());
   SYNC_REQUIRE(!destroyed);
+}
+
+SYNC_TEST(server_exits_nonzero_once_after_a_fatal_provider_failure) {
+  FatalPublisher publisher;
+  std::atomic<std::size_t> pump_calls{0};
+  auto options = base_options();
+  options.platform_event_pump = stop_after_second_platform_pump;
+  options.platform_event_pump_context = &pump_calls;
+
+  ScopedStreamCapture capture;
+  SYNC_REQUIRE(noisefactor::sync::run_server(options, &publisher) == 1);
+  SYNC_REQUIRE(publisher.poll_calls == 1);
+  SYNC_REQUIRE(pump_calls.load(std::memory_order_relaxed) == 1);
+  SYNC_REQUIRE(capture.stdout_text().starts_with(
+      "{\"type\":\"ready\",\"port\":"));
+  SYNC_REQUIRE(capture.stderr_text() ==
+      "syncd: fatal provider failure: metal_command_failed status=5 error=-9\n");
 }
