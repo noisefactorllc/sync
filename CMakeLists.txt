@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(noisefactor_sync_protocol VERSION 0.2.0 LANGUAGES CXX)
 
@@ -6,14 +6,49 @@ set(SYNC_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
     "Sync product version reported by the native companion")
 set(SYNC_SYPHON_FRAMEWORK_PATH "" CACHE PATH
     "Path to the Syphon.framework bundled by the macOS packaging target")
+set(SYNC_SPOUT_LIBRARY_PATH "" CACHE FILEPATH
+    "Path to the SpoutLibrary.dll bundled by the Windows packaging target")
 set(SYNC_DYLIB_SEARCH_PATH "" CACHE PATH
     "Additional directory searched for macOS bundle dependencies")
+set(SYNC_WINDOWS_DEPENDENCY_PATH "" CACHE PATH
+    "Additional directory searched for Windows bundle dependencies")
+
+# Sources are UTF-8 and some carry non-ASCII text (prompt wording, test
+# fixtures). Without /utf-8 MSVC reads them in the machine's ANSI codepage,
+# which silently mangles those strings on a non-Western-European machine. This
+# has to precede every target definition to reach them all.
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
 
 find_package(Threads REQUIRED)
 
 find_package(OpenSSL 3 REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
+
+# libuv reaches this project two ways: a CONFIG package from vcpkg or Conan
+# (the practical route on Windows) and pkg-config from Homebrew or a distro.
+# Preferring CONFIG keeps the Windows build from needing a pkg-config port.
+find_package(libuv CONFIG QUIET)
+if(TARGET libuv::uv)
+  set(SYNC_LIBUV_TARGET libuv::uv)
+elseif(TARGET libuv::uv_a)
+  set(SYNC_LIBUV_TARGET libuv::uv_a)
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
+  set(SYNC_LIBUV_TARGET PkgConfig::LIBUV)
+endif()
+
+# The pairing store's durability, permission, and symlink guarantees are
+# expressed in platform primitives that have no common subset, so the seam is
+# a whole file rather than a scattering of #ifdefs.
+if(WIN32)
+  set(SYNC_PAIRING_STORE_PLATFORM_SOURCE
+      native/src/platform/windows/pairing_store_fs.cpp)
+else()
+  set(SYNC_PAIRING_STORE_PLATFORM_SOURCE
+      native/src/platform/posix/pairing_store_fs.cpp)
+endif()
 
 add_library(sync_protocol
   native/src/control.cpp
@@ -22,6 +57,7 @@ add_library(sync_protocol
   native/src/pairing.cpp
   native/src/authority_worker.cpp
   native/src/pairing_store.cpp
+  ${SYNC_PAIRING_STORE_PLATFORM_SOURCE}
   native/src/publisher_hub.cpp
   native/src/protocol.cpp
   native/src/secure_memory.cpp
@@ -29,10 +65,21 @@ add_library(sync_protocol
 )
 target_compile_features(sync_protocol PUBLIC cxx_std_20)
 target_include_directories(sync_protocol PUBLIC native/include)
+target_include_directories(sync_protocol PRIVATE native/src)
 target_compile_definitions(sync_protocol PUBLIC
   SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
 )
 target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads)
+if(WIN32)
+  # Advapi32 supplies the process-token and DACL calls the pairing store's
+  # owner-only permissions are built from. Randomness already comes from
+  # OpenSSL's RAND_priv_bytes on every platform, so no Windows CSPRNG is
+  # linked here.
+  target_link_libraries(sync_protocol PUBLIC advapi32)
+  target_compile_definitions(sync_protocol PUBLIC
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+  )
+endif()
 
 add_executable(sync_protocol_tests
   native/test/control_test.cpp
@@ -45,7 +92,7 @@ add_executable(sync_protocol_tests
   native/src/server.cpp
 )
 target_compile_features(sync_protocol_tests PRIVATE cxx_std_20)
-target_link_libraries(sync_protocol_tests PRIVATE sync_protocol PkgConfig::LIBUV)
+target_link_libraries(sync_protocol_tests PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
 target_compile_definitions(sync_protocol_tests PRIVATE SYNC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(syncd
@@ -53,7 +100,7 @@ add_executable(syncd
   native/src/server.cpp
 )
 target_compile_features(syncd PRIVATE cxx_std_20)
-target_link_libraries(syncd PRIVATE sync_cli PkgConfig::LIBUV)
+target_link_libraries(syncd PRIVATE sync_cli sync_ndi_publisher ${SYNC_LIBUV_TARGET})
 
 enable_testing()
 add_test(NAME sync_protocol_tests COMMAND sync_protocol_tests)
@@ -91,7 +138,49 @@ target_compile_features(sync_pairing_test_server PRIVATE cxx_std_20)
 target_compile_definitions(sync_pairing_test_server PRIVATE
   SYNC_PAIRING_PROMPT_DEADLINE_MS=525
 )
-target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol PkgConfig::LIBUV)
+target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
+
+# The companion model is platform-neutral policy — supervision, recovery
+# backoff, and health reporting — shared by the macOS menu-bar app and the
+# Windows tray app, so it is built once for both.
+add_library(sync_companion_model
+  native/src/companion_model.cpp
+)
+target_compile_features(sync_companion_model PUBLIC cxx_std_20)
+target_include_directories(sync_companion_model PUBLIC native/include)
+
+add_executable(sync_companion_model_tests
+  native/test/companion_model_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)
+target_include_directories(sync_companion_model_tests PRIVATE native/test)
+target_link_libraries(sync_companion_model_tests PRIVATE sync_companion_model)
+add_test(NAME sync_companion_model_tests COMMAND sync_companion_model_tests)
+
+# NDI is the one provider that is not platform-specific: its send path takes a
+# CPU frame, so the same implementation serves every platform that can load the
+# vendor's runtime.
+add_library(sync_ndi_publisher
+  native/src/platform/ndi_publisher.cpp
+)
+target_compile_features(sync_ndi_publisher PUBLIC cxx_std_20)
+target_include_directories(sync_ndi_publisher PUBLIC native/include)
+target_link_libraries(sync_ndi_publisher PUBLIC sync_protocol)
+# Windows resolves the runtime through LoadLibraryExW; everywhere else needs
+# the dynamic-loader library for dlopen.
+if(NOT WIN32)
+  target_link_libraries(sync_ndi_publisher PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+add_executable(sync_ndi_publisher_tests
+  native/test/ndi_publisher_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_ndi_publisher_tests PRIVATE cxx_std_20)
+target_include_directories(sync_ndi_publisher_tests PRIVATE native/test)
+target_link_libraries(sync_ndi_publisher_tests PRIVATE sync_ndi_publisher)
+add_test(NAME sync_ndi_publisher_tests COMMAND sync_ndi_publisher_tests)
 
 if(APPLE)
   enable_language(OBJCXX)
@@ -100,20 +189,6 @@ if(APPLE)
   find_library(SERVICE_MANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
   find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
   find_library(METAL_FRAMEWORK Metal REQUIRED)
-
-  add_library(sync_companion_model
-    native/src/platform/macos/companion_model.cpp
-  )
-  target_compile_features(sync_companion_model PUBLIC cxx_std_20)
-  target_include_directories(sync_companion_model PUBLIC native/include)
-
-  add_executable(sync_companion_model_tests
-    native/test/macos/companion_model_test.cpp
-    native/test/test_main.cpp
-  )
-  target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)
-  target_link_libraries(sync_companion_model_tests PRIVATE sync_companion_model)
-  add_test(NAME sync_companion_model_tests COMMAND sync_companion_model_tests)
 
   add_library(sync_companion_process
     native/src/platform/macos/companion_process.mm
@@ -182,7 +257,7 @@ if(APPLE)
     DEPENDS
       sync_menu syncd
       LICENSE
-      packaging/macos/Sync.svg
+      packaging/Sync.svg
       packaging/macos/Third-Party-Notices.txt
       scripts/package-macos.sh
       scripts/verify-macos-bundle.sh
@@ -354,6 +429,167 @@ if(APPLE)
     sync_pairing_prompt sync_metal_publisher sync_syphon_consumer
     ${FOUNDATION_FRAMEWORK} ${CORE_FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
   )
+elseif(WIN32)
+  add_library(sync_spout_publisher
+    native/src/platform/windows/spout_publisher.cpp
+  )
+  target_compile_features(sync_spout_publisher PUBLIC cxx_std_20)
+  target_include_directories(sync_spout_publisher PUBLIC native/include)
+  target_link_libraries(sync_spout_publisher PUBLIC sync_protocol)
+
+  add_executable(sync_spout_publisher_tests
+    native/test/windows/spout_publisher_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_spout_publisher_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_spout_publisher_tests PRIVATE native/test)
+  target_link_libraries(sync_spout_publisher_tests PRIVATE sync_spout_publisher)
+  add_test(NAME sync_spout_publisher_tests COMMAND sync_spout_publisher_tests)
+
+  add_library(sync_pairing_prompt
+    native/src/platform/windows/pairing_prompt.cpp
+  )
+  target_compile_features(sync_pairing_prompt PUBLIC cxx_std_20)
+  target_include_directories(sync_pairing_prompt PUBLIC native/include)
+  target_link_libraries(sync_pairing_prompt PUBLIC sync_protocol PRIVATE user32)
+
+  add_executable(sync_pairing_prompt_tests
+    native/test/windows/pairing_prompt_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_pairing_prompt_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_pairing_prompt_tests PRIVATE native/test)
+  target_link_libraries(sync_pairing_prompt_tests PRIVATE sync_pairing_prompt)
+  add_test(NAME sync_pairing_prompt_tests COMMAND sync_pairing_prompt_tests)
+
+  add_library(sync_companion_process
+    native/src/platform/windows/companion_process.cpp
+  )
+  target_compile_features(sync_companion_process PUBLIC cxx_std_20)
+  target_include_directories(sync_companion_process PUBLIC
+    native/include native/src/platform/windows
+  )
+  # WinHTTP for the loopback health poll, ws2_32 for the raw-socket probe that
+  # tells "nothing is listening" apart from "something else holds the port".
+  # The sources also carry #pragma comment(lib, ...) for these; naming them
+  # here as well keeps the link correct under non-MSVC toolchains, which
+  # ignore that pragma.
+  target_link_libraries(sync_companion_process
+    PUBLIC sync_companion_model
+    PRIVATE sync_protocol winhttp ws2_32
+  )
+
+  add_executable(sync_companion_process_tests
+    native/test/windows/companion_process_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_companion_process_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_companion_process_tests PRIVATE native/test)
+  target_link_libraries(sync_companion_process_tests PRIVATE sync_companion_process)
+  add_test(NAME sync_companion_process_tests COMMAND sync_companion_process_tests)
+
+  # The executable's icon is rasterised from the same artwork the macOS bundle
+  # uses, so the two platforms cannot drift apart visually. ImageMagick is an
+  # optional build dependency: without it the resource is simply omitted and
+  # the app falls back to a stock icon, so a plain developer build still works.
+  # Packaging requires it, and scripts/package-windows.ps1 fails fast if it is
+  # missing there.
+  find_program(SYNC_MAGICK NAMES magick)
+  set(SYNC_ICON_PATH ${CMAKE_CURRENT_BINARY_DIR}/Sync.ico)
+  if(SYNC_MAGICK)
+    add_custom_command(
+      OUTPUT ${SYNC_ICON_PATH}
+      COMMAND ${SYNC_MAGICK} -background none
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/Sync.svg
+        -define icon:auto-resize=256,128,64,48,32,24,16
+        ${SYNC_ICON_PATH}
+      DEPENDS packaging/Sync.svg
+      COMMENT "Rasterising Sync.ico from packaging/Sync.svg"
+      VERBATIM
+    )
+    add_custom_target(sync_windows_icon DEPENDS ${SYNC_ICON_PATH})
+    # The RC compiler resolves the icon path relative to the .rc file, which
+    # configure_file writes into the binary directory alongside the icon.
+    set(SYNC_ICON_RESOURCE_LINE "IDI_SYNC_APP ICON \"Sync.ico\"")
+  else()
+    message(STATUS
+      "ImageMagick (magick) not found: Sync.exe will be built without an "
+      "embedded icon. Install it before packaging.")
+    set(SYNC_ICON_RESOURCE_LINE "")
+  endif()
+
+  configure_file(
+    packaging/windows/version.rc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
+    @ONLY
+  )
+
+  # WIN32 rather than a console subsystem: the tray app must not flash a
+  # console window when a user launches it from Explorer or at sign-in.
+  add_executable(sync_menu WIN32
+    native/src/platform/windows/app_main.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
+  )
+  target_compile_features(sync_menu PRIVATE cxx_std_20)
+  set_target_properties(sync_menu PROPERTIES OUTPUT_NAME Sync)
+  target_include_directories(sync_menu PRIVATE native/src/platform/windows)
+  target_link_libraries(sync_menu PRIVATE
+    sync_companion_process shell32 user32 advapi32
+  )
+
+  target_sources(syncd PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc)
+  target_link_libraries(syncd PRIVATE
+    sync_pairing_prompt sync_spout_publisher user32
+  )
+
+  # Both executables embed the version resource, so both need the icon to
+  # exist before their RC compile runs.
+  if(SYNC_MAGICK)
+    add_dependencies(sync_menu sync_windows_icon)
+    add_dependencies(syncd sync_windows_icon)
+  endif()
+  # The RC compiler needs resource.h, which lives with the Windows sources.
+  set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
+    PROPERTIES INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/native/src/platform/windows)
+
+  set(SYNC_PACKAGE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/package)
+  set(SYNC_BUNDLE_STAMP ${SYNC_PACKAGE_DIRECTORY}/.sync-bundle-complete)
+  set(SYNC_INSTALLER_PATH
+      ${SYNC_PACKAGE_DIRECTORY}/Sync-${SYNC_PRODUCT_VERSION}-x64-Setup.exe)
+  find_program(SYNC_POWERSHELL NAMES pwsh powershell REQUIRED)
+  add_custom_command(
+    OUTPUT ${SYNC_BUNDLE_STAMP}
+    COMMAND ${SYNC_POWERSHELL} -NoProfile -ExecutionPolicy Bypass -File
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-windows.ps1
+      -Mode bundle
+      -BuildDir ${CMAKE_CURRENT_BINARY_DIR}
+      -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
+      -Version ${SYNC_PRODUCT_VERSION}
+      -SpoutLibrary ${SYNC_SPOUT_LIBRARY_PATH}
+      -DependencySearchPath ${SYNC_WINDOWS_DEPENDENCY_PATH}
+    DEPENDS
+      sync_menu syncd
+      LICENSE
+      packaging/Sync.svg
+      packaging/windows/Third-Party-Notices.txt
+      packaging/windows/bundle-dependencies.cmake
+      scripts/package-windows.ps1
+      scripts/verify-windows-bundle.ps1
+    VERBATIM
+  )
+  add_custom_target(sync_windows_bundle DEPENDS ${SYNC_BUNDLE_STAMP})
+  add_custom_command(
+    OUTPUT ${SYNC_INSTALLER_PATH}
+    COMMAND ${SYNC_POWERSHELL} -NoProfile -ExecutionPolicy Bypass -File
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-windows.ps1
+      -Mode installer
+      -BuildDir ${CMAKE_CURRENT_BINARY_DIR}
+      -SourceDir ${CMAKE_CURRENT_SOURCE_DIR}
+      -Version ${SYNC_PRODUCT_VERSION}
+    DEPENDS ${SYNC_BUNDLE_STAMP} packaging/windows/Sync.iss
+    VERBATIM
+  )
+  add_custom_target(sync_windows_installer DEPENDS ${SYNC_INSTALLER_PATH})
 else()
   target_link_libraries(syncd PRIVATE sync_protocol)
 endif()

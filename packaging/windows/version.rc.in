@@ -1,0 +1,49 @@
+// Version resource shared by Sync.exe and syncd.exe.
+//
+// scripts/verify-windows-bundle.ps1 reads ProductVersion back out of both
+// binaries and refuses a bundle whose executables disagree with the version
+// being packaged, so this is the single place the number is stated.
+
+#include <winver.h>
+
+#include "resource.h"
+
+#define SYNC_VERSION_STRING "@SYNC_PRODUCT_VERSION@"
+
+// Present only when the build could rasterise packaging/Sync.svg. Declared
+// first so it becomes the executable's default icon in Explorer, the taskbar,
+// and Alt-Tab -- the Windows counterpart to Sync.icns in the macOS bundle.
+@SYNC_ICON_RESOURCE_LINE@
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Noise Factor LLC"
+            VALUE "FileDescription",  "Sync"
+            VALUE "FileVersion",      SYNC_VERSION_STRING
+            VALUE "InternalName",     "Sync"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Noise Factor LLC. MIT Licensed."
+            VALUE "OriginalFilename", "Sync.exe"
+            VALUE "ProductName",      "Sync"
+            VALUE "ProductVersion",   SYNC_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

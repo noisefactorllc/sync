@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   native:
-    name: ${{ matrix.name }}
+    name: macOS ${{ matrix.name }}
     runs-on: macos-latest
     timeout-minutes: 40
     strategy:
@@ -65,11 +65,151 @@ jobs:
       - name: Run browser SDK tests
         run: npm run test:browser
 
+      - name: Run packaging tests
+        run: npm run test:packaging
+
       - name: Run real-daemon loopback tests
         run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
 
-  shell:
-    name: Shell scripts
+  windows:
+    name: Windows ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            build_type: Release
+            cxx_flags: ''
+          - name: Warnings as errors
+            build_type: Debug
+            # /W4 /WX is MSVC's equivalent of the -Wall -Wextra -Werror gate the
+            # macOS matrix applies; /permissive- holds the same standards line.
+            cxx_flags: '/W4 /WX /permissive-'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
+      - name: Configure and build
+        shell: pwsh
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+          EXTRA_CXX_FLAGS: ${{ matrix.cxx_flags }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_BUILD_TYPE="$env:BUILD_TYPE" `
+            -DCMAKE_CXX_FLAGS="$env:EXTRA_CXX_FLAGS"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build --config $env:BUILD_TYPE --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      # Neither Spout nor NDI can initialise on a headless runner with no GPU
+      # and no user-installed NDI runtime. That is exactly the state the
+      # provider tests assert: absence must be graceful, never a crash.
+      - name: Run native tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build --build-config $env:BUILD_TYPE --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "ctest failed" }
+
+      - name: Run browser SDK tests
+        run: npm run test:browser
+
+      - name: Run packaging tests
+        run: npm run test:packaging
+
+      - name: Run real-daemon loopback tests
+        shell: pwsh
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+        run: |
+          $env:SYNC_DAEMON_PATH = "build/$env:BUILD_TYPE/syncd.exe"
+          npm run test:integration
+          if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
+
+  windows-package:
+    name: Windows package
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install build and packaging dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          choco install --no-progress --yes innosetup imagemagick.tool
+          if ($LASTEXITCODE -ne 0) { throw "choco install failed" }
+          # Inno Setup and ImageMagick land outside the default PATH for the
+          # current step, so they are appended for every step that follows.
+          "C:\Program Files (x86)\Inno Setup 6" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Spout is BSD-2-Clause and therefore redistributable, so the packaged
+      # app carries a pinned build of SpoutLibrary.dll. The release workflow
+      # supplies a real pinned artifact; CI builds a placeholder so the
+      # packaging path itself is exercised on every change.
+      - name: Stage a placeholder Spout module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\spout" -Force | Out-Null
+          Copy-Item "$env:SystemRoot\System32\version.dll" `
+            "$env:RUNNER_TEMP\spout\SpoutLibrary.dll"
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build-package -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSYNC_SPOUT_LIBRARY_PATH="$env:RUNNER_TEMP\spout\SpoutLibrary.dll" `
+            -DSYNC_WINDOWS_DEPENDENCY_PATH="$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build-package --config Release --target sync_windows_installer --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
+
+      - name: Verify the packaged bundle
+        shell: pwsh
+        run: |
+          $env:SYNC_PACKAGE_DIR = "build-package/package"
+          node --test test/packaging/windows-package.test.js
+          if ($LASTEXITCODE -ne 0) { throw "packaging tests failed" }
+
+      - name: Smoke the installed app lifecycle
+        shell: pwsh
+        run: |
+          ./scripts/smoke-windows-app.ps1 -Bundle "$PWD/build-package/package/Sync"
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
+  scripts:
+    name: Packaging scripts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -83,3 +223,14 @@ jobs:
           set -euo pipefail
           shellcheck --severity=warning scripts/*.sh
           for SCRIPT in scripts/*.sh; do bash -n "$SCRIPT"; done
+
+      - name: Lint PowerShell packaging scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error, Warning
+          if ($findings) {
+            $findings | Format-Table -AutoSize | Out-String | Write-Host
+            throw "PSScriptAnalyzer reported $($findings.Count) finding(s)"
+          }
