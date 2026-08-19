@@ -10,17 +10,31 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <aclapi.h>
+#include <cwchar>  // _snwprintf_s
+#else
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <membership.h>
@@ -29,6 +43,8 @@
 
 #include <sync/origin.hpp>
 #include <sync/pairing_store.hpp>
+
+#include "../src/pairing_store_fs.hpp"
 
 namespace {
 
@@ -45,12 +61,36 @@ using noisefactor::sync::normalize_origin;
 class TempDirectory {
  public:
   TempDirectory() {
+#if defined(_WIN32)
+    // Unlike macOS's /tmp -> /private/tmp, GetTempPathW's result on a
+    // normal Windows install/CI image is a real directory, not a reparse
+    // point, so it does not need the same "use the resolved path, not the
+    // symlinked convenience path" workaround the POSIX branch below uses.
+    wchar_t temp_path[MAX_PATH + 1]{};
+    const DWORD temp_path_length = ::GetTempPathW(MAX_PATH, temp_path);
+    SYNC_REQUIRE(temp_path_length > 0 && temp_path_length < MAX_PATH);
+    std::mt19937_64 engine(std::random_device{}());
+    bool created = false;
+    for (int attempt = 0; attempt < 100 && !created; ++attempt) {
+      wchar_t name[64]{};
+      ::_snwprintf_s(name, _TRUNCATE, L"sync-pairing-test-%016llx",
+                     static_cast<unsigned long long>(engine()));
+      std::filesystem::path candidate = std::filesystem::path(temp_path) / name;
+      std::error_code error;
+      if (std::filesystem::create_directory(candidate, error)) {
+        path_ = candidate;
+        created = true;
+      }
+    }
+    SYNC_REQUIRE(created);
+#else
     std::array<char, 256> pattern{};
     const std::string seed = "/private/tmp/sync-pairing-test-XXXXXX";
     std::copy(seed.begin(), seed.end(), pattern.begin());
     char* made = ::mkdtemp(pattern.data());
     SYNC_REQUIRE(made != nullptr);
     path_ = made;
+#endif
   }
   ~TempDirectory() {
     std::error_code ignored;
@@ -101,11 +141,156 @@ std::vector<unsigned char> read_bytes(const std::filesystem::path& path) {
   return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+#if defined(_WIN32)
+
+// Reimplements PairingStore's owner-only DACL check independently of
+// native/src/platform/windows/pairing_store_fs.cpp's verify_owner_only_
+// security -- deliberately not shared with it, so these tests exercise the
+// production code's actual on-disk result rather than asserting via the
+// same logic that produced it.
+bool get_current_user_sid_for_test(std::vector<unsigned char>& buffer, PSID& sid) {
+  HANDLE token = nullptr;
+  if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  DWORD needed = 0;
+  ::GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+  bool ok = needed > 0;
+  if (ok) {
+    buffer.resize(needed);
+    ok = ::GetTokenInformation(token, TokenUser, buffer.data(), needed, &needed) != 0;
+  }
+  ::CloseHandle(token);
+  if (!ok) return false;
+  sid = reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid;
+  return true;
+}
+
+bool file_dacl_grants_only_current_user(const std::filesystem::path& path) {
+  std::vector<unsigned char> sid_buffer;
+  PSID owner_sid = nullptr;
+  if (!get_current_user_sid_for_test(sid_buffer, owner_sid)) return false;
+
+  PSID file_owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const DWORD status = ::GetNamedSecurityInfoW(
+      const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &file_owner, nullptr, &dacl,
+      nullptr, &descriptor);
+  if (status != ERROR_SUCCESS || descriptor == nullptr) return false;
+  struct Guard {
+    PSECURITY_DESCRIPTOR value;
+    ~Guard() { if (value != nullptr) ::LocalFree(value); }
+  } guard{descriptor};
+  if (file_owner == nullptr || !::EqualSid(file_owner, owner_sid)) return false;
+
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (!::GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
+  if ((control & SE_DACL_PROTECTED) == 0) return false;
+  if (dacl == nullptr) return false;
+
+  ACL_SIZE_INFORMATION size_info{};
+  if (!::GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation)) return false;
+  if (size_info.AceCount != 1) return false;
+  LPVOID ace = nullptr;
+  if (!::GetAce(dacl, 0, &ace)) return false;
+  const auto* header = static_cast<ACE_HEADER*>(ace);
+  if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
+  const auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+  if (allowed->Mask != FILE_ALL_ACCESS) return false;
+  const PSID ace_sid = const_cast<PSID>(static_cast<const void*>(&allowed->SidStart));
+  return ::EqualSid(ace_sid, owner_sid) != 0;
+}
+
+// Sets `path`'s DACL to exactly what PairingStore itself would create:
+// this is the Windows analogue of `::chmod(path, 0600)` used below to make
+// a raw-bytes test fixture pass PairingStore's security checks so the
+// content-level (corrupt/version) checks under test are actually reached.
+void secure_file_for_test(const std::filesystem::path& path) {
+  std::vector<unsigned char> sid_buffer;
+  PSID sid = nullptr;
+  SYNC_REQUIRE(get_current_user_sid_for_test(sid_buffer, sid));
+  std::array<unsigned char, 256> acl_buffer{};
+  auto* acl = reinterpret_cast<PACL>(acl_buffer.data());
+  SYNC_REQUIRE(::InitializeAcl(acl, static_cast<DWORD>(acl_buffer.size()), ACL_REVISION));
+  SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, sid));
+  const DWORD result = ::SetNamedSecurityInfoW(
+      const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+      sid, nullptr, acl, nullptr);
+  SYNC_REQUIRE(result == ERROR_SUCCESS);
+}
+
+// Deliberately widens `path`'s DACL to also grant Everyone, and leaves it
+// unprotected against inheritance -- the Windows analogue of
+// `::chmod(path, 0644)` / `::chmod(path, 0755)` below: both make an object
+// more permissive than PairingStore will accept, so it must be refused.
+void widen_permissions_for_test(const std::filesystem::path& path) {
+  SID_IDENTIFIER_AUTHORITY world_authority = SECURITY_WORLD_SID_AUTHORITY;
+  PSID everyone_sid = nullptr;
+  SYNC_REQUIRE(::AllocateAndInitializeSid(&world_authority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0,
+                                          0, &everyone_sid) != 0);
+  std::vector<unsigned char> sid_buffer;
+  PSID owner_sid = nullptr;
+  SYNC_REQUIRE(get_current_user_sid_for_test(sid_buffer, owner_sid));
+
+  std::array<unsigned char, 256> acl_buffer{};
+  auto* acl = reinterpret_cast<PACL>(acl_buffer.data());
+  SYNC_REQUIRE(::InitializeAcl(acl, static_cast<DWORD>(acl_buffer.size()), ACL_REVISION));
+  SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, owner_sid));
+  SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_READ, everyone_sid));
+  const DWORD result = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+                                               DACL_SECURITY_INFORMATION, nullptr, nullptr, acl,
+                                               nullptr);
+  ::FreeSid(everyone_sid);
+  SYNC_REQUIRE(result == ERROR_SUCCESS);
+}
+
+// Best-effort symlink creation: on a CI image without Developer Mode or
+// admin rights, CreateSymbolicLinkW fails with ERROR_PRIVILEGE_NOT_HELD.
+// Callers must treat a false return as "skip this assertion", not a test
+// failure -- there is no unprivileged equivalent for a *file* symlink the
+// way a directory junction would be, and hand-rolling a junction via a raw
+// FSCTL_SET_REPARSE_POINT buffer (whose structure is not declared in any
+// standard user-mode SDK header) was judged too easy to get subtly wrong
+// without a compiler on hand to check it.
+bool try_create_symlink(const std::filesystem::path& link, const std::filesystem::path& target,
+                        bool directory) {
+  DWORD flags = directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
+#if defined(SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)
+  flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+  return ::CreateSymbolicLinkW(link.c_str(), target.c_str(), flags) != 0;
+}
+
+bool set_local_app_data_for_test(const std::string& value) {
+  return ::_putenv_s("LOCALAPPDATA", value.c_str()) == 0;
+}
+
+std::string get_local_app_data_for_test(bool& had_previous) {
+  char buffer[4096]{};
+  const DWORD written = ::GetEnvironmentVariableA("LOCALAPPDATA", buffer, sizeof(buffer));
+  had_previous = written > 0 && written < sizeof(buffer);
+  return had_previous ? std::string(buffer) : std::string{};
+}
+
+void restore_local_app_data_for_test(bool had_previous, const std::string& saved) {
+  // An empty value removes the variable in the Microsoft CRT's _putenv_s,
+  // documented behaviour used here as the unsetenv() this platform lacks.
+  SYNC_REQUIRE(::_putenv_s("LOCALAPPDATA", had_previous ? saved.c_str() : "") == 0);
+}
+
+#endif  // defined(_WIN32)
+
 void write_bytes(const std::filesystem::path& path, std::span<const unsigned char> bytes) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
   output.close();
+#if defined(_WIN32)
+  secure_file_for_test(path);
+#else
   SYNC_REQUIRE(::chmod(path.c_str(), 0600) == 0);
+#endif
 }
 
 bool all_lowercase_hex(std::string_view value) {
@@ -195,7 +380,11 @@ SYNC_TEST(pairing_store_treats_missing_file_as_empty_and_rejects_empty_or_corrup
 
   std::filesystem::create_directories(path.parent_path());
   std::ofstream(path, std::ios::binary).close();
+#if defined(_WIN32)
+  secure_file_for_test(path);
+#else
   SYNC_REQUIRE(::chmod(path.c_str(), 0600) == 0);
+#endif
   PairingStore corrupt;
   SYNC_REQUIRE(corrupt.open({.path = path.string()}) == PairingStoreError::Corrupt);
 }
@@ -288,6 +477,7 @@ SYNC_TEST(pairing_store_strictly_rejects_unknown_versions_truncation_trailing_an
   SYNC_REQUIRE(check_duplicate.open({.path = path.string()}) == PairingStoreError::Corrupt);
 }
 
+#if !defined(_WIN32)
 SYNC_TEST(pairing_store_requires_owner_only_directory_and_regular_store_file) {
   TempDirectory temporary;
   const auto state = temporary.path() / "state";
@@ -316,9 +506,37 @@ SYNC_TEST(pairing_store_requires_owner_only_directory_and_regular_store_file) {
   PairingStore broad_directory;
   SYNC_REQUIRE(broad_directory.open({.path = path.string()}) == PairingStoreError::DirectorySecurity);
 }
+#else
+SYNC_TEST(pairing_store_requires_owner_only_directory_and_regular_store_file) {
+  TempDirectory temporary;
+  const auto state = temporary.path() / "state";
+  const auto path = state / "pairings.bin";
+  auto store = open_store(path);
+  SYNC_REQUIRE(store.issue(origin("https://deck.example")).error == PairingStoreError::None);
+
+  SYNC_REQUIRE(file_dacl_grants_only_current_user(state));
+  SYNC_REQUIRE(file_dacl_grants_only_current_user(path));
+  SYNC_REQUIRE(file_dacl_grants_only_current_user(state / ".pairings.lock"));
+
+  widen_permissions_for_test(path);
+  PairingStore broad_file;
+  SYNC_REQUIRE(broad_file.open({.path = path.string()}) == PairingStoreError::FileSecurity);
+  secure_file_for_test(path);
+
+  widen_permissions_for_test(state);
+  PairingStore broad_directory;
+  SYNC_REQUIRE(broad_directory.open({.path = path.string()}) ==
+               PairingStoreError::DirectorySecurity);
+}
+#endif
 
 SYNC_TEST(pairing_store_rejects_symlinked_directories_files_and_parent_traversal) {
   TempDirectory temporary;
+  PairingStore traversal;
+  SYNC_REQUIRE(traversal.open({.path = (temporary.path() / ".." / "escape.bin").string()}) ==
+               PairingStoreError::InvalidPath);
+
+#if !defined(_WIN32)
   const auto real = temporary.path() / "real";
   std::filesystem::create_directory(real);
   SYNC_REQUIRE(::chmod(real.c_str(), 0700) == 0);
@@ -335,10 +553,26 @@ SYNC_TEST(pairing_store_rejects_symlinked_directories_files_and_parent_traversal
   SYNC_REQUIRE(::symlink(target.c_str(), file_link.c_str()) == 0);
   PairingStore symlink;
   SYNC_REQUIRE(symlink.open({.path = file_link.string()}) == PairingStoreError::FileSecurity);
+#else
+  const auto real = temporary.path() / "real";
+  std::filesystem::create_directory(real);
+  const auto linked = temporary.path() / "linked";
+  if (try_create_symlink(linked, real, true)) {
+    PairingStore directory_link;
+    SYNC_REQUIRE(directory_link.open({.path = (linked / "pairings.bin").string()}) ==
+                 PairingStoreError::DirectorySecurity);
+  }
 
-  PairingStore traversal;
-  SYNC_REQUIRE(traversal.open({.path = (real / ".." / "escape.bin").string()}) ==
-               PairingStoreError::InvalidPath);
+  const auto target = real / "target";
+  std::ofstream(target) << "target";
+  secure_file_for_test(target);
+  const auto file_link = real / "pairings.bin";
+  if (try_create_symlink(file_link, target, false)) {
+    PairingStore symlink_store;
+    SYNC_REQUIRE(symlink_store.open({.path = file_link.string()}) ==
+                 PairingStoreError::FileSecurity);
+  }
+#endif
 }
 
 SYNC_TEST(pairing_store_atomic_pre_rename_failure_preserves_previous_file_and_cleans_temp) {
@@ -464,6 +698,7 @@ SYNC_TEST(pairing_store_rejects_nul_and_control_bytes_in_explicit_paths) {
   SYNC_REQUIRE(control_store.open({.path = control}) == PairingStoreError::InvalidPath);
 }
 
+#if !defined(_WIN32)
 SYNC_TEST(pairing_store_creates_absent_default_path_ancestors_securely) {
   TempDirectory temporary;
   const char* previous_home = std::getenv("HOME");
@@ -487,7 +722,91 @@ SYNC_TEST(pairing_store_creates_absent_default_path_ancestors_securely) {
   SYNC_REQUIRE(::stat(std::filesystem::path(path.data()).parent_path().c_str(), &final_directory) == 0);
   SYNC_REQUIRE((final_directory.st_mode & 0777) == 0700);
 }
+#else
+SYNC_TEST(pairing_store_creates_absent_default_path_ancestors_securely) {
+  TempDirectory temporary;
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  SYNC_REQUIRE(set_local_app_data_for_test(temporary.path().string()));
 
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 0;
+  SYNC_REQUIRE(noisefactor::sync::default_pairing_store_path(path, length) ==
+               PairingStoreError::None);
+  PairingStore store;
+  const auto opened = store.open({.path = std::string_view(path.data(), length)});
+
+  restore_local_app_data_for_test(had_previous, saved);
+  SYNC_REQUIRE(opened == PairingStoreError::None);
+  SYNC_REQUIRE(
+      file_dacl_grants_only_current_user(std::filesystem::path(path.data()).parent_path()));
+}
+
+// Additional Windows-only coverage for default_pairing_store_path's
+// %LOCALAPPDATA% branch, alongside the existing POSIX $HOME tests above:
+// correct composition, rejection when the variable is missing or relative,
+// and bounds enforcement.
+SYNC_TEST(pairing_store_default_path_composes_local_app_data_and_suffix) {
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  SYNC_REQUIRE(set_local_app_data_for_test("C:\\Users\\tester\\AppData\\Local"));
+
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 0;
+  const auto error = noisefactor::sync::default_pairing_store_path(path, length);
+  restore_local_app_data_for_test(had_previous, saved);
+
+  SYNC_REQUIRE(error == PairingStoreError::None);
+  const std::string_view produced(path.data(), length);
+  SYNC_REQUIRE(produced ==
+               "C:\\Users\\tester\\AppData\\Local\\Noisefactor Sync\\pairings.v1");
+}
+
+SYNC_TEST(pairing_store_default_path_rejects_missing_local_app_data) {
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  SYNC_REQUIRE(::_putenv_s("LOCALAPPDATA", "") == 0);
+
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 123;
+  const auto error = noisefactor::sync::default_pairing_store_path(path, length);
+  restore_local_app_data_for_test(had_previous, saved);
+
+  SYNC_REQUIRE(error == PairingStoreError::InvalidPath);
+  SYNC_REQUIRE(length == 0);
+}
+
+SYNC_TEST(pairing_store_default_path_rejects_relative_local_app_data) {
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  SYNC_REQUIRE(set_local_app_data_for_test("Users\\tester\\AppData\\Local"));
+
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 123;
+  const auto error = noisefactor::sync::default_pairing_store_path(path, length);
+  restore_local_app_data_for_test(had_previous, saved);
+
+  SYNC_REQUIRE(error == PairingStoreError::InvalidPath);
+  SYNC_REQUIRE(length == 0);
+}
+
+SYNC_TEST(pairing_store_default_path_enforces_bounds) {
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  const std::string huge = "C:\\" + std::string(noisefactor::sync::kMaximumPairingStorePathBytes, 'a');
+  SYNC_REQUIRE(set_local_app_data_for_test(huge));
+
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 123;
+  const auto error = noisefactor::sync::default_pairing_store_path(path, length);
+  restore_local_app_data_for_test(had_previous, saved);
+
+  SYNC_REQUIRE(error == PairingStoreError::InvalidPath);
+  SYNC_REQUIRE(length == 0);
+}
+#endif
+
+#if !defined(_WIN32)
 SYNC_TEST(pairing_store_rejects_a_symlinked_lock_file) {
   TempDirectory temporary;
   const auto state = temporary.path() / "state";
@@ -501,7 +820,23 @@ SYNC_TEST(pairing_store_rejects_a_symlinked_lock_file) {
   SYNC_REQUIRE(store.open({.path = (state / "pairings.bin").string()}) ==
                PairingStoreError::FileSecurity);
 }
+#else
+SYNC_TEST(pairing_store_rejects_a_symlinked_lock_file) {
+  TempDirectory temporary;
+  const auto state = temporary.path() / "state";
+  std::filesystem::create_directory(state);
+  const auto target = temporary.path() / "target";
+  std::ofstream(target) << "target";
+  secure_file_for_test(target);
+  if (try_create_symlink(state / ".pairings.lock", target, false)) {
+    PairingStore store;
+    SYNC_REQUIRE(store.open({.path = (state / "pairings.bin").string()}) ==
+                 PairingStoreError::FileSecurity);
+  }
+}
+#endif
 
+#if !defined(_WIN32)
 SYNC_TEST(pairing_store_serializes_cross_process_reload_through_commit_without_lost_updates) {
   TempDirectory temporary;
   const auto path = temporary.path() / "state" / "pairings.bin";
@@ -553,7 +888,54 @@ SYNC_TEST(pairing_store_serializes_cross_process_reload_through_commit_without_l
   SYNC_REQUIRE(result.error == PairingStoreError::None);
   SYNC_REQUIRE(result.count == 2);
 }
+#else
+// Windows has no fork(); spawning real child processes to mirror this test
+// exactly would need a second executable (or a re-exec-self-with-arguments
+// scheme) plus named, cross-process synchronization objects, which was
+// judged out of scope for this port. This substitutes two threads racing
+// to issue through two INDEPENDENT PairingStore handles instead: each
+// PairingStore::issue() call still opens its own fresh handle and takes a
+// genuine LockFileEx lock via fs::acquire_store_lock (see
+// native/src/platform/windows/pairing_store_fs.cpp), so this still
+// exercises the real OS-level lock contention path, just not truly
+// cross-process. No coverage is deleted -- the cross-process POSIX version
+// above still runs on POSIX.
+SYNC_TEST(pairing_store_serializes_concurrent_issue_through_lockfileex_without_lost_updates) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto initial = open_store(path);
 
+  std::array<noisefactor::sync::PairingIssueResult, 2> results{};
+  std::array<std::thread, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::thread([&, index] {
+      PairingStore worker;
+      SYNC_REQUIRE(worker.open({.path = path.string()}) == PairingStoreError::None);
+      const auto worker_origin =
+          origin(index == 0 ? "https://one.example" : "https://two.example");
+      results[index] = worker.issue(worker_origin);
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  SYNC_REQUIRE(results[0].error == PairingStoreError::None);
+  SYNC_REQUIRE(results[1].error == PairingStoreError::None);
+
+  std::array<NormalizedOrigin, 64> listed{};
+  const auto result = initial.list(listed);
+  SYNC_REQUIRE(result.error == PairingStoreError::None);
+  SYNC_REQUIRE(result.count == 2);
+}
+#endif
+
+#if !defined(_WIN32)
+// Windows has no umask-equivalent ambient default permission for this
+// store to fight against: build_owner_only_security
+// (native/src/platform/windows/pairing_store_fs.cpp) always constructs and
+// applies an explicit DACL at creation time regardless of any process- or
+// account-level default, so there is nothing for a Windows mirror of this
+// test to force. The security property this exercises on Windows is
+// instead covered unconditionally by every other test in this file that
+// checks file_dacl_grants_only_current_user.
 SYNC_TEST(pairing_store_forces_owner_only_modes_under_a_restrictive_umask) {
   TempDirectory temporary;
   const auto state = temporary.path() / "state";
@@ -578,7 +960,9 @@ SYNC_TEST(pairing_store_forces_owner_only_modes_under_a_restrictive_umask) {
   SYNC_REQUIRE((file_status.st_mode & 0777) == 0600);
   SYNC_REQUIRE((lock_status.st_mode & 0777) == 0600);
 }
+#endif
 
+#if !defined(_WIN32)
 SYNC_TEST(pairing_store_default_path_rejects_unsafe_home_bytes) {
   const char* previous_home = std::getenv("HOME");
   const std::string saved_home = previous_home == nullptr ? std::string{} : previous_home;
@@ -594,49 +978,31 @@ SYNC_TEST(pairing_store_default_path_rejects_unsafe_home_bytes) {
   SYNC_REQUIRE(error == PairingStoreError::InvalidPath);
   SYNC_REQUIRE(length == 0);
 }
-
-SYNC_TEST(pairing_store_reports_after_rename_issue_as_committed_but_durability_uncertain) {
-  TempDirectory temporary;
-  const auto path = temporary.path() / "state" / "pairings.bin";
-  auto store = open_store(path, PairingStoreFailPoint::AfterRenameBeforeDirectorySync);
-  const auto deck = origin("https://deck.example");
-  const auto issued = store.issue(deck);
-  SYNC_REQUIRE(issued.error == PairingStoreError::Io);
-  SYNC_REQUIRE(issued.commit == PairingCommitState::CommittedDurabilityUncertain);
-  SYNC_REQUIRE(all_lowercase_hex(issued.token.view()));
-  SYNC_REQUIRE(store.authenticate(deck, issued.token.view()).authenticated);
-
-  auto fresh = open_store(path);
-  SYNC_REQUIRE(fresh.authenticate(deck, issued.token.view()).authenticated);
+#else
+SYNC_TEST(pairing_store_default_path_rejects_unsafe_local_app_data_bytes) {
+  bool had_previous = false;
+  const std::string saved = get_local_app_data_for_test(had_previous);
+  SYNC_REQUIRE(set_local_app_data_for_test("C:\\unsafe\nplace"));
+  std::array<char, noisefactor::sync::kMaximumPairingStorePathBytes> path{};
+  std::size_t length = 123;
+  const auto error = noisefactor::sync::default_pairing_store_path(path, length);
+  restore_local_app_data_for_test(had_previous, saved);
+  SYNC_REQUIRE(error == PairingStoreError::InvalidPath);
+  SYNC_REQUIRE(length == 0);
 }
-
-SYNC_TEST(pairing_store_reports_after_rename_revoke_as_visible_but_durability_uncertain) {
-  TempDirectory temporary;
-  const auto path = temporary.path() / "state" / "pairings.bin";
-  auto initial = open_store(path);
-  const auto deck = origin("https://deck.example");
-  const auto token = initial.issue(deck).token;
-
-  auto store = open_store(path, PairingStoreFailPoint::AfterRenameBeforeDirectorySync);
-  const auto revoked = store.revoke(deck);
-  SYNC_REQUIRE(revoked.error == PairingStoreError::Io);
-  SYNC_REQUIRE(revoked.commit == PairingCommitState::CommittedDurabilityUncertain);
-  SYNC_REQUIRE(revoked.revoked);
-  SYNC_REQUIRE(!store.authenticate(deck, token.view()).authenticated);
-
-  auto fresh = open_store(path);
-  SYNC_REQUIRE(!fresh.authenticate(deck, token.view()).authenticated);
-}
+#endif
 
 SYNC_TEST(pairing_store_validates_filename_plus_temporary_suffix_against_name_max) {
   TempDirectory temporary;
   constexpr std::size_t suffix_bytes = 21;
-  const std::string accepted_name(NAME_MAX - suffix_bytes, 'a');
+  const std::string accepted_name(noisefactor::sync::fs::kMaximumPathComponentBytes - suffix_bytes,
+                                  'a');
   PairingStore accepted;
   SYNC_REQUIRE(accepted.open({.path = (temporary.path() / accepted_name).string()}) ==
                PairingStoreError::None);
 
-  const std::string rejected_name(NAME_MAX - suffix_bytes + 1, 'b');
+  const std::string rejected_name(
+      noisefactor::sync::fs::kMaximumPathComponentBytes - suffix_bytes + 1, 'b');
   PairingStore rejected;
   SYNC_REQUIRE(rejected.open({.path = (temporary.path() / rejected_name).string()}) ==
                PairingStoreError::InvalidPath);
@@ -728,5 +1094,33 @@ SYNC_TEST(pairing_store_rejects_an_inherited_acl_even_with_exact_mode_bits) {
   PairingStore store;
   SYNC_REQUIRE(store.open({.path = (state / "pairings.bin").string()}) ==
                PairingStoreError::DirectorySecurity);
+}
+#endif
+
+#if defined(_WIN32)
+// Windows-only mirror of the two macOS extended-ACL tests above: a
+// pre-existing final directory/file/lock carrying a widened DACL (rather
+// than an inherited macOS ACL) must be refused the same way.
+SYNC_TEST(pairing_store_rejects_widened_dacls_on_existing_sensitive_objects) {
+  TempDirectory temporary;
+  const auto state = temporary.path() / "state";
+  const auto path = state / "pairings.bin";
+  auto store = open_store(path);
+  SYNC_REQUIRE(store.issue(origin("https://deck.example")).error == PairingStoreError::None);
+
+  widen_permissions_for_test(state);
+  PairingStore directory_dacl;
+  SYNC_REQUIRE(directory_dacl.open({.path = path.string()}) ==
+               PairingStoreError::DirectorySecurity);
+  secure_file_for_test(state);
+
+  widen_permissions_for_test(path);
+  PairingStore store_dacl;
+  SYNC_REQUIRE(store_dacl.open({.path = path.string()}) == PairingStoreError::FileSecurity);
+  secure_file_for_test(path);
+
+  widen_permissions_for_test(state / ".pairings.lock");
+  PairingStore lock_dacl;
+  SYNC_REQUIRE(lock_dacl.open({.path = path.string()}) == PairingStoreError::FileSecurity);
 }
 #endif

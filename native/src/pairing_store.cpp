@@ -1,28 +1,32 @@
 #include <sync/pairing_store.hpp>
 
+#include "pairing_store_fs.hpp"
+
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #include <array>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
 
-#include <fcntl.h>
-#include <limits.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
-
-#if defined(__APPLE__)
-#include <sys/acl.h>
-#endif
+// This file holds every platform-neutral piece of PairingStore: record
+// parsing, versioning, capacity limits, token/digest handling, commit-gate
+// interaction, and cleansing. The filesystem primitives that give it its
+// actual guarantees (owner-only access, refusal to follow a
+// symlink/reparse point, durable atomic commit) live behind the seam
+// declared in pairing_store_fs.hpp -- see
+// native/src/platform/posix/pairing_store_fs.cpp and
+// native/src/platform/windows/pairing_store_fs.cpp. path_is_bounded_absolute
+// and split_path below are the two narrow exceptions: they are pure path
+// *syntax* (no filesystem calls at all), but that syntax genuinely differs
+// between '/'-separated POSIX paths and drive-absolute '\'-separated
+// Windows paths, so each carries its own small, self-contained branch
+// rather than needing a seam function.
 
 namespace noisefactor::sync {
 namespace {
@@ -34,38 +38,9 @@ constexpr std::size_t kDigestBytes = 32;
 constexpr std::size_t kMaximumSerializedBytes =
     kHeaderBytes + kMaximumPairingOrigins * (4 + kMaximumOriginBytes + kDigestBytes);
 
-class ScopedFd {
- public:
-  explicit ScopedFd(int value = -1) noexcept : value_(value) {}
-  ~ScopedFd() { close(); }
-  ScopedFd(const ScopedFd&) = delete;
-  ScopedFd& operator=(const ScopedFd&) = delete;
-  ScopedFd(ScopedFd&& other) noexcept : value_(other.release()) {}
-  ScopedFd& operator=(ScopedFd&& other) noexcept {
-    if (this != &other) {
-      close();
-      value_ = other.release();
-    }
-    return *this;
-  }
-  [[nodiscard]] int get() const noexcept { return value_; }
-  [[nodiscard]] int release() noexcept {
-    const int value = value_;
-    value_ = -1;
-    return value;
-  }
-  void close() noexcept {
-    if (value_ >= 0) {
-      ::close(value_);
-      value_ = -1;
-    }
-  }
-
- private:
-  int value_;
-};
-
-void cleanse(void* data, std::size_t length) noexcept;
+void cleanse(void* data, std::size_t length) noexcept {
+  if (length > 0) OPENSSL_cleanse(data, length);
+}
 
 class ScopedCleanse {
  public:
@@ -78,48 +53,6 @@ class ScopedCleanse {
   void* data_;
   std::size_t length_;
 };
-
-#if defined(__APPLE__)
-class ScopedAcl {
- public:
-  explicit ScopedAcl(acl_t value) noexcept : value_(value) {}
-  ~ScopedAcl() { if (value_ != nullptr) ::acl_free(value_); }
-  [[nodiscard]] acl_t get() const noexcept { return value_; }
- private:
-  acl_t value_;
-};
-#endif
-
-void cleanse(void* data, std::size_t length) noexcept {
-  if (length > 0) OPENSSL_cleanse(data, length);
-}
-
-bool extended_acl_is_empty(int fd) noexcept {
-#if defined(__APPLE__)
-  errno = 0;
-  ScopedAcl acl(::acl_get_fd_np(fd, ACL_TYPE_EXTENDED));
-  if (acl.get() == nullptr) return errno == ENOENT;
-  acl_entry_t entry = nullptr;
-  errno = 0;
-  const int result = ::acl_get_entry(acl.get(), ACL_FIRST_ENTRY, &entry);
-  return result != 0 && errno == EINVAL;
-#else
-  (void)fd;
-  return true;
-#endif
-}
-
-bool strip_extended_acl(int fd) noexcept {
-#if defined(__APPLE__)
-  ScopedAcl empty(::acl_init(0));
-  return empty.get() != nullptr &&
-         ::acl_set_fd_np(fd, empty.get(), ACL_TYPE_EXTENDED) == 0 &&
-         extended_acl_is_empty(fd);
-#else
-  (void)fd;
-  return true;
-#endif
-}
 
 std::uint32_t read_u32(const unsigned char* bytes) noexcept {
   return static_cast<std::uint32_t>(bytes[0]) |
@@ -174,6 +107,86 @@ bool decode_token(std::string_view token,
   return true;
 }
 
+#if defined(_WIN32)
+
+// Device names are reserved on Windows regardless of case or a trailing
+// extension -- CON, CON.txt, and con.anything all name the same reserved
+// device -- so a path component matching one of these (by its stem, before
+// any '.') must never be accepted as an ordinary directory/file name.
+bool is_reserved_windows_device_name(std::string_view component) noexcept {
+  std::string_view stem = component;
+  const std::size_t dot = stem.find('.');
+  if (dot != std::string_view::npos) stem = stem.substr(0, dot);
+  auto equals_ignoring_case = [&](std::string_view name) noexcept {
+    if (stem.size() != name.size()) return false;
+    for (std::size_t index = 0; index < stem.size(); ++index) {
+      char value = stem[index];
+      if (value >= 'a' && value <= 'z') value = static_cast<char>(value - 'a' + 'A');
+      if (value != name[index]) return false;
+    }
+    return true;
+  };
+  constexpr std::array<std::string_view, 22> kReserved = {
+      "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+      "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+      "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+  };
+  for (const auto& name : kReserved) {
+    if (equals_ignoring_case(name)) return true;
+  }
+  return false;
+}
+
+// Windows drive-absolute form: "C:\...". Rejects relative paths, UNC paths
+// ("\\server\share\..."), and the "\\?\" extended-length prefix -- all of
+// those fail the drive-letter check at index 0 already, since they start
+// with a second backslash there instead.
+bool path_is_bounded_absolute(std::string_view path) noexcept {
+  if (path.size() < 4 || path.size() >= kMaximumPairingStorePathBytes) return false;
+  const char drive = path.front();
+  if (!((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z'))) return false;
+  if (path[1] != ':' || path[2] != '\\') return false;
+  if (path.back() == '\\') return false;
+  for (const unsigned char byte : path) {
+    if (byte < 0x20U || byte == 0x7fU || byte > 0x7eU) return false;
+    // Reserved/ambiguous on Windows even though they sit inside the
+    // otherwise-printable-ASCII range this store allows: none of these can
+    // appear in a real filename component.
+    if (byte == '<' || byte == '>' || byte == '"' || byte == '|' || byte == '?' || byte == '*') {
+      return false;
+    }
+  }
+  // A second ':' anywhere past the drive letter denotes an NTFS alternate
+  // data stream selector, not a path character.
+  if (path.substr(2).find(':') != std::string_view::npos) return false;
+  // Forward slash is never accepted as a separator: CreateFileW happens to
+  // treat it interchangeably with backslash, which would make "bounded
+  // absolute" ambiguous about how many components a path actually has.
+  if (path.find('/') != std::string_view::npos) return false;
+
+  std::size_t start = 3;
+  while (start < path.size()) {
+    const std::size_t backslash = path.find('\\', start);
+    const std::size_t end = backslash == std::string_view::npos ? path.size() : backslash;
+    const auto component = path.substr(start, end - start);
+    if (component.empty() || component.size() > fs::kMaximumPathComponentBytes ||
+        component == "." || component == "..") {
+      return false;
+    }
+    // Windows silently strips a trailing '.' or ' ' from a component when
+    // resolving it, which would let two different validated strings name
+    // the same on-disk object -- reject that ambiguity outright rather
+    // than let it anywhere near a security check.
+    if (component.back() == '.' || component.back() == ' ') return false;
+    if (is_reserved_windows_device_name(component)) return false;
+    if (backslash == std::string_view::npos) break;
+    start = backslash + 1;
+  }
+  return true;
+}
+
+#else
+
 bool path_is_bounded_absolute(std::string_view path) noexcept {
   if (path.empty() || path.size() >= kMaximumPairingStorePathBytes || path.front() != '/' ||
       path.back() == '/') {
@@ -187,8 +200,8 @@ bool path_is_bounded_absolute(std::string_view path) noexcept {
     const std::size_t slash = path.find('/', start);
     const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
     const auto component = path.substr(start, end - start);
-    if (component.empty() || component.size() > NAME_MAX || component == "." ||
-        component == "..") {
+    if (component.empty() || component.size() > fs::kMaximumPathComponentBytes ||
+        component == "." || component == "..") {
       return false;
     }
     if (slash == std::string_view::npos) break;
@@ -197,137 +210,29 @@ bool path_is_bounded_absolute(std::string_view path) noexcept {
   return true;
 }
 
+#endif
+
 struct PathParts {
   std::string_view directory;
   std::string_view filename;
 };
 
 PathParts split_path(std::string_view path) noexcept {
+#if defined(_WIN32)
+  const std::size_t backslash = path.rfind('\\');
+  // backslash == 2 means the only separator found is the drive root's own
+  // ("C:\name"), so the directory is the 3-character root "C:\" itself.
+  // A plain substr(0, backslash) would instead yield "C:" (2 characters),
+  // losing the trailing separator that open_secure_directory requires
+  // (directory[2] == '\\') -- the same special case the POSIX branch below
+  // handles for a bare leading '/'.
+  return {.directory = backslash == 2 ? path.substr(0, 3) : path.substr(0, backslash),
+          .filename = path.substr(backslash + 1)};
+#else
   const std::size_t slash = path.rfind('/');
   return {.directory = slash == 0 ? std::string_view("/") : path.substr(0, slash),
           .filename = path.substr(slash + 1)};
-}
-
-PairingStoreError open_secure_directory(std::string_view directory, ScopedFd& output,
-                                        bool create) noexcept {
-  if (directory.empty() || directory.front() != '/' || directory == "/") {
-    return PairingStoreError::InvalidPath;
-  }
-  ScopedFd current(::open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY));
-  if (current.get() < 0) return PairingStoreError::Io;
-  std::size_t start = 1;
-  while (start < directory.size()) {
-    const std::size_t slash = directory.find('/', start);
-    const std::size_t end = slash == std::string_view::npos ? directory.size() : slash;
-    const auto component = directory.substr(start, end - start);
-    if (component.empty() || component.size() > NAME_MAX) return PairingStoreError::InvalidPath;
-    std::array<char, NAME_MAX + 1> name{};
-    std::memcpy(name.data(), component.data(), component.size());
-    const bool final = end == directory.size();
-    bool created = false;
-    int next_fd = ::openat(current.get(), name.data(),
-                           O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
-    if (next_fd < 0 && errno == ENOENT && create) {
-      const int mkdir_result = ::mkdirat(current.get(), name.data(), 0700);
-      if (mkdir_result != 0 && errno != EEXIST) {
-        return PairingStoreError::Io;
-      }
-      created = mkdir_result == 0;
-      if (created && ::fchmodat(current.get(), name.data(), 0700, 0) != 0) {
-        return PairingStoreError::Io;
-      }
-      next_fd = ::openat(current.get(), name.data(),
-                         O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
-    }
-    if (next_fd < 0) {
-      return errno == ELOOP || errno == ENOTDIR ? PairingStoreError::DirectorySecurity
-                                                : PairingStoreError::Io;
-    }
-    ScopedFd next(next_fd);
-    struct stat status {};
-    if (::fstat(next.get(), &status) != 0 || !S_ISDIR(status.st_mode)) {
-      return PairingStoreError::DirectorySecurity;
-    }
-    if (created && (::fchmod(next.get(), 0700) != 0 || !strip_extended_acl(next.get()) ||
-                    ::fsync(current.get()) != 0)) {
-      return PairingStoreError::Io;
-    }
-    if (final && (status.st_uid != ::geteuid() ||
-                  ((!created) && (status.st_mode & 0777) != 0700))) {
-      return PairingStoreError::DirectorySecurity;
-    }
-    if (final && created) {
-      if (::fstat(next.get(), &status) != 0 || status.st_uid != ::geteuid() ||
-          (status.st_mode & 0777) != 0700) {
-        return PairingStoreError::DirectorySecurity;
-      }
-    } else if (final && !extended_acl_is_empty(next.get())) {
-      return PairingStoreError::DirectorySecurity;
-    }
-    current = std::move(next);
-    if (final) {
-      output = std::move(current);
-      return PairingStoreError::None;
-    }
-    start = end + 1;
-  }
-  return PairingStoreError::InvalidPath;
-}
-
-PairingStoreError acquire_store_lock(std::string_view path, ScopedFd& lock) noexcept {
-  const PathParts parts = split_path(path);
-  ScopedFd directory;
-  PairingStoreError error = open_secure_directory(parts.directory, directory, false);
-  if (error != PairingStoreError::None) return error;
-  constexpr char kLockName[] = ".pairings.lock";
-  bool created = false;
-  int fd = ::openat(directory.get(), kLockName,
-                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (fd >= 0) {
-    created = true;
-  } else if (errno == EEXIST) {
-    fd = ::openat(directory.get(), kLockName, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-  }
-  if (fd < 0) return PairingStoreError::FileSecurity;
-  lock = ScopedFd(fd);
-  struct stat status {};
-  if ((created && (::fchmod(lock.get(), 0600) != 0 || !strip_extended_acl(lock.get()))) ||
-      ::fstat(lock.get(), &status) != 0 ||
-      !S_ISREG(status.st_mode) || status.st_uid != ::geteuid() ||
-      (status.st_mode & 0777) != 0600 || status.st_nlink != 1 ||
-      (!created && !extended_acl_is_empty(lock.get()))) {
-    return PairingStoreError::FileSecurity;
-  }
-  constexpr std::size_t kAttempts = 50;
-  const timespec pause{.tv_sec = 0, .tv_nsec = 2'000'000};
-  for (std::size_t attempt = 0; attempt < kAttempts; ++attempt) {
-    if (::flock(lock.get(), LOCK_EX | LOCK_NB) == 0) return PairingStoreError::None;
-    if (errno != EWOULDBLOCK && errno != EINTR) return PairingStoreError::Io;
-    ::nanosleep(&pause, nullptr);
-  }
-  return PairingStoreError::Busy;
-}
-
-bool full_read(int fd, unsigned char* output, std::size_t length) noexcept {
-  std::size_t offset = 0;
-  while (offset < length) {
-    const ssize_t amount = ::read(fd, output + offset, length - offset);
-    if (amount < 0 && errno == EINTR) continue;
-    if (amount <= 0) return false;
-    offset += static_cast<std::size_t>(amount);
-  }
-  return true;
-}
-
-bool full_write(int fd, const unsigned char* input, std::size_t length) noexcept {
-  std::size_t offset = 0;
-  while (offset < length) {
-    const ssize_t amount = ::write(fd, input + offset, length - offset);
-    if (amount < 0 && errno == EINTR) continue;
-    if (amount <= 0) return false;
-    offset += static_cast<std::size_t>(amount);
-  }
-  return true;
+#endif
 }
 
 bool same_origin(const NormalizedOrigin& left, const NormalizedOrigin& right) noexcept {
@@ -421,20 +326,20 @@ PairingStoreError PairingStore::open(PairingStoreOptions options) noexcept {
   const PathParts parts = split_path({path_.data(), path_length_});
   constexpr std::size_t kTemporarySuffixBytes = 21;
   if (parts.filename == ".pairings.lock" ||
-      parts.filename.size() + kTemporarySuffixBytes > NAME_MAX) {
+      parts.filename.size() + kTemporarySuffixBytes > fs::kMaximumPathComponentBytes) {
     clear();
     return PairingStoreError::InvalidPath;
   }
-  ScopedFd directory;
-  const PairingStoreError directory_error = open_secure_directory(parts.directory, directory, true);
+  fs::ScopedHandle directory;
+  const PairingStoreError directory_error =
+      fs::open_secure_directory(parts.directory, directory, true);
   if (directory_error != PairingStoreError::None) {
     clear();
     return directory_error;
   }
   opened_ = true;
-  ScopedFd lock;
-  const PairingStoreError lock_error =
-      acquire_store_lock({path_.data(), path_length_}, lock);
+  fs::ScopedHandle lock;
+  const PairingStoreError lock_error = fs::acquire_store_lock(parts.directory, lock);
   if (lock_error != PairingStoreError::None) {
     clear();
     return lock_error;
@@ -447,49 +352,17 @@ PairingStoreError PairingStore::open(PairingStoreOptions options) noexcept {
 PairingStoreError PairingStore::reload() noexcept {
   if (!opened_) return PairingStoreError::InvalidPath;
   const PathParts parts = split_path({path_.data(), path_length_});
-  ScopedFd directory;
-  PairingStoreError error = open_secure_directory(parts.directory, directory, false);
-  if (error != PairingStoreError::None) return error;
 
-  std::array<char, kMaximumPairingStorePathBytes> filename{};
-  std::memcpy(filename.data(), parts.filename.data(), parts.filename.size());
-  struct stat path_status {};
-  if (::fstatat(directory.get(), filename.data(), &path_status, AT_SYMLINK_NOFOLLOW) != 0) {
-    if (errno == ENOENT) {
-      cleanse(records_.data(), sizeof(records_));
-      record_count_ = 0;
-      return PairingStoreError::None;
-    }
-    return PairingStoreError::Io;
-  }
-  if (!S_ISREG(path_status.st_mode) || S_ISLNK(path_status.st_mode) ||
-      path_status.st_uid != ::geteuid() || (path_status.st_mode & 0777) != 0600 ||
-      path_status.st_nlink != 1) {
-    return PairingStoreError::FileSecurity;
-  }
-  ScopedFd file(::openat(directory.get(), filename.data(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  if (file.get() < 0) return PairingStoreError::FileSecurity;
-  struct stat file_status {};
-  if (::fstat(file.get(), &file_status) != 0 || file_status.st_dev != path_status.st_dev ||
-      file_status.st_ino != path_status.st_ino || !S_ISREG(file_status.st_mode) ||
-      file_status.st_uid != ::geteuid() || (file_status.st_mode & 0777) != 0600 ||
-      file_status.st_nlink != 1 || !extended_acl_is_empty(file.get())) {
-    return PairingStoreError::FileSecurity;
-  }
-  if (file_status.st_size <= 0 ||
-      static_cast<std::uint64_t>(file_status.st_size) > kMaximumSerializedBytes) {
-    return PairingStoreError::Corrupt;
-  }
-  const std::size_t size = static_cast<std::size_t>(file_status.st_size);
   std::array<unsigned char, kMaximumSerializedBytes> bytes{};
   ScopedCleanse bytes_cleanser(bytes.data(), bytes.size());
-  if (!full_read(file.get(), bytes.data(), size)) return PairingStoreError::Io;
-  unsigned char extra = 0;
-  ssize_t extra_size = 0;
-  do {
-    extra_size = ::read(file.get(), &extra, 1);
-  } while (extra_size < 0 && errno == EINTR);
-  if (extra_size != 0) return PairingStoreError::Corrupt;
+  const fs::LoadResult load = fs::load_secure_regular_file(parts.directory, parts.filename, bytes);
+  if (load.error != PairingStoreError::None) return load.error;
+  if (!load.exists) {
+    cleanse(records_.data(), sizeof(records_));
+    record_count_ = 0;
+    return PairingStoreError::None;
+  }
+  const std::size_t size = load.size;
   if (size < kHeaderBytes ||
       CRYPTO_memcmp(bytes.data(), kMagic.data(), kMagic.size()) != 0) {
     return PairingStoreError::Corrupt;
@@ -556,11 +429,6 @@ PairingStore::PersistResult PairingStore::persist(
   }
 
   const PathParts parts = split_path({path_.data(), path_length_});
-  ScopedFd directory;
-  PairingStoreError error = open_secure_directory(parts.directory, directory, false);
-  if (error != PairingStoreError::None) return {.error = error};
-  std::array<char, kMaximumPairingStorePathBytes> filename{};
-  std::memcpy(filename.data(), parts.filename.data(), parts.filename.size());
 
   std::array<unsigned char, 8> random{};
   ScopedCleanse random_cleanser(random.data(), random.size());
@@ -585,47 +453,30 @@ PairingStore::PersistResult PairingStore::persist(
     temporary[temp_length++] = hex[byte >> 4U];
     temporary[temp_length++] = hex[byte & 0x0fU];
   }
+  const std::string_view temporary_name(temporary.data(), temp_length);
 
-  ScopedFd file(::openat(directory.get(), temporary.data(),
-                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
-  if (file.get() < 0) {
-    return {.error = PairingStoreError::Io};
-  }
-  struct stat temporary_status {};
-  bool ready = ::fchmod(file.get(), 0600) == 0 && strip_extended_acl(file.get()) &&
-               ::fstat(file.get(), &temporary_status) == 0 &&
-               S_ISREG(temporary_status.st_mode) && temporary_status.st_uid == ::geteuid() &&
-               (temporary_status.st_mode & 0777) == 0600 && temporary_status.st_nlink == 1 &&
-               full_write(file.get(), bytes.data(), length) && ::fsync(file.get()) == 0;
-  if (!ready) {
-    file.close();
-    ::unlinkat(directory.get(), temporary.data(), 0);
-    return {.error = PairingStoreError::Io};
-  }
-  file.close();
+  const PairingStoreError write_error = fs::write_new_secure_regular_file(
+      parts.directory, temporary_name, std::span<const unsigned char>(bytes.data(), length));
+  if (write_error != PairingStoreError::None) return {.error = write_error};
+
   if (fail_point_ == PairingStoreFailPoint::BeforeRename) {
-    ::unlinkat(directory.get(), temporary.data(), 0);
+    fs::remove_file(parts.directory, temporary_name);
     return {.error = PairingStoreError::Io};
   }
   if (gate != nullptr) {
     if (commit_hook_ != nullptr)
       commit_hook_->before_commit();
     if (!gate->try_begin_commit()) {
-      ::unlinkat(directory.get(), temporary.data(), 0);
+      fs::remove_file(parts.directory, temporary_name);
       return {.error = PairingStoreError::Canceled};
     }
   }
-  if (::renameat(directory.get(), temporary.data(), directory.get(), filename.data()) != 0) {
-    ::unlinkat(directory.get(), temporary.data(), 0);
-    return {.error = PairingStoreError::Io};
-  }
-  if (fail_point_ == PairingStoreFailPoint::AfterRenameBeforeDirectorySync ||
-      ::fsync(directory.get()) != 0) {
-    return {.error = PairingStoreError::Io,
-            .commit = PairingCommitState::CommittedDurabilityUncertain};
-  }
-  return {.error = PairingStoreError::None,
-          .commit = PairingCommitState::CommittedDurable};
+  const bool simulate_directory_sync_failure =
+      fail_point_ == PairingStoreFailPoint::AfterRenameBeforeDirectorySync;
+  const fs::CommitResult commit = fs::rename_into_place(parts.directory, temporary_name,
+                                                         parts.filename,
+                                                         simulate_directory_sync_failure);
+  return {.error = commit.error, .commit = commit.commit};
 }
 
 PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin) noexcept {
@@ -640,8 +491,9 @@ PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin,
     result.error = PairingStoreError::Corrupt;
     return result;
   }
-  ScopedFd lock;
-  result.error = acquire_store_lock({path_.data(), path_length_}, lock);
+  const PathParts parts = split_path({path_.data(), path_length_});
+  fs::ScopedHandle lock;
+  result.error = fs::acquire_store_lock(parts.directory, lock);
   if (result.error != PairingStoreError::None) return result;
   result.error = reload();
   if (result.error != PairingStoreError::None) return result;
@@ -707,8 +559,9 @@ PairingAuthenticationResult PairingStore::authenticate(
     result.error = PairingStoreError::InvalidToken;
     return result;
   }
-  ScopedFd lock;
-  result.error = acquire_store_lock({path_.data(), path_length_}, lock);
+  const PathParts parts = split_path({path_.data(), path_length_});
+  fs::ScopedHandle lock;
+  result.error = fs::acquire_store_lock(parts.directory, lock);
   if (result.error != PairingStoreError::None) return result;
   result.error = reload();
   if (result.error != PairingStoreError::None) {
@@ -737,8 +590,9 @@ PairingAuthenticationResult PairingStore::authenticate(
 
 PairingRevocationResult PairingStore::revoke(const NormalizedOrigin& origin) noexcept {
   PairingRevocationResult result{};
-  ScopedFd lock;
-  result.error = acquire_store_lock({path_.data(), path_length_}, lock);
+  const PathParts parts = split_path({path_.data(), path_length_});
+  fs::ScopedHandle lock;
+  result.error = fs::acquire_store_lock(parts.directory, lock);
   if (result.error != PairingStoreError::None) return result;
   result.error = reload();
   if (result.error != PairingStoreError::None) return result;
@@ -774,8 +628,9 @@ PairingRevocationResult PairingStore::revoke(const NormalizedOrigin& origin) noe
 
 PairingListResult PairingStore::list(std::span<NormalizedOrigin> output) noexcept {
   PairingListResult result{};
-  ScopedFd lock;
-  result.error = acquire_store_lock({path_.data(), path_length_}, lock);
+  const PathParts parts = split_path({path_.data(), path_length_});
+  fs::ScopedHandle lock;
+  result.error = fs::acquire_store_lock(parts.directory, lock);
   if (result.error != PairingStoreError::None) return result;
   result.error = reload();
   if (result.error != PairingStoreError::None) return result;
@@ -793,15 +648,35 @@ PairingListResult PairingStore::list(std::span<NormalizedOrigin> output) noexcep
 PairingStoreError default_pairing_store_path(std::span<char> output,
                                              std::size_t& length) noexcept {
   length = 0;
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || home[0] != '/') return PairingStoreError::InvalidPath;
+#if defined(_WIN32)
+  // Plain (ANSI) getenv, not a Win32 wide-string API, is deliberate here:
+  // path_is_bounded_absolute only ever accepts printable ASCII, so a
+  // %LOCALAPPDATA% value containing non-ASCII bytes gets rejected below
+  // regardless of how faithfully it was decoded -- the same limitation the
+  // POSIX branch already has for a non-ASCII $HOME. Staying on getenv keeps
+  // this whole file free of <windows.h>; SetEnvironmentVariable still
+  // reaches it because the CRT's environment block is the process
+  // environment block.
+  const char* local_app_data = std::getenv("LOCALAPPDATA");
+  if (local_app_data == nullptr) return PairingStoreError::InvalidPath;
+  const std::string_view prefix(local_app_data);
+  if (prefix.size() < 3 ||
+      !((prefix[0] >= 'A' && prefix[0] <= 'Z') || (prefix[0] >= 'a' && prefix[0] <= 'z')) ||
+      prefix[1] != ':' || prefix[2] != '\\') {
+    return PairingStoreError::InvalidPath;
+  }
+  constexpr std::string_view suffix = "\\Noisefactor Sync\\pairings.v1";
+#else
 #if defined(__APPLE__)
   constexpr std::string_view suffix =
       "/Library/Application Support/Noisefactor Sync/pairings.v1";
 #else
   constexpr std::string_view suffix = "/.config/noisefactor-sync/pairings.v1";
 #endif
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || home[0] != '/') return PairingStoreError::InvalidPath;
   const std::string_view prefix(home);
+#endif
   if (prefix.size() + suffix.size() >= output.size() ||
       prefix.size() + suffix.size() >= kMaximumPairingStorePathBytes) {
     return PairingStoreError::InvalidPath;
