@@ -128,6 +128,20 @@ private:
   std::streambuf *old_stderr_;
 };
 
+// Stopping the server from inside its own event pump needs a signal the
+// loop will actually receive, and on Windows there is no such signal a
+// process can send to itself in-process. A CRT raise(SIGTERM) does not
+// reach libuv there at all -- it runs the CRT default action and
+// terminates the process with exit code 3 -- and the one event that does
+// reach the loop, CTRL_BREAK_EVENT, is delivered to every process sharing
+// the console, which under ctest means the test runner and the shell that
+// launched it. Neither is usable here, so these two tests are POSIX-only.
+//
+// The Windows equivalent is covered where it actually matters:
+// scripts/smoke-windows-app.ps1 quits the tray app and asserts the managed
+// helper goes with it, which exercises the real CTRL_BREAK_EVENT ->
+// SIGBREAK shutdown path end to end against the shipped binaries.
+#if !defined(_WIN32)
 void stop_after_platform_pump(void *context) noexcept {
   auto *calls = static_cast<std::atomic<std::size_t> *>(context);
   if (calls->fetch_add(1, std::memory_order_relaxed) == 0) {
@@ -141,9 +155,11 @@ void stop_after_second_platform_pump(void *context) noexcept {
     std::raise(SIGTERM);
   }
 }
+#endif
 
 } // namespace
 
+#if !defined(_WIN32)
 SYNC_TEST(server_invokes_the_configured_platform_event_pump) {
   std::atomic<std::size_t> calls{0};
   auto options = base_options();
@@ -155,6 +171,7 @@ SYNC_TEST(server_invokes_the_configured_platform_event_pump) {
   SYNC_REQUIRE(noisefactor::sync::run_server(options) == 0);
   SYNC_REQUIRE(calls.load(std::memory_order_relaxed) >= 1);
 }
+#endif
 
 SYNC_TEST(
     server_rejects_invalid_publisher_modes_before_ready_and_never_owns_external) {
@@ -240,6 +257,7 @@ SYNC_TEST(server_rejects_half_configured_or_mixed_pairing_authority_modes) {
   SYNC_REQUIRE(!destroyed);
 }
 
+#if !defined(_WIN32)
 SYNC_TEST(server_exits_nonzero_once_after_a_fatal_provider_failure) {
   FatalPublisher publisher;
   std::atomic<std::size_t> pump_calls{0};
@@ -256,3 +274,4 @@ SYNC_TEST(server_exits_nonzero_once_after_a_fatal_provider_failure) {
   SYNC_REQUIRE(capture.stderr_text() ==
       "syncd: fatal provider failure: metal_command_failed status=5 error=-9\n");
 }
+#endif

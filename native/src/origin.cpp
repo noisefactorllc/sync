@@ -1,6 +1,16 @@
 #include <sync/origin.hpp>
 
+// inet_pton is used here purely as an IPv6 literal *parser* -- this file never
+// opens a socket, and the CLI's management commands reach it without any
+// networking having been initialised. On Windows the function lives in
+// ws2_32 rather than libc; it was verified to return the same answers for
+// valid, invalid, and v4-mapped literals with and without WSAStartup, so no
+// Winsock initialisation is introduced for it.
+#if defined(_WIN32)
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#endif
 
 #include <array>
 #include <cstddef>

@@ -13,10 +13,20 @@ set(SYNC_DYLIB_SEARCH_PATH "" CACHE PATH
 set(SYNC_WINDOWS_DEPENDENCY_PATH "" CACHE PATH
     "Additional directory searched for Windows bundle dependencies")
 
+# Both of these have to precede every target definition to reach them all.
+if(WIN32)
+  # Every Windows source in this tree calls the ...W form of the Win32 API and
+  # holds wide strings directly, so UNICODE is a property of the whole build,
+  # not of one library's usage requirements. It was previously carried on
+  # sync_protocol's PUBLIC interface, which meant a target linking it
+  # PRIVATELY through another library silently compiled without it -- and a
+  # resource id like IDI_APPLICATION then expands to its narrow form.
+  add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+endif()
+
 # Sources are UTF-8 and some carry non-ASCII text (prompt wording, test
 # fixtures). Without /utf-8 MSVC reads them in the machine's ANSI codepage,
-# which silently mangles those strings on a non-Western-European machine. This
-# has to precede every target definition to reach them all.
+# which silently mangles those strings on a non-Western-European machine.
 if(MSVC)
   add_compile_options(/utf-8)
 endif()
@@ -75,10 +85,9 @@ if(WIN32)
   # owner-only permissions are built from. Randomness already comes from
   # OpenSSL's RAND_priv_bytes on every platform, so no Windows CSPRNG is
   # linked here.
-  target_link_libraries(sync_protocol PUBLIC advapi32)
-  target_compile_definitions(sync_protocol PUBLIC
-    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
-  )
+  # ws2_32 additionally supplies inet_pton, which origin.cpp uses as an IPv6
+  # literal parser (see the comment there -- it needs no Winsock init).
+  target_link_libraries(sync_protocol PUBLIC advapi32 ws2_32)
 endif()
 
 add_executable(sync_protocol_tests

@@ -582,14 +582,39 @@ async function createTestSender(control, port, name) {
   return { created, data: upgraded.client };
 }
 
+// Windows has no deliverable SIGTERM. Node's child.kill() there is always
+// TerminateProcess regardless of the signal name passed, and the one event
+// that does reach a libuv loop -- CTRL_BREAK_EVENT -- can only be sent by a
+// process sharing the target's console, which Node cannot do. So on Windows
+// these tests stop the daemon by terminating it and assert only that it
+// stops; they cannot assert it shut down gracefully.
+//
+// Graceful shutdown IS covered on Windows, by scripts/smoke-windows-app.ps1:
+// the tray app spawns its helper into a new process group and stops it with
+// CTRL_BREAK_EVENT, which the daemon receives as SIGBREAK. That is the real
+// shipped path, exercised against the real binaries.
+const GRACEFUL_SHUTDOWN_IS_OBSERVABLE = process.platform !== "win32";
+
+// The default pairing store lives under $HOME on POSIX and %LOCALAPPDATA%
+// on Windows, so a test that wants an isolated store has to redirect
+// whichever one this platform actually reads. Setting only HOME would
+// silently let a Windows run touch the real user store.
+function isolatedStoreEnvironment(directory) {
+  return process.platform === "win32"
+    ? { ...process.env, LOCALAPPDATA: directory }
+    : { ...process.env, HOME: directory };
+}
+
 async function stopDaemon(child, stderr, stdout, ready, options) {
   const {
     shutdownTimeoutMs = TIMEOUT_MS,
     cleanupTimeoutMs = 1_000,
   } = options ?? {};
   if (child.exitCode !== null || child.signalCode !== null) {
-    assert.equal(child.signalCode, null, `syncd handles shutdown itself; stderr=${stderr()}`);
-    assert.equal(child.exitCode, 0, `syncd exited cleanly; stderr=${stderr()}`);
+    if (GRACEFUL_SHUTDOWN_IS_OBSERVABLE) {
+      assert.equal(child.signalCode, null, `syncd handles shutdown itself; stderr=${stderr()}`);
+      assert.equal(child.exitCode, 0, `syncd exited cleanly; stderr=${stderr()}`);
+    }
     assert.equal(stdout(), `${JSON.stringify(ready)}\n`, "syncd emits exactly one stdout record");
     assert.equal(stderr(), "", "syncd emits no diagnostics during a clean run");
     return;
@@ -608,8 +633,14 @@ async function stopDaemon(child, stderr, stdout, ready, options) {
     }
     throw shutdownError;
   }
-  assert.equal(signal, null, `syncd handles SIGTERM itself; stderr=${stderr()}`);
-  assert.equal(code, 0, `syncd exits cleanly; stderr=${stderr()}`);
+  if (GRACEFUL_SHUTDOWN_IS_OBSERVABLE) {
+    assert.equal(signal, null, `syncd handles SIGTERM itself; stderr=${stderr()}`);
+    assert.equal(code, 0, `syncd exits cleanly; stderr=${stderr()}`);
+  } else {
+    // Terminated rather than asked to stop, so there is no exit code to
+    // check -- only that it is no longer running.
+    assert.ok(signal !== null || code !== null, "syncd stopped");
+  }
   assert.equal(stdout(), `${JSON.stringify(ready)}\n`, "syncd emits exactly one stdout record");
   assert.equal(stderr(), "", "syncd emits no diagnostics during a clean run");
 }
@@ -719,7 +750,7 @@ test("browser SDK performs a bounded health probe against the real loopback daem
 test("browser SDK pairs, authenticates, rotates, revokes, and reports native denial", async () => {
   const temporaryRoot = await realpath(os.tmpdir());
   const directory = await mkdtemp(path.join(temporaryRoot, "sync-browser-sdk-pairing-"));
-  const storePath = path.join(directory, "sdk.store");
+  const storePath = path.join(directory, "state", "sdk.store");
   const origin = "https://sdk-client.example";
   const WebSocket = webSocketForOrigin(origin);
   const clients = new Set();
@@ -765,7 +796,7 @@ test("browser SDK pairs, authenticates, rotates, revokes, and reports native den
     await assert.rejects(bridge(rotated.token).connect(), SyncAuthenticationError);
     await stop();
 
-    daemon = await spawnPairingDaemon(path.join(directory, "denied.store"), "deny");
+    daemon = await spawnPairingDaemon(path.join(directory, "state", "denied.store"), "deny");
     await assert.rejects(bridge().pair("Noisedeck"), SyncPairingDeniedError);
   } finally {
     for (const client of clients) client.close();
@@ -782,7 +813,7 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
   const authorityReleasePaths = new Set();
 
   const start = async (filename, mode) => {
-    const storePath = path.join(directory, filename);
+    const storePath = path.join(directory, "state", filename);
     const daemon = await spawnPairingDaemon(storePath, mode);
     daemon.authorityReleasePath = `${storePath}.release`;
     authorityReleasePaths.add(daemon.authorityReleasePath);
@@ -938,7 +969,7 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     rotatedControl.client.destroy();
     activeClients.delete(rotatedControl.client);
     const revocation = await runToExit(PAIRING_TEST_SERVER, [
-      path.join(directory, "approved.store"), "revoke", originA,
+      path.join(directory, "state", "approved.store"), "revoke", originA,
     ]);
     assert.deepEqual(revocation, { code: 0, signal: null, stdout: "", stderr: "" });
     const revokedControl = await authenticateControl(daemon.ready, originA, rotated.token);
@@ -962,7 +993,7 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     assert.equal(lateApproval.code, "pairing_timeout");
     assert.equal(Object.hasOwn(lateApproval, "token"), false);
     const lateCount = await runToExit(PAIRING_TEST_SERVER, [
-      path.join(directory, "late-approval.store"), "count", "0",
+      path.join(directory, "state", "late-approval.store"), "count", "0",
     ]);
     assert.deepEqual(lateCount, { code: 0, signal: null, stdout: "", stderr: "" },
                      "approval observed after the deadline never issues or mutates the store");
@@ -1130,7 +1161,7 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     await releaseAuthority(daemon);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const precommitTimeoutCount = await runToExit(PAIRING_TEST_SERVER, [
-      path.join(directory, "precommit-timeout.store"), "count", "0",
+      path.join(directory, "state", "precommit-timeout.store"), "count", "0",
     ]);
     assert.deepEqual(
       precommitTimeoutCount,
@@ -1144,7 +1175,7 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
       daemon.ready, originA, "Precommit disconnect seed",
     );
     await stop(daemon);
-    const precommitStorePath = path.join(directory, "precommit-disconnect.store");
+    const precommitStorePath = path.join(directory, "state", "precommit-disconnect.store");
     const precommitBytesBefore = await readFile(precommitStorePath);
     daemon = await start("precommit-disconnect.store", "hold-precommit");
     const precommitDisconnect = await upgrade({
@@ -1245,7 +1276,15 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
   }
 });
 
-test("graceful shutdown timeout force-reaps the child and preserves the timeout error", async () => {
+// This exercises the harness's own force-reap path by spawning a child that
+// deliberately ignores the stop signal. Nothing can ignore a stop on Windows:
+// child.kill() there is TerminateProcess regardless of the signal named, so
+// the child dies instantly and the timeout under test can never be reached.
+test("graceful shutdown timeout force-reaps the child and preserves the timeout error", {
+  skip: process.platform === "win32"
+    ? "a Windows process cannot ignore termination, so the timeout cannot occur"
+    : false,
+}, async () => {
   const ready = {
     type: "ready",
     port: 1,
@@ -1941,24 +1980,52 @@ test("a control Close immediately revokes every unused sender ticket", async () 
       assert.equal(sender.type, "senderCreated",
                    `control disconnect recycled publisher state through sender ${index}`);
 
-      const stagedDataSocket = await connect("127.0.0.1", ready.port);
-      sockets.add(stagedDataSocket);
       control.client.send(0x8, Buffer.from([0x03, 0xe8]));
-      const racedUpgrade = await upgrade({
-        port: ready.port,
-        route: sender.path,
-        origin: ORIGIN,
-        subprotocol: `sync.sender.${sender.ticket}`,
-        socket: stagedDataSocket,
-      });
-      assert.notEqual(racedUpgrade.status, 101,
-                      `unused ticket ${index} was revoked before data authentication`);
-      sockets.delete(stagedDataSocket);
+
+      // Racing the revocation against a data socket that was already
+      // connected and waiting proves revocation happens on the close itself
+      // rather than on some later sweep. It depends on the daemon seeing the
+      // control close before the data upgrade, which is an event-ordering
+      // property of the platform, not a guarantee: two separate TCP
+      // connections have no ordering relative to each other. libuv on macOS
+      // orders them consistently; IOCP on Windows does not, and a ticket
+      // that is still usable in that window is not a leak -- the client
+      // asked to close, but the connection it belongs to is genuinely still
+      // open until the daemon processes that. So the race is asserted only
+      // where it is deterministic.
+      if (process.platform !== "win32") {
+        const stagedDataSocket = await connect("127.0.0.1", ready.port);
+        sockets.add(stagedDataSocket);
+        const racedUpgrade = await upgrade({
+          port: ready.port,
+          route: sender.path,
+          origin: ORIGIN,
+          subprotocol: `sync.sender.${sender.ticket}`,
+          socket: stagedDataSocket,
+        });
+        assert.notEqual(racedUpgrade.status, 101,
+                        `unused ticket ${index} was revoked before data authentication`);
+        sockets.delete(stagedDataSocket);
+      }
 
       const closeReply = await control.client.nextFrame(`revocation control close ${index}`);
       assert.equal(closeReply.opcode, 0x8);
       await control.client.waitClosed();
       sockets.delete(control.client);
+
+      // The property that has to hold on every platform: once the control
+      // connection is actually gone, its unused tickets are dead. This is
+      // deterministic -- the close handshake has completed before the
+      // upgrade is attempted -- so it is asserted unconditionally.
+      const afterCloseUpgrade = await upgrade({
+        port: ready.port,
+        route: sender.path,
+        origin: ORIGIN,
+        subprotocol: `sync.sender.${sender.ticket}`,
+      });
+      assert.notEqual(afterCloseUpgrade.status, 101,
+                      `ticket ${index} outlived the control connection that owned it`);
+      if (afterCloseUpgrade.client) afterCloseUpgrade.client.destroy();
     }
   } finally {
     for (const socket of sockets) socket.destroy();
@@ -2113,7 +2180,7 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
 
     daemon = await spawnDaemon({
       arguments: [],
-      env: { ...process.env, HOME: temporaryHome },
+      env: isolatedStoreEnvironment(temporaryHome),
     });
     assert.equal(daemon.ready.port, 53979);
     for (const host of ["127.0.0.1", "::1"]) {
@@ -2170,7 +2237,7 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
         "--publisher", "syphon",
         "--syphon-framework", path.join(temporaryHome, "missing", "Syphon.framework"),
       ],
-      env: { ...process.env, HOME: temporaryHome },
+      env: isolatedStoreEnvironment(temporaryHome),
     });
     assert.equal(daemon.ready.port, port);
     for (const host of ["127.0.0.1", "::1"]) {
@@ -2199,9 +2266,9 @@ test("syncd management lists and revokes the isolated default store without open
   ));
   const storePath = path.join(
     temporaryHome,
-    "Library",
-    "Application Support",
-    "Noisefactor Sync",
+    ...(process.platform === "win32"
+      ? ["Noisefactor Sync"]
+      : ["Library", "Application Support", "Noisefactor Sync"]),
     "pairings.v1",
   );
   const managementOrigin = "https://management.example";
@@ -2217,7 +2284,7 @@ test("syncd management lists and revokes the isolated default store without open
 
     ipv4Guard = await listenGuard("127.0.0.1", 53979);
     ipv6Guard = await listenGuard("::1", 53979);
-    const isolatedEnvironment = { ...process.env, HOME: temporaryHome };
+    const isolatedEnvironment = isolatedStoreEnvironment(temporaryHome);
     const listed = await runToExit(SYNCD, ["--list-pairings"], {
       env: isolatedEnvironment,
     });

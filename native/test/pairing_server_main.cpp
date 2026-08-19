@@ -11,6 +11,12 @@
 #include <system_error>
 #include <thread>
 
+#if defined(_WIN32)
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace {
 
 class FakePrompt final : public noisefactor::sync::pairing::PairingPrompt {
@@ -139,6 +145,13 @@ private:
 } // namespace
 
 int main(int argc, char **argv) {
+#if defined(_WIN32)
+  // Same reason as syncd: the ready record this server prints is parsed
+  // byte-for-byte by the loopback tests, and Windows text mode would turn
+  // its '\n' into "\r\n".
+  ::_setmode(::_fileno(stdout), _O_BINARY);
+  ::_setmode(::_fileno(stderr), _O_BINARY);
+#endif
   if (argc == 4) {
     const std::string_view operation(argv[2]);
     if (operation != "revoke" && operation != "count")

@@ -5,8 +5,12 @@
 // merely wants to hold a SpoutFramePublisher stays windows.h-free. See
 // docs/dependencies/spout.md for the full runtime-discovery contract this
 // file implements.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 
 #include <array>
@@ -644,7 +648,12 @@ struct SpoutFramePublisher::Impl {
         continue;
       }
       auto* candidate_get_spout =
-          reinterpret_cast<GetSpoutFn>(GetProcAddress(candidate_module, "GetSpout"));
+          // Through void*: GetProcAddress returns FARPROC, and casting one
+          // function-pointer type straight to another of a different signature
+          // is what -Wcast-function-type flags. Bridging via void* is the
+          // documented way to do this, and matches ndi_publisher.cpp.
+          reinterpret_cast<GetSpoutFn>(
+              reinterpret_cast<void*>(GetProcAddress(candidate_module, "GetSpout")));
       if (candidate_get_spout == nullptr) {
         FreeLibrary(candidate_module);
         continue;

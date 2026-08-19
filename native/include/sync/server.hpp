@@ -48,7 +48,10 @@ struct ServerOptions {
 
 class FramePublisher;
 
-// Runs until SIGINT or SIGTERM. Returns zero only after an orderly shutdown.
+// Runs until a stop signal arrives: SIGINT or SIGTERM on POSIX, SIGINT or
+// SIGBREAK on Windows, where SIGTERM is never delivered to an event loop and
+// the companion stops its helper with CTRL_BREAK_EVENT instead. Returns zero
+// only after an orderly shutdown.
 int run_server(const ServerOptions &options,
                FramePublisher *publisher = nullptr);
 

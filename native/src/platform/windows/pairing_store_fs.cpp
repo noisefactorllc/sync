@@ -442,18 +442,20 @@ PairingStoreError acquire_store_lock(std::string_view directory, ScopedHandle& l
   WidePath wide_path{};
   if (!build_extended_path(directory, kLockName, wide_path)) return PairingStoreError::InvalidPath;
 
-  // No FILE_SHARE_WRITE/FILE_SHARE_DELETE: on its own this already blocks
-  // a second process from opening the lock file for writing, or deleting
-  // it, while we hold it -- most of what flock(LOCK_EX) buys on POSIX.
-  // LockFileEx below adds the fail-immediately-on-contention semantics
-  // (LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK) that
-  // LOCK_EX | LOCK_NB gives the POSIX path, including against a second
-  // reader that only wants the lock, not exclusive file access.
-  // FILE_FLAG_OPEN_REPARSE_POINT refuses to follow a symlinked lock file,
-  // same reasoning as everywhere else in this file.
-  HANDLE handle = ::CreateFileW(wide_path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
-                                &security.attributes, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT,
-                                nullptr);
+  // FILE_SHARE_READ | FILE_SHARE_WRITE, and the exclusion comes entirely from
+  // LockFileEx below. Denying write-sharing here looks stricter but is
+  // actively wrong: a second opener contending for the lock would fail this
+  // CreateFileW with ERROR_SHARING_VIOLATION and never reach the retry loop,
+  // so ordinary, expected contention would surface as a hard FileSecurity
+  // error instead of resolving on retry. POSIX has the same shape for the
+  // same reason -- openat() always succeeds and flock() arbitrates.
+  //
+  // FILE_SHARE_DELETE stays off so the lock file cannot be unlinked out from
+  // under a holder. FILE_FLAG_OPEN_REPARSE_POINT refuses to follow a
+  // symlinked lock file, same reasoning as everywhere else in this file.
+  HANDLE handle = ::CreateFileW(wide_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, &security.attributes,
+                                OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (handle == INVALID_HANDLE_VALUE) return PairingStoreError::FileSecurity;
   lock = ScopedHandle(handle);
 

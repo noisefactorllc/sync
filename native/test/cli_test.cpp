@@ -33,8 +33,14 @@ noisefactor::sync::NormalizedOrigin origin(std::string_view value) {
 
 class TemporaryStore {
  public:
-  // std::filesystem rather than mkdtemp: these tests build on Windows CI
-  // too, and the store only needs a private directory, not POSIX modes.
+  // std::filesystem rather than mkdtemp, because these tests build on Windows
+  // too. mkdtemp guaranteed mode 0700, which the store requires of the
+  // directory holding it; create_directories guarantees no such thing on
+  // either platform (umask on POSIX, inherited ACEs from %TEMP% on Windows).
+  // So the store is pointed one level deeper, at a "state" component that
+  // does NOT exist -- letting the store create it with the owner-only
+  // permissions it requires, which is the same shape the pairing-store tests
+  // use and is closer to how a real install behaves anyway.
   TemporaryStore() {
     static std::atomic<unsigned> counter{0};
     const std::filesystem::path directory =
@@ -44,7 +50,7 @@ class TemporaryStore {
     std::filesystem::remove_all(directory, error);
     SYNC_REQUIRE(std::filesystem::create_directories(directory, error));
     directory_ = std::filesystem::canonical(directory).string();
-    path_ = (std::filesystem::path(directory_) / "pairings.v1").string();
+    path_ = (std::filesystem::path(directory_) / "state" / "pairings.v1").string();
   }
 
   ~TemporaryStore() {

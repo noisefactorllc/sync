@@ -994,11 +994,18 @@ SYNC_TEST(pairing_store_default_path_rejects_unsafe_local_app_data_bytes) {
 
 SYNC_TEST(pairing_store_validates_filename_plus_temporary_suffix_against_name_max) {
   TempDirectory temporary;
+  // The store file goes one level below the temp directory, in a "state"
+  // component the store creates itself. TempDirectory's own directory is made
+  // by std::filesystem and so carries whatever the platform gives it -- umask
+  // on POSIX, ACEs inherited from %TEMP% on Windows -- neither of which is the
+  // owner-only permission the store requires of the directory it lives in.
+  // Every other test here uses the same shape for the same reason.
+  const auto directory = temporary.path() / "state";
   constexpr std::size_t suffix_bytes = 21;
   const std::string accepted_name(noisefactor::sync::fs::kMaximumPathComponentBytes - suffix_bytes,
                                   'a');
   PairingStore accepted;
-  SYNC_REQUIRE(accepted.open({.path = (temporary.path() / accepted_name).string()}) ==
+  SYNC_REQUIRE(accepted.open({.path = (directory / accepted_name).string()}) ==
                PairingStoreError::None);
 
   const std::string rejected_name(

@@ -1135,7 +1135,14 @@ void CompanionProcess::probe(ProbeCallback completion) {
     }
     if (!health.has_value()) {
       if (http_ok || tcp_port_reachable(port, timeout_ms)) {
-        health = HealthSnapshot{.reachable = true, .compatible = false};
+        // Assigned field by field rather than with a partial designated
+        // initialiser: leaving the remaining members implicit is what
+        // -Wmissing-field-initializers flags, and spelling every one of them
+        // out here would just be noise around the two that carry meaning.
+        HealthSnapshot occupied{};
+        occupied.reachable = true;
+        occupied.compatible = false;
+        health = std::move(occupied);
         message = "TCP " + std::to_string(port) +
                   " is occupied by an incompatible service.";
       } else {

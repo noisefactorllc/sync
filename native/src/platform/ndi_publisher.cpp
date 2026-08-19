@@ -14,7 +14,9 @@
 #include <vector>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -170,25 +172,40 @@ constexpr char kPathSeparator = '/';
 
 #endif
 
+#if defined(_WIN32)
+// The discovery variables name a directory, and every candidate path built
+// from one is bounded anyway; refusing an absurd value here keeps a hostile
+// environment from making this allocate before that check runs. Guarded
+// because only the Windows reader below needs an explicit bound -- leaving it
+// unguarded makes it an unused constant elsewhere, which the warnings-as-errors
+// build treats as an error.
+constexpr std::size_t kMaximumRuntimePathBytes = 4096;
+#endif
+
 [[nodiscard]] auto read_env_var(const char* name, std::string& out) noexcept -> bool {
 #if defined(_WIN32)
-  char* buffer = nullptr;
-  std::size_t length = 0;
-  // _dupenv_s is the CRT-safe replacement for getenv on Windows: it never
-  // triggers the deprecation warning getenv does there, and it reports
-  // allocation failure instead of relying on a shared static buffer.
-  if (::_dupenv_s(&buffer, &length, name) != 0 || buffer == nullptr) {
-    if (buffer != nullptr) {
-      std::free(buffer);
-    }
+  // GetEnvironmentVariableA rather than getenv or _dupenv_s: it has no shared
+  // static buffer, and unlike _dupenv_s it is a Win32 API rather than an MSVC
+  // CRT extension, so it exists on every Windows toolchain rather than only
+  // the ones shipping Microsoft's CRT.
+  const DWORD needed = ::GetEnvironmentVariableA(name, nullptr, 0);
+  if (needed == 0 || needed > kMaximumRuntimePathBytes) {
     return false;
   }
-  const bool has_value = length > 0;
-  if (has_value) {
-    out.assign(buffer, length - 1);  // length counts the trailing NUL.
+  std::string value(static_cast<std::size_t>(needed), '\0');
+  // The second call returns the length WITHOUT the terminator, and a result
+  // that does not fit the size just reported means the variable changed
+  // underneath us; treating that as absent is the safe reading.
+  const DWORD written = ::GetEnvironmentVariableA(name, value.data(), needed);
+  if (written == 0 || written >= needed) {
+    return false;
   }
-  std::free(buffer);
-  return has_value && !out.empty();
+  value.resize(static_cast<std::size_t>(written));
+  if (value.empty()) {
+    return false;
+  }
+  out.assign(value);
+  return true;
 #else
   const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {

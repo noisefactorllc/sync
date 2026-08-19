@@ -58,6 +58,22 @@ cmake --build build --config Release --target syncd
 ctest --test-dir build --build-config Release --output-on-failure
 ```
 
+MSVC is what CI builds and what the installer ships. The tree also builds and
+passes its tests under MinGW-w64 (GCC), which needs no administrator rights
+and is a practical local setup:
+
+```bash
+pacman -S --needed mingw-w64-x86_64-{gcc,cmake,ninja,openssl,libuv,pkgconf}
+cmake -S . -B build -G Ninja && cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Run the tests from a shell with a Windows-shaped environment. An MSYS2 login
+shell unsets `LOCALAPPDATA` and points `TMP`/`TEMP` at `/tmp`, and the pairing
+store resolves its default path from `%LOCALAPPDATA%` and refuses a path that
+is not drive-absolute, so several tests fail there for reasons unrelated to the
+code.
+
 ```bash
 cmake -S . -B build
 cmake --build build --target syncd -j4

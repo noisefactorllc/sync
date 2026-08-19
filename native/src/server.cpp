@@ -764,7 +764,19 @@ class Server {
     if (uv_signal_init(&loop_, &signal_term_) != 0) return false;
     signal_term_initialized_ = true;
     signal_term_.data = this;
-    if (uv_signal_start(&signal_term_, on_signal, SIGTERM) != 0) return false;
+    // The second stop signal differs by platform, and getting this wrong is
+    // silent: uv_signal_start accepts SIGTERM on Windows and returns success,
+    // but nothing ever delivers it there -- a CRT raise(SIGTERM) terminates
+    // the process outright instead of reaching the loop. The Windows
+    // companion stops its helper with CTRL_BREAK_EVENT, which the OS delivers
+    // as SIGBREAK, so that is the signal this has to watch for shutdown to be
+    // graceful rather than a kill.
+#if defined(_WIN32)
+    constexpr int kSecondStopSignal = SIGBREAK;
+#else
+    constexpr int kSecondStopSignal = SIGTERM;
+#endif
+    if (uv_signal_start(&signal_term_, on_signal, kSecondStopSignal) != 0) return false;
     // Authority results are produced on the worker thread. Waking the loop the
     // moment one lands keeps hello-to-welcome off the sweep interval; the
     // sweep remains as the deadline and prompt-polling path.

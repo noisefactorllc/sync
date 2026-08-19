@@ -18,8 +18,13 @@
 #if defined(_WIN32)
 #include <sync/platform/pairing_prompt.hpp>
 #include <sync/platform/spout_publisher.hpp>
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <cstdio>
 #endif
 
 #include <array>
@@ -66,12 +71,21 @@ void pump_windows_events(void *) noexcept {
 }
 #endif
 
+// Whether a provider is part of this run at all.
+//
 // An empty explicit selection means "every provider this platform offers", so
-// a plain `syncd` publishes through everything available and an operator who
-// names providers gets exactly those.
-[[nodiscard]] bool wanted(const sync::cli::Options &command,
-                          std::string_view id) noexcept {
-  return command.publisher_count == 0 || command.selects_publisher(id);
+// a plain `syncd` publishes through everything this build implements. An
+// explicit selection means exactly what it names -- including a provider this
+// platform has no implementation for, which is then advertised as unavailable
+// rather than dropped. The CLI grammar is platform-neutral on purpose, so
+// `--publisher syphon` on Windows has to start and report syphon unavailable;
+// silently offering nothing would leave the daemon with no providers at all
+// and fail as a confusing configuration error instead.
+[[nodiscard]] bool configured(const sync::cli::Options &command,
+                              std::string_view id,
+                              bool implemented_here) noexcept {
+  return command.publisher_count == 0 ? implemented_here
+                                      : command.selects_publisher(id);
 }
 
 // Collects the providers this build can offer into the shape run_server wants:
@@ -145,17 +159,36 @@ int run_with_providers(sync::ServerOptions &options,
       .runtime_path = command.ndi_runtime_path,
   });
 
-  ProviderAssembly assembly;
+  // Each provider is offered in a stable order with three facts: whether this
+  // build implements it at all, whether it is part of this run, and whether
+  // its runtime actually loaded.
 #if defined(__APPLE__)
   // Syphon needs both halves: the Metal publisher that owns the shared texture
   // ring and the Syphon consumer that republishes it.
-  assembly.offer("syphon", wanted(command, "syphon"),
-                 syphon.available() && metal.available(), &metal);
+  constexpr bool kSyphonImplemented = true;
+  const bool syphon_available = syphon.available() && metal.available();
+  sync::FramePublisher *const syphon_publisher = &metal;
+#else
+  constexpr bool kSyphonImplemented = false;
+  constexpr bool syphon_available = false;
+  sync::FramePublisher *const syphon_publisher = nullptr;
 #endif
 #if defined(_WIN32)
-  assembly.offer("spout", wanted(command, "spout"), spout.available(), &spout);
+  constexpr bool kSpoutImplemented = true;
+  const bool spout_available = spout.available();
+  sync::FramePublisher *const spout_publisher = &spout;
+#else
+  constexpr bool kSpoutImplemented = false;
+  constexpr bool spout_available = false;
+  sync::FramePublisher *const spout_publisher = nullptr;
 #endif
-  assembly.offer("ndi", wanted(command, "ndi"), ndi.available(), &ndi);
+
+  ProviderAssembly assembly;
+  assembly.offer("syphon", configured(command, "syphon", kSyphonImplemented),
+                 syphon_available, syphon_publisher);
+  assembly.offer("spout", configured(command, "spout", kSpoutImplemented),
+                 spout_available, spout_publisher);
+  assembly.offer("ndi", configured(command, "ndi", true), ndi.available(), &ndi);
 
   assembly.apply(options);
 #if defined(__APPLE__)
@@ -203,6 +236,14 @@ int run_production(sync::ServerOptions &options,
 
 int main(int argc, char** argv) {
   try {
+#if defined(_WIN32)
+    // The ready record and the management-command output are a machine-read
+    // protocol, not human text. Windows' default text mode would rewrite every
+    // '\n' in them to "\r\n", so the exact bytes a caller parses would differ
+    // by platform for no reason. Binary mode keeps one wire format everywhere.
+    ::_setmode(::_fileno(stdout), _O_BINARY);
+    ::_setmode(::_fileno(stderr), _O_BINARY);
+#endif
     std::vector<std::string_view> arguments;
     arguments.reserve(argc > 1 ? static_cast<std::size_t>(argc - 1) : 0);
     for (int index = 1; index < argc; ++index) arguments.emplace_back(argv[index]);
