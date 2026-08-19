@@ -28,6 +28,12 @@ const ORIGIN = "https://client.example";
 const TOKEN = "test-token-123";
 const TIMEOUT_MS = 3_000;
 const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
+// The providers a daemon configures when no --publisher is named. NDI is on
+// both platforms because its send path takes a CPU frame and needs no
+// platform-specific GPU layer; Syphon and Spout are each platform-bound.
+const DEFAULT_PROVIDER_IDS = process.platform === "win32"
+  ? ["spout", "ndi"]
+  : ["syphon", "ndi"];
 
 function withTimeout(promise, description, timeoutMs = TIMEOUT_MS) {
   let timer;
@@ -2067,6 +2073,15 @@ test("syncd rejects every invalid publisher-mode CLI shape without a ready recor
     [...common, "--publisher", "syphon", "--syphon-framework"],
     [...common, "--publisher", "syphon", "--syphon-framework", "/one",
       "--syphon-framework", "/two"],
+    [...common, "--publisher", "ndi", "--syphon-framework", "/S.framework"],
+    [...common, "--publisher", "syphon", "--ndi-runtime", "/opt/ndi"],
+    [...common, "--publisher", "syphon", "--spout-library", "C:/x.dll"],
+    [...common, "--publisher", "ndi", "--publisher", "ndi"],
+    [...common, "--publisher", "ndi", "--ndi-runtime"],
+    [...common, "--publisher", "ndi", "--ndi-runtime", "/one",
+      "--ndi-runtime", "/two"],
+    [...common, "--ndi-runtime", "/opt/ndi"],
+    [...common, "--spout-library", "C:/x.dll"],
     [...common, "--test-receiver", "--unknown"],
     ["--port", "0", "--port", "1", "--test-origin", ORIGIN, "--test-token", TOKEN,
       "--test-receiver"],
@@ -2105,12 +2120,18 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
       const response = await health(host, 53979, ORIGIN);
       assert.equal(response.status, 200);
       const body = JSON.parse(response.body.toString("utf8"));
-      assert.deepEqual(body.capabilities.providers, [{
-        id: "syphon",
-        direction: "send",
-        available: body.capabilities.send,
-        selected: true,
-      }]);
+      const providers = body.capabilities.providers;
+      assert.deepEqual(providers.map((provider) => provider.id).sort(),
+                       [...DEFAULT_PROVIDER_IDS].sort());
+      for (const provider of providers) {
+        assert.equal(provider.direction, "send");
+        // Naming no publisher configures every platform provider, so each
+        // is selected; whether its runtime loaded is a separate question.
+        assert.equal(provider.selected, true, `${provider.id} must be selected`);
+        assert.equal(typeof provider.available, "boolean");
+      }
+      assert.equal(body.capabilities.send,
+                   providers.some((provider) => provider.available));
     }
     const unknownControl = await upgrade({
       port: 53979,

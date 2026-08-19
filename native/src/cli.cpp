@@ -29,7 +29,10 @@ bool valid_test_token(std::string_view value) noexcept {
   return true;
 }
 
-bool valid_framework_path(std::string_view value) noexcept {
+// Shared by every provider runtime-path flag. The daemon loads a module
+// from this path, so it is bounded and free of control characters here and
+// re-validated by the provider that consumes it.
+bool valid_runtime_path(std::string_view value) noexcept {
   if (value.empty() || value.size() > 4096) return false;
   for (const unsigned char byte : value) {
     if (byte < 0x20U || byte == 0x7fU) return false;
@@ -56,6 +59,17 @@ void print_store_error(std::ostream& error, std::string_view code) {
 
 }  // namespace
 
+bool Options::selects_publisher(std::string_view id) const noexcept {
+  for (std::size_t index = 0; index < publisher_count; ++index) {
+    if (publishers[index] == id) return true;
+  }
+  return false;
+}
+
+bool is_known_publisher(std::string_view value) noexcept {
+  return value == "syphon" || value == "spout" || value == "ndi";
+}
+
 ParseResult parse(std::span<const std::string_view> arguments) {
   ParseResult result;
   Options& options = result.options;
@@ -63,8 +77,9 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   bool saw_origin = false;
   bool saw_token = false;
   bool saw_test_receiver = false;
-  bool saw_publisher = false;
   bool saw_syphon_framework = false;
+  bool saw_spout_library = false;
+  bool saw_ndi_runtime = false;
   bool saw_list = false;
   bool saw_revoke = false;
 
@@ -83,8 +98,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
     }
     if (argument != "--port" && argument != "--test-origin" &&
         argument != "--test-token" && argument != "--publisher" &&
-        argument != "--syphon-framework" &&
-        argument != "--revoke-origin") {
+        argument != "--syphon-framework" && argument != "--spout-library" &&
+        argument != "--ndi-runtime" && argument != "--revoke-origin") {
       return result;
     }
     if (++index >= arguments.size()) return result;
@@ -100,14 +115,22 @@ ParseResult parse(std::span<const std::string_view> arguments) {
                valid_test_token(value)) {
       saw_token = true;
       options.test_token.assign(value);
-    } else if (argument == "--publisher" && !saw_publisher &&
-               value == "syphon") {
-      saw_publisher = true;
-      options.publisher.assign(value);
-    } else if (argument == "--syphon-framework" &&
-               !saw_syphon_framework && valid_framework_path(value)) {
+    } else if (argument == "--publisher" && is_known_publisher(value) &&
+               !options.selects_publisher(value) &&
+               options.publisher_count < kMaximumPublishers) {
+      options.publishers[options.publisher_count++].assign(value);
+    } else if (argument == "--syphon-framework" && !saw_syphon_framework &&
+               valid_runtime_path(value)) {
       saw_syphon_framework = true;
       options.syphon_framework_path.assign(value);
+    } else if (argument == "--spout-library" && !saw_spout_library &&
+               valid_runtime_path(value)) {
+      saw_spout_library = true;
+      options.spout_library_path.assign(value);
+    } else if (argument == "--ndi-runtime" && !saw_ndi_runtime &&
+               valid_runtime_path(value)) {
+      saw_ndi_runtime = true;
+      options.ndi_runtime_path.assign(value);
     } else if (argument == "--revoke-origin" && !saw_revoke) {
       const auto normalized = normalize_origin(value);
       if (!normalized.ok()) return result;
@@ -118,11 +141,22 @@ ParseResult parse(std::span<const std::string_view> arguments) {
     }
   }
 
+  const bool saw_publisher = options.publisher_count != 0;
+  const bool saw_runtime_path =
+      saw_syphon_framework || saw_spout_library || saw_ndi_runtime;
+  // A runtime path only means something for the provider it configures, so
+  // supplying one without naming that provider is a usage error rather than
+  // a silently ignored argument.
+  const bool runtime_path_without_publisher =
+      (saw_syphon_framework && !options.selects_publisher("syphon")) ||
+      (saw_spout_library && !options.selects_publisher("spout")) ||
+      (saw_ndi_runtime && !options.selects_publisher("ndi"));
+
   const bool management = saw_list || saw_revoke;
   const bool test_shape = saw_origin || saw_token || saw_test_receiver;
   if (management) {
     if (saw_list == saw_revoke || saw_port || test_shape || saw_publisher ||
-        saw_syphon_framework) {
+        saw_runtime_path) {
       return result;
     }
     options.mode = saw_list ? Mode::ListPairings : Mode::RevokeOrigin;
@@ -132,32 +166,34 @@ ParseResult parse(std::span<const std::string_view> arguments) {
 
   if (test_shape) {
     if (!saw_port || !saw_origin || !saw_token ||
-        saw_test_receiver == saw_publisher ||
-        (saw_syphon_framework && !saw_publisher)) {
+        saw_test_receiver == saw_publisher || runtime_path_without_publisher) {
       return result;
     }
     options.mode = Mode::StaticTest;
-    if (saw_test_receiver) options.publisher.clear();
     result.valid = true;
     return result;
   }
 
-  if ((saw_syphon_framework && !saw_publisher) || options.port == 0) {
+  if (runtime_path_without_publisher || options.port == 0) {
     return result;
   }
   options.mode = Mode::Production;
   result.valid = true;
   return result;
 }
-
 void print_usage(std::ostream& error) {
-  error << "usage: syncd [--port <1-65535>] [--publisher syphon "
-           "[--syphon-framework <path>]]\n"
-           "       syncd --port <0-65535> --test-origin <origin> "
-           "--test-token <token> (--test-receiver | --publisher syphon "
-           "[--syphon-framework <path>])\n"
+  error << "usage: syncd [--port <1-65535>]"
+           " [--publisher <syphon|spout|ndi>]..."
+           " [--syphon-framework <path>] [--spout-library <path>]"
+           " [--ndi-runtime <path>]\n"
+           "       syncd --port <0-65535> --test-origin <origin>"
+           " --test-token <token>"
+           " (--test-receiver | --publisher <syphon|spout|ndi>...)\n"
            "       syncd --list-pairings\n"
-           "       syncd --revoke-origin <origin>\n";
+           "       syncd --revoke-origin <origin>\n"
+           "\n"
+           "Naming no publisher selects every provider this platform"
+           " offers.\n";
 }
 
 int run_management(const Options& options,

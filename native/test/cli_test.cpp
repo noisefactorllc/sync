@@ -6,15 +6,15 @@
 #include <sync/pairing_store.hpp>
 
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <initializer_list>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
-
-#include <unistd.h>
 
 namespace {
 
@@ -33,14 +33,18 @@ noisefactor::sync::NormalizedOrigin origin(std::string_view value) {
 
 class TemporaryStore {
  public:
+  // std::filesystem rather than mkdtemp: these tests build on Windows CI
+  // too, and the store only needs a private directory, not POSIX modes.
   TemporaryStore() {
-    std::array<char, 128> pattern{};
-    constexpr std::string_view prefix = "/tmp/sync-cli-test-XXXXXX";
-    std::copy(prefix.begin(), prefix.end(), pattern.begin());
-    char* created = ::mkdtemp(pattern.data());
-    SYNC_REQUIRE(created != nullptr);
-    directory_ = std::filesystem::canonical(created).string();
-    path_ = directory_ + "/pairings.v1";
+    static std::atomic<unsigned> counter{0};
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("sync-cli-test-" + std::to_string(counter.fetch_add(1)));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    SYNC_REQUIRE(std::filesystem::create_directories(directory, error));
+    directory_ = std::filesystem::canonical(directory).string();
+    path_ = (std::filesystem::path(directory_) / "pairings.v1").string();
   }
 
   ~TemporaryStore() {
@@ -79,19 +83,21 @@ SYNC_TEST(cli_no_arguments_selects_production_defaults) {
   SYNC_REQUIRE(parsed.ok());
   SYNC_REQUIRE(parsed.options.mode == cli::Mode::Production);
   SYNC_REQUIRE(parsed.options.port == 53979);
-  SYNC_REQUIRE(parsed.options.publisher == "syphon");
+  SYNC_REQUIRE(parsed.options.publisher_count == 0);
   SYNC_REQUIRE(!parsed.options.test_receiver);
   SYNC_REQUIRE(parsed.options.allowed_origin.empty());
   SYNC_REQUIRE(parsed.options.test_token.empty());
 }
 
-SYNC_TEST(cli_production_port_and_syphon_selection_are_strict) {
+SYNC_TEST(cli_production_port_and_publisher_selection_are_strict) {
   const auto selected = parse({"--port", "54001", "--publisher", "syphon",
                                "--syphon-framework", "/tmp/Syphon.framework"});
   SYNC_REQUIRE(selected.ok());
   SYNC_REQUIRE(selected.options.mode == cli::Mode::Production);
   SYNC_REQUIRE(selected.options.port == 54001);
-  SYNC_REQUIRE(selected.options.publisher == "syphon");
+  SYNC_REQUIRE(selected.options.publisher_count == 1);
+  SYNC_REQUIRE(selected.options.selects_publisher("syphon"));
+  SYNC_REQUIRE(!selected.options.selects_publisher("spout"));
   SYNC_REQUIRE(selected.options.syphon_framework_path ==
                "/tmp/Syphon.framework");
 
@@ -107,6 +113,67 @@ SYNC_TEST(cli_production_port_and_syphon_selection_are_strict) {
        }) {
     SYNC_REQUIRE(!invalid.ok());
   }
+}
+
+// The grammar is platform-neutral on purpose: a command line written for a
+// Windows machine still parses on macOS, where those providers simply
+// resolve to unavailable at startup rather than failing to parse.
+SYNC_TEST(cli_accepts_a_set_of_publishers_with_their_own_runtime_paths) {
+  const auto both = parse({"--publisher", "spout", "--publisher", "ndi",
+                           "--spout-library", "C:/sync/SpoutLibrary.dll",
+                           "--ndi-runtime", "C:/ndi"});
+  SYNC_REQUIRE(both.ok());
+  SYNC_REQUIRE(both.options.mode == cli::Mode::Production);
+  SYNC_REQUIRE(both.options.publisher_count == 2);
+  SYNC_REQUIRE(both.options.selects_publisher("spout"));
+  SYNC_REQUIRE(both.options.selects_publisher("ndi"));
+  SYNC_REQUIRE(!both.options.selects_publisher("syphon"));
+  SYNC_REQUIRE(both.options.spout_library_path == "C:/sync/SpoutLibrary.dll");
+  SYNC_REQUIRE(both.options.ndi_runtime_path == "C:/ndi");
+  SYNC_REQUIRE(both.options.syphon_framework_path.empty());
+
+  const auto every = parse({"--publisher", "syphon", "--publisher", "spout",
+                            "--publisher", "ndi"});
+  SYNC_REQUIRE(every.ok());
+  SYNC_REQUIRE(every.options.publisher_count == 3);
+
+  SYNC_REQUIRE(cli::is_known_publisher("syphon"));
+  SYNC_REQUIRE(cli::is_known_publisher("spout"));
+  SYNC_REQUIRE(cli::is_known_publisher("ndi"));
+  SYNC_REQUIRE(!cli::is_known_publisher("Spout"));
+  SYNC_REQUIRE(!cli::is_known_publisher(""));
+
+  for (const auto& invalid : {
+           // A runtime path configures one provider, so it is meaningless
+           // unless that exact provider was named.
+           parse({"--publisher", "ndi", "--spout-library", "C:/x.dll"}),
+           parse({"--publisher", "spout", "--ndi-runtime", "C:/ndi"}),
+           parse({"--publisher", "spout", "--syphon-framework", "/S.framework"}),
+           parse({"--spout-library", "C:/x.dll"}),
+           parse({"--ndi-runtime", "C:/ndi"}),
+           parse({"--publisher", "spout", "--publisher", "spout"}),
+           parse({"--publisher", "ndi", "--publisher", "ndi"}),
+           parse({"--publisher", "spout", "--spout-library", "C:/one.dll",
+                  "--spout-library", "C:/two.dll"}),
+           parse({"--publisher", "ndi", "--ndi-runtime", "C:/one",
+                  "--ndi-runtime", "C:/two"}),
+           parse({"--publisher", "spout", "--spout-library", ""}),
+           parse({"--publisher", "ndi", "--ndi-runtime", ""}),
+           parse({"--spout-library"}),
+           parse({"--ndi-runtime"}),
+       }) {
+    SYNC_REQUIRE(!invalid.ok());
+  }
+}
+
+// PublisherHub fans out to at most four providers, so the CLI must not be
+// able to hand the daemon a selection it cannot register.
+SYNC_TEST(cli_bounds_the_publisher_selection_to_the_hub_capacity) {
+  SYNC_REQUIRE(cli::kMaximumPublishers == 4);
+  const auto all_known = parse({"--publisher", "syphon", "--publisher",
+                                "spout", "--publisher", "ndi"});
+  SYNC_REQUIRE(all_known.ok());
+  SYNC_REQUIRE(all_known.options.publisher_count <= cli::kMaximumPublishers);
 }
 
 SYNC_TEST(cli_static_test_mode_preserves_the_exact_legacy_shape) {
@@ -136,6 +203,9 @@ SYNC_TEST(cli_static_test_mode_preserves_the_exact_legacy_shape) {
            parse({"--port", "0", "--test-origin", "https://client.example",
                   "--test-token", "test-token", "--test-receiver",
                   "--publisher", "syphon"}),
+           parse({"--port", "0", "--test-origin", "https://client.example",
+                  "--test-token", "test-token", "--test-receiver",
+                  "--publisher", "spout"}),
        }) {
     SYNC_REQUIRE(!invalid.ok());
   }
@@ -159,6 +229,9 @@ SYNC_TEST(cli_management_modes_are_normalized_mutually_exclusive_and_argument_fr
            parse({"--revoke-origin", "http://remote.example"}),
            parse({"--revoke-origin", "https://example.com", "--publisher",
                   "syphon"}),
+           parse({"--list-pairings", "--publisher", "spout"}),
+           parse({"--list-pairings", "--publisher", "ndi",
+                  "--ndi-runtime", "C:/ndi"}),
            parse({"--list-pairings", "--list-pairings"}),
        }) {
     SYNC_REQUIRE(!invalid.ok());
