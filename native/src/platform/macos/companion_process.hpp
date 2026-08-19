@@ -1,6 +1,6 @@
 #pragma once
 
-#include <sync/platform/companion_model.hpp>
+#include <sync/companion_model.hpp>
 
 #include <functional>
 #include <memory>

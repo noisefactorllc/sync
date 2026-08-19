@@ -20,6 +20,10 @@ enum class PublishResult {
 enum class ProviderFailureKind : std::uint8_t {
   MetalCommandFailed,
   MetalWatchdogTimeout,
+  SpoutInitializationFailed,
+  SpoutSendFailed,
+  NdiInitializationFailed,
+  NdiSendFailed,
 };
 
 struct ProviderFailure {
@@ -35,6 +39,14 @@ struct ProviderFailure {
       return "metal_command_failed";
     case ProviderFailureKind::MetalWatchdogTimeout:
       return "metal_watchdog_timeout";
+    case ProviderFailureKind::SpoutInitializationFailed:
+      return "spout_initialization_failed";
+    case ProviderFailureKind::SpoutSendFailed:
+      return "spout_send_failed";
+    case ProviderFailureKind::NdiInitializationFailed:
+      return "ndi_initialization_failed";
+    case ProviderFailureKind::NdiSendFailed:
+      return "ndi_send_failed";
   }
   return "unknown_provider_failure";
 }

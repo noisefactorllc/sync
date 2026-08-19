@@ -79,11 +79,11 @@ iconset="$package_dir/Sync.iconset"
 rm -rf "$iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
-  rsvg-convert -w "$size" -h "$size" "$source_dir/packaging/macos/Sync.svg" \
+  rsvg-convert -w "$size" -h "$size" "$source_dir/packaging/Sync.svg" \
     -o "$iconset/icon_${size}x${size}.png"
   doubled=$((size * 2))
   rsvg-convert -w "$doubled" -h "$doubled" \
-    "$source_dir/packaging/macos/Sync.svg" \
+    "$source_dir/packaging/Sync.svg" \
     -o "$iconset/icon_${size}x${size}@2x.png"
 done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Sync.icns"

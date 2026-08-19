@@ -3,7 +3,7 @@
 #import <AppKit/AppKit.h>
 #import <ServiceManagement/ServiceManagement.h>
 
-#include <sync/platform/companion_model.hpp>
+#include <sync/companion_model.hpp>
 #include <sync/server.hpp>
 
 #include <memory>
@@ -295,11 +295,18 @@ std::uint64_t monotonic_milliseconds() noexcept {
   [_menu addItem:disabled_item(status_title(_model->state()))];
 
   const companion::HealthSnapshot& health = _model->health();
-  NSString* syphon = health.reachable
-                         ? (health.syphon_available ? @"Available" : @"Unavailable")
-                         : @"Unknown";
-  [_menu addItem:disabled_item(
-                     [NSString stringWithFormat:@"Syphon: %@", syphon])];
+  NSString* provider_summary = @"Unknown";
+  if (health.reachable) {
+    const std::string summary = health.providers.summary();
+    provider_summary = summary.empty()
+                           ? @"None available"
+                           : [[NSString alloc] initWithBytes:summary.data()
+                                                     length:summary.size()
+                                                   encoding:NSUTF8StringEncoding];
+    if (provider_summary == nil) provider_summary = @"Unknown";
+  }
+  [_menu addItem:disabled_item([NSString
+                     stringWithFormat:@"Providers: %@", provider_summary])];
   NSString* senders = health.active_senders.has_value()
                           ? [NSString stringWithFormat:@"%zu",
                                                        *health.active_senders]

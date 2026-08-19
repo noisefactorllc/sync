@@ -1,4 +1,4 @@
-#include <sync/platform/companion_model.hpp>
+#include <sync/companion_model.hpp>
 
 #include <algorithm>
 #include <sstream>
@@ -21,6 +21,49 @@ constexpr std::uint64_t recovery_delay_ms(std::size_t attempt) noexcept {
 }
 
 } // namespace
+
+std::string_view provider_display_name(std::string_view provider_id) noexcept {
+  if (provider_id == "syphon") return "Syphon";
+  if (provider_id == "spout") return "Spout";
+  if (provider_id == "ndi") return "NDI";
+  return provider_id;
+}
+
+bool AvailableProviders::add(std::string_view provider_id) noexcept {
+  if (provider_id.empty() ||
+      provider_id.size() > kMaximumHealthProviderIdBytes) {
+    return false;
+  }
+  if (contains(provider_id)) return true;
+  if (count_ >= kMaximumHealthProviders) return false;
+  Entry &entry = entries_[count_];
+  std::copy(provider_id.begin(), provider_id.end(), entry.id.begin());
+  entry.length = provider_id.size();
+  ++count_;
+  return true;
+}
+
+bool AvailableProviders::contains(std::string_view provider_id) const noexcept {
+  for (std::size_t index = 0; index < count_; ++index) {
+    if (entries_[index].view() == provider_id) return true;
+  }
+  return false;
+}
+
+std::string_view AvailableProviders::operator[](std::size_t index) const noexcept {
+  if (index >= count_) return {};
+  return entries_[index].view();
+}
+
+std::string AvailableProviders::summary() const {
+  std::string result;
+  for (std::size_t index = 0; index < count_; ++index) {
+    if (index != 0) result += ", ";
+    const std::string_view label = provider_display_name(entries_[index].view());
+    result.append(label.data(), label.size());
+  }
+  return result;
+}
 
 CompanionModel::CompanionModel(std::string product_version)
     : product_version_(std::move(product_version)) {}
@@ -266,11 +309,15 @@ std::string CompanionModel::diagnostics() const {
   output << '\n';
   output << "Service version: "
          << (health_.version.empty() ? "unavailable" : health_.version) << '\n';
-  output << "Syphon: "
-         << (health_.reachable
-                 ? (health_.syphon_available ? "available" : "unavailable")
-                 : "unknown")
-         << '\n';
+  output << "Providers: ";
+  if (!health_.reachable) {
+    output << "unknown";
+  } else if (health_.providers.empty()) {
+    output << "none available";
+  } else {
+    output << health_.providers.summary();
+  }
+  output << '\n';
   output << "Active senders: ";
   if (health_.active_senders.has_value()) {
     output << *health_.active_senders;

@@ -1,16 +1,27 @@
-#include "../test_harness.hpp"
+#include "test_harness.hpp"
 
-#include <sync/platform/companion_model.hpp>
+#include <sync/companion_model.hpp>
 
+#include <initializer_list>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace {
 
 using noisefactor::sync::companion::CompanionModel;
 using noisefactor::sync::companion::CompanionState;
 using noisefactor::sync::companion::HealthSnapshot;
+using noisefactor::sync::companion::AvailableProviders;
 using noisefactor::sync::companion::RecoverySchedule;
+
+AvailableProviders providers(std::initializer_list<std::string_view> ids) {
+  AvailableProviders result;
+  for (const std::string_view id : ids) {
+    (void)result.add(id);
+  }
+  return result;
+}
 
 HealthSnapshot healthy(std::size_t senders = 0) {
   return {
@@ -18,7 +29,7 @@ HealthSnapshot healthy(std::size_t senders = 0) {
       .compatible = true,
       .product = "Sync",
       .version = "0.2.7",
-      .syphon_available = true,
+      .providers = providers({"syphon"}),
       .active_senders = senders,
   };
 }

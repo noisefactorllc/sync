@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -7,6 +8,16 @@
 #include <string_view>
 
 namespace noisefactor::sync::companion {
+
+inline constexpr std::size_t kMaximumHealthProviders = 4;
+inline constexpr std::size_t kMaximumHealthProviderIdBytes = 32;
+
+// Display label for a known send provider id, or the id itself when the
+// daemon reports a provider this build does not recognise. Keeping unknown
+// ids verbatim means a newer helper paired with an older companion still
+// reports something truthful instead of hiding the provider.
+[[nodiscard]] std::string_view provider_display_name(
+    std::string_view provider_id) noexcept;
 
 enum class CompanionState {
   Starting,
@@ -19,12 +30,43 @@ enum class CompanionState {
   PortConflict,
 };
 
+// The set of send providers the daemon reports as available. Sync publishes
+// through every available provider at once, so this is a list rather than the
+// single-provider flag the macOS-only preview carried.
+class AvailableProviders {
+ public:
+  [[nodiscard]] bool add(std::string_view provider_id) noexcept;
+  [[nodiscard]] bool contains(std::string_view provider_id) const noexcept;
+  [[nodiscard]] std::size_t size() const noexcept { return count_; }
+  [[nodiscard]] bool empty() const noexcept { return count_ == 0; }
+  [[nodiscard]] std::string_view operator[](std::size_t index) const noexcept;
+
+  // "Syphon", "Spout, NDI", or an empty string when nothing is available.
+  [[nodiscard]] std::string summary() const;
+
+  auto operator==(const AvailableProviders&) const -> bool = default;
+
+ private:
+  struct Entry {
+    std::array<char, kMaximumHealthProviderIdBytes> id{};
+    std::size_t length = 0;
+
+    [[nodiscard]] std::string_view view() const noexcept {
+      return {id.data(), length};
+    }
+    auto operator==(const Entry&) const -> bool = default;
+  };
+
+  std::array<Entry, kMaximumHealthProviders> entries_{};
+  std::size_t count_ = 0;
+};
+
 struct HealthSnapshot {
   bool reachable = false;
   bool compatible = false;
   std::string product;
   std::string version;
-  bool syphon_available = false;
+  AvailableProviders providers;
   std::optional<std::size_t> active_senders;
 };
 

@@ -80,15 +80,29 @@ std::optional<HealthSnapshot> parse_health(NSData* data,
   if (!protocol_v1 || ![providers isKindOfClass:NSArray.class]) {
     return std::nullopt;
   }
-  bool syphon_available = false;
+  // Sync publishes through every available send provider at once, so the
+  // companion reports the whole set rather than probing for one id.
+  AvailableProviders available_providers;
   for (id value in providers) {
     if (![value isKindOfClass:NSDictionary.class]) continue;
     NSDictionary* provider = value;
-    if ([provider[@"id"] isEqualToString:@"syphon"] &&
-        [provider[@"direction"] isEqualToString:@"send"] &&
-        [provider[@"available"] isKindOfClass:NSNumber.class] &&
-        [provider[@"available"] boolValue]) {
-      syphon_available = true;
+    NSString* identifier = provider[@"id"];
+    // available AND selected: the companion reports the providers that are
+    // actually publishing, which is the set the operator can go looking for
+    // in a receiving application.
+    if (![identifier isKindOfClass:NSString.class] ||
+        ![provider[@"direction"] isEqualToString:@"send"] ||
+        ![provider[@"available"] isKindOfClass:NSNumber.class] ||
+        ![provider[@"available"] boolValue] ||
+        ![provider[@"selected"] isKindOfClass:NSNumber.class] ||
+        ![provider[@"selected"] boolValue]) {
+      continue;
+    }
+    const std::string identifier_bytes = cpp_string(identifier);
+    if (!available_providers.add(identifier_bytes)) {
+      // A helper advertising more providers than this build bounds for is
+      // reporting something this companion cannot represent truthfully.
+      return std::nullopt;
     }
   }
 
@@ -111,7 +125,7 @@ std::optional<HealthSnapshot> parse_health(NSData* data,
       .compatible = true,
       .product = cpp_string(product),
       .version = cpp_string(version),
-      .syphon_available = syphon_available,
+      .providers = available_providers,
       .active_senders = active_senders,
   };
 }
