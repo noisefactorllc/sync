@@ -980,6 +980,11 @@ SYNC_TEST(pairing_store_rejects_a_symlinked_lock_file) {
   TempDirectory temporary;
   const auto state = temporary.path() / "state";
   std::filesystem::create_directory(state);
+  // Same reason the POSIX branch above chmods this to 0700: open() checks the
+  // containing directory before it ever looks at the lock file, so without
+  // this it returns DirectorySecurity and the assertion below -- which is
+  // about the lock file -- never gets to run.
+  secure_file_for_test(state);
   const auto target = temporary.path() / "target";
   std::ofstream(target) << "target";
   secure_file_for_test(target);
