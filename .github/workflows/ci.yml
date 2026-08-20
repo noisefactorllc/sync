@@ -75,6 +75,11 @@ jobs:
     name: Windows ${{ matrix.name }}
     runs-on: windows-latest
     timeout-minutes: 60
+    # Job scope, not step scope: a per-step env is easy to forget, and a
+    # missing BUILD_TYPE does not fail loudly -- it expands to an empty
+    # string and hands ctest an invalid --build-config.
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
     strategy:
       fail-fast: false
       matrix:
@@ -109,7 +114,6 @@ jobs:
       - name: Configure and build
         shell: pwsh
         env:
-          BUILD_TYPE: ${{ matrix.build_type }}
           EXTRA_CXX_FLAGS: ${{ matrix.cxx_flags }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -139,8 +143,6 @@ jobs:
 
       - name: Run real-daemon loopback tests
         shell: pwsh
-        env:
-          BUILD_TYPE: ${{ matrix.build_type }}
         run: |
           $env:SYNC_DAEMON_PATH = "build/$env:BUILD_TYPE/syncd.exe"
           npm run test:integration

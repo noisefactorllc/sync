@@ -24,6 +24,8 @@ namespace {
 using noisefactor::sync::companion::CompanionProcess;
 using noisefactor::sync::companion::CompanionProcessOptions;
 using noisefactor::sync::companion::parse_pairings_json;
+using noisefactor::sync::companion::parse_health_json;
+using noisefactor::sync::companion::HealthSnapshot;
 
 class TemporaryFixture {
  public:
@@ -417,6 +419,110 @@ SYNC_TEST(companion_process_releases_an_unexpected_exit_before_relaunch) {
   SYNC_REQUIRE(exits.size() == 2);
   SYNC_REQUIRE(exits.front() == 17);
   SYNC_REQUIRE(!process.owned_pid().has_value());
+}
+
+// A minimal well-formed /status body with a caller-supplied providers array.
+std::string health_body(const std::string& providers) {
+  return std::string("{\"product\":\"Sync\",\"status\":\"ok\",") +
+         "\"version\":\"0.2.0\",\"protocolVersions\":[1]," +
+         "\"instanceId\":\"abc\",\"activeSenders\":0," +
+         "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[" +
+         providers + "]}}";
+}
+
+std::string provider(const std::string& id, bool available, bool selected,
+                     const std::string& direction = "send") {
+  return std::string("{\"id\":\"") + id + "\",\"direction\":\"" + direction +
+         "\",\"available\":" + (available ? "true" : "false") +
+         ",\"selected\":" + (selected ? "true" : "false") + "}";
+}
+
+SYNC_TEST(macos_health_collects_every_available_and_selected_send_provider) {
+  const auto parsed = parse_health_json(
+      health_body(provider("syphon", true, true) + "," + provider("ndi", true, true)),
+      true);
+  SYNC_REQUIRE(parsed.has_value());
+  SYNC_REQUIRE(parsed->reachable);
+  SYNC_REQUIRE(parsed->compatible);
+  SYNC_REQUIRE(parsed->providers.size() == 2);
+  SYNC_REQUIRE(parsed->providers.contains("syphon"));
+  SYNC_REQUIRE(parsed->providers.contains("ndi"));
+  SYNC_REQUIRE(parsed->providers.summary() == "Syphon, NDI");
+}
+
+SYNC_TEST(macos_health_excludes_unavailable_unselected_and_receive_providers) {
+  const auto parsed = parse_health_json(
+      health_body(provider("syphon", true, true) + "," +
+                  provider("spout", false, true) + "," +
+                  provider("ndi", true, false) + "," +
+                  provider("inbound", true, true, "receive")),
+      true);
+  SYNC_REQUIRE(parsed.has_value());
+  SYNC_REQUIRE(parsed->providers.size() == 1);
+  SYNC_REQUIRE(parsed->providers.contains("syphon"));
+  SYNC_REQUIRE(!parsed->providers.contains("spout"));
+  SYNC_REQUIRE(!parsed->providers.contains("ndi"));
+  SYNC_REQUIRE(!parsed->providers.contains("inbound"));
+}
+
+// A missing or non-boolean `selected` is a rejection, not a default: a helper
+// that does not say whether it is publishing is not one to guess about.
+SYNC_TEST(macos_health_rejects_a_provider_without_a_boolean_selected_field) {
+  const std::string missing =
+      "{\"id\":\"syphon\",\"direction\":\"send\",\"available\":true}";
+  SYNC_REQUIRE(parse_health_json(health_body(missing), true).has_value() == false ||
+               parse_health_json(health_body(missing), true)->providers.empty());
+
+  const std::string wrong_type =
+      "{\"id\":\"syphon\",\"direction\":\"send\",\"available\":true,"
+      "\"selected\":\"yes\"}";
+  SYNC_REQUIRE(parse_health_json(health_body(wrong_type), true).has_value() == false ||
+               parse_health_json(health_body(wrong_type), true)->providers.empty());
+}
+
+// More providers than the snapshot can hold must reject the whole payload
+// rather than silently reporting a truncated set.
+SYNC_TEST(macos_health_rejects_more_providers_than_the_bound_allows) {
+  std::string providers;
+  for (int index = 0; index < 5; ++index) {
+    if (index != 0) providers += ",";
+    providers += provider("p" + std::to_string(index), true, true);
+  }
+  SYNC_REQUIRE(!parse_health_json(health_body(providers), true).has_value());
+}
+
+SYNC_TEST(macos_health_rejects_wrong_product_status_and_protocol) {
+  const std::string ok = provider("syphon", true, true);
+  SYNC_REQUIRE(parse_health_json(health_body(ok), true).has_value());
+
+  std::string body = health_body(ok);
+  const auto replaced = [](std::string text, const std::string& from,
+                           const std::string& to) {
+    const auto at = text.find(from);
+    return at == std::string::npos ? text : text.replace(at, from.size(), to);
+  };
+  SYNC_REQUIRE(!parse_health_json(replaced(body, "\"Sync\"", "\"Other\""), true)
+                    .has_value());
+  SYNC_REQUIRE(!parse_health_json(replaced(body, "\"ok\"", "\"degraded\""), true)
+                    .has_value());
+  SYNC_REQUIRE(!parse_health_json(replaced(body, "[1]", "[2]"), true).has_value());
+  SYNC_REQUIRE(!parse_health_json("not json at all", true).has_value());
+  SYNC_REQUIRE(!parse_health_json("", true).has_value());
+}
+
+SYNC_TEST(macos_health_validates_active_sender_counts) {
+  const std::string ok = provider("syphon", true, true);
+  const auto with_senders = [&](const std::string& value) {
+    std::string body = health_body(ok);
+    const auto at = body.find("\"activeSenders\":0");
+    return body.replace(at, std::string("\"activeSenders\":0").size(),
+                        "\"activeSenders\":" + value);
+  };
+  SYNC_REQUIRE(parse_health_json(with_senders("64"), true).has_value());
+  SYNC_REQUIRE(!parse_health_json(with_senders("65"), true).has_value());
+  SYNC_REQUIRE(!parse_health_json(with_senders("-1"), true).has_value());
+  SYNC_REQUIRE(!parse_health_json(with_senders("1.5"), true).has_value());
+  SYNC_REQUIRE(!parse_health_json(with_senders("\"many\""), true).has_value());
 }
 
 } // namespace

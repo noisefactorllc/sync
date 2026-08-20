@@ -127,8 +127,25 @@ test("runtime dependency bundling fails on an unresolved dependency", () => {
 test("the Windows smoke test asserts the helper dies with the app", () => {
   const smoke = source("scripts/smoke-windows-app.ps1");
   assert.match(smoke, /helper survived app quit/);
-  assert.match(smoke, /CloseMainWindow/);
   assert.match(smoke, /ParentProcessId -eq \$tray\.Id/);
+
+  // The app is asked to quit by posting WM_CLOSE to its own window, found by
+  // enumerating the tray process's windows. Process.CloseMainWindow() cannot
+  // do this: the window is never shown, so MainWindowHandle is 0 and the call
+  // silently does nothing. Assert the mechanism that works, and assert the
+  // broken one is absent outside of the comment that explains why.
+  assert.match(smoke, /PostMessageW\(\$trayWindow, \$WM_CLOSE/);
+  assert.match(smoke, /Get-ProcessWindow \$tray\.Id/);
+  const uncommented = smoke.split("\n").filter((line) => !line.trim().startsWith("#"));
+  assert.equal(uncommented.some((line) => line.includes("CloseMainWindow")), false,
+               "CloseMainWindow does nothing for a window that was never shown");
+
+  // Distinguishing a graceful stop from a kill is the whole point of the
+  // exit-code check, and it only works through a handle opened while the
+  // helper was still alive.
+  assert.match(smoke, /\$helper\.Handle/);
+  assert.match(smoke, /rather than shut down gracefully/);
+  assert.match(smoke, /exit code was unreadable/);
   // Availability must not be asserted by default: CI has no GPU and no NDI
   // runtime, so a default availability assertion would only pass locally.
   assert.match(smoke, /RequireProvider/);

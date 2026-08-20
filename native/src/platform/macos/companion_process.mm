@@ -251,6 +251,15 @@ struct OwnedTaskState {
 
 } // namespace
 
+std::optional<HealthSnapshot> parse_health_json(std::string_view json,
+                                                bool require_sender_count) {
+  if (json.size() > 65'536) return std::nullopt;
+  @autoreleasepool {
+    NSData* data = [NSData dataWithBytes:json.data() length:json.size()];
+    return parse_health(data, require_sender_count);
+  }
+}
+
 PairingsResult parse_pairings_json(std::string_view json) {
   PairingsResult result;
   NSData* data = [NSData dataWithBytes:json.data() length:json.size()];

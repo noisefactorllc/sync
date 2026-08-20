@@ -28,6 +28,48 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# The tray app owns a real top-level window that it never shows -- it exists
+# only to receive the tray icon callback and timer messages. Windows reports
+# MainWindowHandle as 0 for a window that was never shown, so
+# Process.CloseMainWindow() silently does nothing and the app never quits.
+# Finding it by its registered class and posting WM_CLOSE is what actually
+# drives the app's own shutdown path, which is the thing under test.
+Add-Type -Namespace SyncSmoke -Name Win32 -MemberDefinition @'
+public delegate bool EnumProc(IntPtr window, IntPtr context);
+[DllImport("user32.dll")]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool EnumWindows(EnumProc callback, IntPtr context);
+[DllImport("user32.dll")]
+public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern int GetClassNameW(IntPtr window, System.Text.StringBuilder name, int size);
+[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool PostMessageW(IntPtr window, uint message, IntPtr w, IntPtr l);
+'@
+
+# Every top-level window owned by one process, as (handle, class) pairs.
+function Get-ProcessWindow([int]$processId) {
+  $windows = New-Object System.Collections.ArrayList
+  $callback = [SyncSmoke.Win32+EnumProc]{
+    param($window, $context)
+    $owner = 0
+    [void][SyncSmoke.Win32]::GetWindowThreadProcessId($window, [ref]$owner)
+    if ($owner -eq $processId) {
+      $name = New-Object System.Text.StringBuilder 256
+      [void][SyncSmoke.Win32]::GetClassNameW($window, $name, 256)
+      [void]$windows.Add([pscustomobject]@{ Handle = $window; Class = $name.ToString() })
+    }
+    return $true
+  }
+  [void][SyncSmoke.Win32]::EnumWindows($callback, [IntPtr]::Zero)
+  return $windows
+}
+
+# Must match window_class.lpszClassName in app_main.cpp.
+$trayWindowClass = 'NoiseFactorSyncTrayWindow'
+$WM_CLOSE = 0x0010
+
 function Fail([string]$message) {
   Write-Error "smoke-windows-app: $message"
   exit 1
@@ -68,12 +110,74 @@ if (Test-Path -LiteralPath $noticeKey) {
 }
 Set-ItemProperty -LiteralPath $noticeKey -Name $noticeName -Value 1 -Type DWord
 
+$trayOut = Join-Path ([IO.Path]::GetTempPath()) "sync-smoke-tray-out.txt"
+$trayErr = Join-Path ([IO.Path]::GetTempPath()) "sync-smoke-tray-err.txt"
+
+# Everything this knows about why a run failed, printed on the way out.
+# Without it a failure is just "did not become healthy", which is not
+# something anyone can act on from a CI log.
+function Show-FailureContext([string]$context) {
+  Write-Host "---- smoke diagnostics: $context ----"
+  if ($null -ne $tray) {
+    Write-Host "tray pid=$($tray.Id) hasExited=$($tray.HasExited)"
+    if ($tray.HasExited) { Write-Host "tray exit code=$($tray.ExitCode)" }
+  } else {
+    Write-Host "tray was never started"
+  }
+  foreach ($pair in @(@("stdout", $trayOut), @("stderr", $trayErr))) {
+    if (Test-Path -LiteralPath $pair[1]) {
+      $text = (Get-Content -LiteralPath $pair[1] -Raw -ErrorAction SilentlyContinue)
+      if ([string]::IsNullOrWhiteSpace($text)) { $text = "(empty)" }
+      Write-Host "tray $($pair[0]): $text"
+    }
+  }
+  if ($null -ne $tray -and -not $tray.HasExited) {
+    $windows = @(Get-ProcessWindow $tray.Id)
+    Write-Host "tray windows: $(($windows | ForEach-Object { $_.Class }) -join ', ')"
+    # #32770 is the standard dialog class. A modal dialog blocks the message
+    # loop, which would explain a WM_CLOSE that is never acted on -- most
+    # likely the first-run preview notice failing to be suppressed.
+    if ($windows | Where-Object { $_.Class -eq '#32770' }) {
+      Write-Host "a modal dialog is open; the first-run notice was probably not suppressed"
+    }
+  }
+  $running = @(Get-Process -Name syncd -ErrorAction SilentlyContinue)
+  Write-Host "syncd processes running: $($running.Count)"
+  $listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  Write-Host "listening on $Port : $(if ($null -eq $listening) { 'no' } else { 'yes' })"
+
+  # Launch the helper on its own. This separates "the helper cannot run
+  # here" from "the tray app failed to start or supervise it", which are
+  # very different problems and indistinguishable from the tray app alone.
+  $helperExe = Join-Path $Bundle 'syncd.exe'
+  if (Test-Path -LiteralPath $helperExe) {
+    $ho = Join-Path ([IO.Path]::GetTempPath()) "sync-smoke-helper-out.txt"
+    $he = Join-Path ([IO.Path]::GetTempPath()) "sync-smoke-helper-err.txt"
+    $helper = Start-Process -FilePath $helperExe -ArgumentList "--port","54999" `
+      -PassThru -RedirectStandardOutput $ho -RedirectStandardError $he
+    Start-Sleep -Seconds 3
+    Write-Host "direct helper hasExited=$($helper.HasExited)"
+    if ($helper.HasExited) { Write-Host "direct helper exit code=$($helper.ExitCode)" }
+    foreach ($pair in @(@("stdout", $ho), @("stderr", $he))) {
+      if (Test-Path -LiteralPath $pair[1]) {
+        $text = (Get-Content -LiteralPath $pair[1] -Raw -ErrorAction SilentlyContinue)
+        if ([string]::IsNullOrWhiteSpace($text)) { $text = "(empty)" }
+        Write-Host "direct helper $($pair[0]): $text"
+      }
+    }
+    if (-not $helper.HasExited) { Stop-Process -Id $helper.Id -Force -ErrorAction SilentlyContinue }
+  }
+  Write-Host "---- end diagnostics ----"
+}
+
 try {
-  $tray = Start-Process -FilePath $trayExe -PassThru
+  $tray = Start-Process -FilePath $trayExe -PassThru `
+    -RedirectStandardOutput $trayOut -RedirectStandardError $trayErr
 
   $health = $null
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
     if ($tray.HasExited) {
+      Show-FailureContext 'tray app exited early'
       Fail "Sync exited before becoming healthy (exit code $($tray.ExitCode))"
     }
     try {
@@ -83,7 +187,10 @@ try {
       Start-Sleep -Milliseconds 100
     }
   }
-  if ($null -eq $health) { Fail 'Sync did not become healthy' }
+  if ($null -eq $health) {
+    Show-FailureContext 'health probe never succeeded'
+    Fail 'Sync did not become healthy'
+  }
 
   if ($health.product -ne 'Sync') { Fail "unexpected product '$($health.product)'" }
   if ($health.status -ne 'ok') { Fail "unexpected status '$($health.status)'" }
@@ -110,13 +217,31 @@ try {
   # code is only readable through a handle acquired while it was running.
   # That code is what separates "asked to stop and did" from "was killed".
   $helperProcesses = @(Get-Process -Id $helperIds -ErrorAction SilentlyContinue)
+  foreach ($helper in $helperProcesses) {
+    # Touching .Handle now is what actually opens and caches it. Without
+    # this, .ExitCode after the process is gone yields nothing at all --
+    # a Get-Process object does not open the handle until something asks.
+    try { $null = $helper.Handle } catch {
+      Fail "could not open a handle to helper $($helper.Id): $($_.Exception.Message)"
+    }
+  }
 
   # The job object is what guarantees the helper cannot outlive the tray app.
   # Closing the tray app is therefore the assertion, not a cleanup step.
-  $tray.CloseMainWindow() | Out-Null
-  if (-not $tray.WaitForExit(5000)) {
+  $trayWindows = @(Get-ProcessWindow $tray.Id | Where-Object { $_.Class -eq $trayWindowClass })
+  if ($trayWindows.Count -eq 0) {
+    Show-FailureContext 'tray window not found'
+    Fail "no window of class $trayWindowClass in pid $($tray.Id); the app cannot be asked to quit"
+  }
+  $trayWindow = $trayWindows[0].Handle
+  if (-not [SyncSmoke.Win32]::PostMessageW($trayWindow, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)) {
+    Show-FailureContext 'WM_CLOSE could not be posted'
+    Fail 'could not post WM_CLOSE to the tray window'
+  }
+  if (-not $tray.WaitForExit(10000)) {
+    Show-FailureContext 'app ignored WM_CLOSE'
     $tray.Kill()
-    Fail 'app did not quit within five seconds'
+    Fail 'app did not quit within ten seconds of WM_CLOSE'
   }
 
   for ($attempt = 0; $attempt -lt 50; $attempt++) {
@@ -135,9 +260,13 @@ try {
   # exactly how that path came to be broken and unnoticed once already.
   foreach ($helper in $helperProcesses) {
     if (-not $helper.HasExited) { Fail "helper $($helper.Id) did not exit" }
-    if ($helper.ExitCode -ne 0) {
-      Fail ("helper $($helper.Id) exited with $($helper.ExitCode); it was " +
-            'terminated rather than shut down gracefully')
+    $code = $helper.ExitCode
+    if ($null -eq $code) {
+      Fail "helper $($helper.Id) exit code was unreadable; cannot tell a clean stop from a kill"
+    }
+    if ($code -ne 0) {
+      Fail ("helper $($helper.Id) exited with $code; it was terminated " +
+            'rather than shut down gracefully')
     }
   }
 

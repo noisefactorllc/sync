@@ -30,6 +30,17 @@ struct RevocationResult {
 [[nodiscard]] RevocationResult classify_revocation(int exit_status,
                                                    std::string_view json);
 
+// Parses a /status payload exactly as the live health probe does.
+//
+// The probe path takes an NSData*, which cannot appear in a header that
+// plain C++ translation units include -- which is precisely why this logic
+// had no direct test while the identical Windows implementation had eight.
+// This overload takes raw bytes and defers to the same parser, so the
+// provider-selection rules are testable on the platform where they were
+// hardest to verify.
+[[nodiscard]] std::optional<HealthSnapshot> parse_health_json(
+    std::string_view json, bool require_sender_count);
+
 struct CompanionProcessOptions {
   std::string helper_path;
   std::string framework_path;
