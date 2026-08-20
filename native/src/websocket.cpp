@@ -391,7 +391,11 @@ std::string websocket_accept_key(std::string_view key) {
     return {};
   }
   std::array<unsigned char, 29> encoded{};
-  const int encoded_length = EVP_EncodeBlock(encoded.data(), digest.data(), digest.size());
+  // digest is a fixed 20-byte array, so this conversion cannot truncate;
+  // made explicit because EVP_EncodeBlock takes an int and MSVC /W4
+  // correctly refuses to narrow silently.
+  const int encoded_length = EVP_EncodeBlock(encoded.data(), digest.data(),
+                                             static_cast<int>(digest.size()));
   if (encoded_length != 28) {
     return {};
   }

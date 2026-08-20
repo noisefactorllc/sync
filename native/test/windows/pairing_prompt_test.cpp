@@ -34,6 +34,11 @@ enum class AdapterMode {
   // the same outcome a real MB_YESNO box gives when its window is closed via
   // WM_CLOSE. Stands in for "the box is still open" in tests.
   BlockUntilClosed,
+  // Blocks in show() BEFORE reporting a window, then reports it only once
+  // the test allows. Reproduces the real gap between entering MessageBoxW
+  // and the CBT hook delivering its HWND -- the window in which a cancel()
+  // finds nothing to close.
+  BlockBeforeReportingWindow,
   // Blocks in show() until the test explicitly releases it, then approves --
   // used to land a cancel() or a wrong-generation cancel() precisely while a
   // decision is in flight.
@@ -48,6 +53,8 @@ struct AdapterRecord {
   std::condition_variable condition;
   bool released = false;
   bool closed = false;
+  bool may_report_window = false;
+  std::atomic<bool> entered_show{false};
   std::vector<std::thread::id> threads;
   std::string title;
   std::string message;
@@ -70,6 +77,20 @@ class FakeAdapter final : public prompt_test::Adapter {
       record_->message.assign(presentation.message());
     }
     ++record_->show_calls;
+    record_->entered_show.store(true, std::memory_order_release);
+
+    if (record_->mode == AdapterMode::BlockBeforeReportingWindow) {
+      // Deliberately do NOT report a window yet.
+      {
+        std::unique_lock lock(record_->mutex);
+        record_->condition.wait(lock, [&] { return record_->may_report_window; });
+      }
+      report_window(0x1234);
+      std::unique_lock lock(record_->mutex);
+      record_->condition.wait(lock, [&] { return record_->closed; });
+      return prompt_test::AdapterResponse::Denied;
+    }
+
     // A fake but stable non-zero "handle" so force_close() has something to
     // observe; the real adapter reports a genuine HWND the same way.
     report_window(0x1234);
@@ -86,6 +107,10 @@ class FakeAdapter final : public prompt_test::Adapter {
         record_->condition.wait(lock, [&] { return record_->closed; });
         return prompt_test::AdapterResponse::Denied;
       }
+      case AdapterMode::BlockBeforeReportingWindow:
+        // Unreachable: handled above, before any window is reported. Listed
+        // so -Wswitch stays useful for the next mode added here.
+        return prompt_test::AdapterResponse::Denied;
       case AdapterMode::ControlledApprove: {
         std::unique_lock lock(record_->mutex);
         record_->condition.wait(lock, [&] { return record_->released; });
@@ -311,6 +336,45 @@ SYNC_TEST(windows_prompt_destruction_with_an_outstanding_prompt_is_safe) {
   }
   const auto elapsed = std::chrono::steady_clock::now() - started;
   SYNC_REQUIRE(elapsed < 2s);
+  SYNC_REQUIRE(record->force_close_calls >= 1);
+  require_single_worker_thread(*record);
+}
+
+// Regression test for a liveness bug, not a correctness one.
+//
+// A real MessageBoxW only reveals its HWND once the CBT hook fires, slightly
+// after show() is entered. A cancel() or a destructor landing in that gap
+// used to read active_window == 0, close nothing, and -- because
+// cancel_active/stopping were already latched -- never look again. The dialog
+// stayed up until a human clicked it, with the destructor's join() blocked
+// behind it. The watcher now keeps asking until the window appears or show()
+// returns, so destruction stays bounded even when the cancel wins the race.
+SYNC_TEST(windows_prompt_destruction_is_bounded_when_cancel_beats_the_window_handle) {
+  auto record = std::make_shared<AdapterRecord>(
+      AdapterMode::BlockBeforeReportingWindow);
+  const auto started = std::chrono::steady_clock::now();
+  {
+    auto prompt = make_prompt(record, 5s);
+    SYNC_REQUIRE(
+        prompt->begin(request(141, "https://client.example", "Noisedeck")));
+    // Wait until show() is running but has deliberately NOT reported a window.
+    SYNC_REQUIRE(wait_until([&] {
+      return record->entered_show.load(std::memory_order_acquire);
+    }));
+
+    // Let the window appear only after the destructor below has already
+    // asked to cancel, so the cancel provably loses the race to it.
+    std::thread releaser([record] {
+      std::this_thread::sleep_for(120ms);
+      std::lock_guard lock(record->mutex);
+      record->may_report_window = true;
+      record->condition.notify_all();
+    });
+    releaser.detach();
+    // prompt is destroyed here, while show() is blocked with no window yet.
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  SYNC_REQUIRE(elapsed < 3s);
   SYNC_REQUIRE(record->force_close_calls >= 1);
   require_single_worker_thread(*record);
 }

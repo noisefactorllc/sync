@@ -571,7 +571,9 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM wparam,
 
 }  // namespace
 
-int main() {
+// The real body. The entry point that reaches it is toolchain-specific --
+// see the bottom of this file.
+int run_tray_application() {
   // Single instance: a named mutex, so a second launch can detect the
   // existing instance and surface it instead of starting a second syncd.exe
   // that would fight the first one for port 53979.
@@ -680,3 +682,17 @@ int main() {
   if (single_instance != nullptr) ::CloseHandle(single_instance);
   return static_cast<int>(message.wParam);
 }
+
+// add_executable(sync_menu WIN32 ...) selects the WINDOWS subsystem so no
+// console window ever appears. The two toolchains disagree about which symbol
+// starts a program there: the MSVC CRT looks for wWinMain and fails to link
+// with an unresolved WinMain if only main() exists, while MinGW supplies a
+// shim that calls plain main(). Define whichever this toolchain needs; both
+// do nothing but call the same body.
+#if defined(_MSC_VER)
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  return run_tray_application();
+}
+#else
+int main() { return run_tray_application(); }
+#endif

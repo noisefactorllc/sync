@@ -283,11 +283,33 @@ struct WindowsPairingPrompt::Impl {
           });
           if (show_done.load(std::memory_order_acquire)) return;
           const bool timed_out = !cancel_active && !stopping;
-          const std::uintptr_t window =
-              active_window.load(std::memory_order_acquire);
-          watch_lock.unlock();
           if (timed_out) deadline_fired = true;
-          if (window != 0 && adapter != nullptr) adapter->force_close(window);
+
+          // The window handle only becomes known when the CBT hook fires,
+          // which is slightly AFTER show() is entered. A cancel() or
+          // shutdown() landing in that gap reads active_window == 0, closes
+          // nothing, and -- because cancel_active/stopping are already
+          // latched -- never gets another wake-up. The dialog would then
+          // stay on screen until a human clicked it, with shutdown()'s
+          // join() blocked behind it. So keep asking rather than looking
+          // once: poll until the window appears or show() returns on its
+          // own. This cannot outlive show(), which run() joins this thread
+          // against, so it adds no hang that was not already there.
+          constexpr auto kWindowPollInterval = std::chrono::milliseconds(10);
+          for (;;) {
+            const std::uintptr_t window =
+                active_window.load(std::memory_order_acquire);
+            if (window != 0 && adapter != nullptr) {
+              watch_lock.unlock();
+              adapter->force_close(window);
+              return;
+            }
+            if (condition.wait_for(watch_lock, kWindowPollInterval, [&] {
+                  return show_done.load(std::memory_order_acquire);
+                })) {
+              return;
+            }
+          }
         });
 
         response = adapter->show(presentation, [this](std::uintptr_t window) {

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -27,6 +28,7 @@
 #include <windows.h>
 
 #include <aclapi.h>
+#include <winioctl.h>  // FSCTL_SET_REPARSE_POINT
 #include <cwchar>  // _snwprintf_s
 #else
 #include <fcntl.h>
@@ -249,11 +251,9 @@ void widen_permissions_for_test(const std::filesystem::path& path) {
 // Best-effort symlink creation: on a CI image without Developer Mode or
 // admin rights, CreateSymbolicLinkW fails with ERROR_PRIVILEGE_NOT_HELD.
 // Callers must treat a false return as "skip this assertion", not a test
-// failure -- there is no unprivileged equivalent for a *file* symlink the
-// way a directory junction would be, and hand-rolling a junction via a raw
-// FSCTL_SET_REPARSE_POINT buffer (whose structure is not declared in any
-// standard user-mode SDK header) was judged too easy to get subtly wrong
-// without a compiler on hand to check it.
+// failure. For DIRECTORY reparse points use try_create_junction below
+// instead: a mount point needs no privilege at all, so it actually runs
+// everywhere and is the better test of the ancestor-refusal guarantee.
 bool try_create_symlink(const std::filesystem::path& link, const std::filesystem::path& target,
                         bool directory) {
   DWORD flags = directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
@@ -261,6 +261,73 @@ bool try_create_symlink(const std::filesystem::path& link, const std::filesystem
   flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 #endif
   return ::CreateSymbolicLinkW(link.c_str(), target.c_str(), flags) != 0;
+}
+
+// Creates a directory junction (an unprivileged reparse point) at `link`
+// pointing at `target`. Unlike CreateSymbolicLinkW this needs no Developer
+// Mode and no admin rights, so the "refuse a reparse point in the path"
+// guarantee gets tested on every machine rather than skipped on most.
+//
+// REPARSE_DATA_BUFFER is not declared in the user-mode SDK headers, so the
+// mount-point layout is spelled out here: the tag, the byte counts, then
+// the substitute name ("\??\C:\target", what the filesystem resolves)
+// followed by the print name (what the shell displays), both inside one
+// PathBuffer.
+bool try_create_junction(const std::filesystem::path& link,
+                         const std::filesystem::path& target) {
+  std::error_code error;
+  std::filesystem::create_directory(link, error);
+  if (error) return false;
+
+  const std::wstring substitute = L"\\??\\" + target.wstring();
+  const std::wstring print = target.wstring();
+  const std::size_t substitute_bytes = substitute.size() * sizeof(wchar_t);
+  const std::size_t print_bytes = print.size() * sizeof(wchar_t);
+
+  struct MountPointBuffer {
+    DWORD ReparseTag;
+    WORD ReparseDataLength;
+    WORD Reserved;
+    WORD SubstituteNameOffset;
+    WORD SubstituteNameLength;
+    WORD PrintNameOffset;
+    WORD PrintNameLength;
+    wchar_t PathBuffer[MAX_PATH * 4];
+  };
+  MountPointBuffer buffer{};
+  // Two NUL terminators are included in the path buffer but not counted in
+  // the name lengths, which is what the mount-point format expects.
+  if (substitute_bytes + print_bytes + 2 * sizeof(wchar_t) >
+      sizeof(buffer.PathBuffer)) {
+    return false;
+  }
+  buffer.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+  buffer.SubstituteNameOffset = 0;
+  buffer.SubstituteNameLength = static_cast<WORD>(substitute_bytes);
+  buffer.PrintNameOffset = static_cast<WORD>(substitute_bytes + sizeof(wchar_t));
+  buffer.PrintNameLength = static_cast<WORD>(print_bytes);
+  std::memcpy(buffer.PathBuffer, substitute.c_str(),
+              substitute_bytes + sizeof(wchar_t));
+  std::memcpy(reinterpret_cast<unsigned char*>(buffer.PathBuffer) +
+                  buffer.PrintNameOffset,
+              print.c_str(), print_bytes + sizeof(wchar_t));
+  // Everything from SubstituteNameOffset onward, i.e. the header fields
+  // after ReparseDataLength plus both names and their terminators.
+  const std::size_t data_length = 4 * sizeof(WORD) + substitute_bytes +
+                                  print_bytes + 2 * sizeof(wchar_t);
+  buffer.ReparseDataLength = static_cast<WORD>(data_length);
+
+  HANDLE handle = ::CreateFileW(
+      link.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) return false;
+  DWORD returned = 0;
+  const BOOL ok = ::DeviceIoControl(
+      handle, FSCTL_SET_REPARSE_POINT, &buffer,
+      static_cast<DWORD>(data_length + 2 * sizeof(DWORD)), nullptr, 0,
+      &returned, nullptr);
+  ::CloseHandle(handle);
+  return ok != 0;
 }
 
 bool set_local_app_data_for_test(const std::string& value) {
@@ -574,6 +641,39 @@ SYNC_TEST(pairing_store_rejects_symlinked_directories_files_and_parent_traversal
   }
 #endif
 }
+
+#if defined(_WIN32)
+// The symlink assertions above are skipped on any machine without Developer
+// Mode, which is most CI images -- so on its own the reparse-point guarantee
+// had no test that actually executed there. A junction needs no privilege,
+// so this one always runs.
+//
+// The junction sits in the MIDDLE of the path, which is the case
+// FILE_FLAG_OPEN_REPARSE_POINT alone does not cover: that flag only refuses
+// to follow a reparse point in the final component, so refusing this one is
+// entirely down to open_secure_directory walking and checking every ancestor.
+SYNC_TEST(pairing_store_rejects_a_junctioned_ancestor_directory) {
+  TempDirectory temporary;
+  const auto decoy = temporary.path() / "decoy";
+  std::filesystem::create_directory(decoy);
+  const auto junction = temporary.path() / "middle";
+  SYNC_REQUIRE(try_create_junction(junction, decoy));
+
+  // Sanity: the junction really does resolve to the decoy, so a failure
+  // below means the store refused it rather than that it was never a
+  // reparse point at all.
+  std::ofstream(decoy / "proof") << "proof";
+  SYNC_REQUIRE(std::filesystem::exists(junction / "proof"));
+
+  PairingStore through_junction;
+  SYNC_REQUIRE(through_junction.open(
+                   {.path = (junction / "state" / "pairings.bin").string()}) ==
+               PairingStoreError::DirectorySecurity);
+
+  // And nothing was written into the decoy the junction pointed at.
+  SYNC_REQUIRE(!std::filesystem::exists(decoy / "state"));
+}
+#endif
 
 SYNC_TEST(pairing_store_atomic_pre_rename_failure_preserves_previous_file_and_cleans_temp) {
   TempDirectory temporary;

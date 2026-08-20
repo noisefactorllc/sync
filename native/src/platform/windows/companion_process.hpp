@@ -72,6 +72,19 @@ struct CompanionProcessOptions {
   // assumes it is called from, or may call back on, any particular thread
   // itself -- this is the seam that lets it hand control back to whichever
   // thread actually owns the UI and the CompanionModel.
+  //
+  // CONTRACT, and the destructor depends on it: ~CompanionProcess() waits
+  // for every outstanding operation to complete, and an operation only
+  // completes by being dispatched through this callback. So whatever runs
+  // the callbacks must still be running, or be able to run them inline,
+  // while the destructor is executing. Destroying a CompanionProcess from
+  // inside the dispatcher's own thread while that thread is the only thing
+  // that can drain the queue would deadlock.
+  //
+  // app_main.cpp satisfies this by destroying CompanionProcess only after
+  // its message loop has exited, and by falling back to invoking the
+  // callback inline when the window is already gone. A new caller must do
+  // something equivalent.
   std::function<void(std::function<void()>)> dispatch_to_owner;
 };
 

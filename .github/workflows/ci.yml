@@ -86,7 +86,10 @@ jobs:
             build_type: Debug
             # /W4 /WX is MSVC's equivalent of the -Wall -Wextra -Werror gate the
             # macOS matrix applies; /permissive- holds the same standards line.
-            cxx_flags: '/W4 /WX /permissive-'
+            # /EHsc is not optional here: setting CMAKE_CXX_FLAGS replaces the
+            # defaults CMake would otherwise supply on Windows, and dropping it
+            # makes every file that uses exceptions emit C4530.
+            cxx_flags: '/W4 /WX /permissive- /EHsc'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:

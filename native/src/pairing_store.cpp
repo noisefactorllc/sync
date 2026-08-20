@@ -657,7 +657,19 @@ PairingStoreError default_pairing_store_path(std::span<char> output,
   // this whole file free of <windows.h>; SetEnvironmentVariable still
   // reaches it because the CRT's environment block is the process
   // environment block.
+#if defined(_MSC_VER)
+// MSVC deprecates getenv in favour of _dupenv_s, which is an MSVC CRT
+// extension that other Windows toolchains do not provide -- adopting it
+// would break the MinGW build to silence a warning about a call that is
+// not actually unsafe here: the value is read once at startup, on one
+// thread, and copied into a bounded buffer immediately below.
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
   const char* local_app_data = std::getenv("LOCALAPPDATA");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
   if (local_app_data == nullptr) return PairingStoreError::InvalidPath;
   const std::string_view prefix(local_app_data);
   if (prefix.size() < 3 ||
