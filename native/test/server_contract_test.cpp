@@ -154,12 +154,6 @@ void stop_after_platform_pump(void *context) noexcept {
   }
 }
 
-void stop_after_second_platform_pump(void *context) noexcept {
-  auto *calls = static_cast<std::atomic<std::size_t> *>(context);
-  if (calls->fetch_add(1, std::memory_order_relaxed) == 1) {
-    std::raise(SIGTERM);
-  }
-}
 #endif
 
 } // namespace

@@ -157,8 +157,20 @@ test("managed helper callbacks are owned and sequenced per child process", () =>
   assert.equal((processSource.match(/waitUntilExit/g) || []).length, 1);
 });
 
+// package-macos.sh refuses to run without its whole toolchain, and the
+// build job installs only what the build needs -- so this is skipped unless
+// the packaging tools are actually present. dylibbundler is faked by the
+// test itself; the rest have to be real.
+function hasCommand(name) {
+  return spawnSync("/usr/bin/env", ["sh", "-c", `command -v ${name}`],
+                   { stdio: "ignore" }).status === 0;
+}
+
+const packagingToolsPresent = process.platform === "darwin" &&
+  ["ditto", "rsvg-convert", "sips", "iconutil"].every(hasCommand);
+
 test("macOS dependency bundling is non-interactive and uses its pinned search path", {
-  skip: process.platform !== "darwin",
+  skip: !packagingToolsPresent,
 }, () => {
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-package-test-"));
   try {
