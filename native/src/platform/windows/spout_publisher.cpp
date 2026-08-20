@@ -152,10 +152,36 @@ auto valid_sender_name_bytes(std::string_view value) noexcept -> bool {
 //      Factor release workflow, so the shipped configuration is controlled
 //      rather than discovered.
 //   2. probe_abi() below reads the vtable entry at index 171 and refuses
-//      the module unless it points into the module image, which a 166-slot
-//      vtable would not. A module that fails is never called through any
-//      late slot, including Release.
+//      the module unless it points into the module image. Treat that as a
+//      cheap smoke test, NOT a proof: reading one entry past a shorter
+//      vtable lands on whatever the linker happened to place next, and in
+//      a DLL full of vtables and RTTI records that is quite likely to be
+//      another in-image pointer, which would pass. It reliably rejects a
+//      module that is not SPOUTLIBRARY at all; it does not reliably
+//      distinguish a 166-slot build from a 172-slot one. The pinned DLL is
+//      what actually carries that guarantee.
 // See docs/dependencies/spout.md.
+
+// OVERLOADED NAMES ARE NOT CALLABLE THROUGH THIS MIRROR.
+//
+// Five names in SPOUTLIBRARY are declared more than once: GetName (7, 105),
+// SpoutMessageBox (75-81), SpoutMessageBoxIcon (82, 83), GetAdapterInfo
+// (143, 144), and FlipBuffer (157, 158). For those, the slot a GCC-built
+// mirror computes from declaration order does not agree with the slot the
+// MSVC-built DLL actually uses, and calling one lands on a function with a
+// different signature -- for GetName, on an overload returning std::string by
+// value, whose hidden return-buffer argument makes the call corrupt the stack
+// and crash.
+//
+// This is a property of the interface, not a mistake in this file: the
+// vendor's own shipped SpoutLibrary.h, compiled here and run against the
+// shipped 2.007.017 DLL, crashes on exactly the same call in exactly the same
+// place. Every name Sync does call -- SetSenderName, ReleaseSender, SendImage,
+// IsInitialized, CreateOpenGL, CloseOpenGL, Release -- is declared exactly
+// once, and an overload set only permutes its own slots, so none of them are
+// affected.
+//
+// If you extend this mirror, check the name is declared exactly once first.
 
 // Index of Release() in the mirrored vtable. Named because probe_abi()
 // checks this exact entry to validate the layout assumption above.
@@ -177,7 +203,13 @@ class SpoutLibraryAbi {
                         unsigned int height, unsigned int gl_format,
                         bool invert) = 0;  // slot 005
   virtual bool IsInitialized() = 0;  // slot 006
-  virtual const char* GetName() = 0;  // slot 007
+  // Spacer, NOT callable -- see the overload warning above. GetName is
+  // declared twice in SPOUTLIBRARY (here and at 105), and which of the two
+  // occupies which slot in an MSVC-built DLL does not match the declaration
+  // order a GCC-built mirror assumes. Calling either one crashes; verified
+  // against the shipped 2.007.017 DLL using the vendor's own header, so this
+  // is a property of the interface and not of this mirror.
+  virtual void Slot007_GetName_DO_NOT_CALL() = 0;
   virtual void Slot008_GetWidth() = 0;
   virtual void Slot009_GetHeight() = 0;
   virtual void Slot010_GetFps() = 0;
@@ -631,15 +663,16 @@ struct SpoutFramePublisher::Impl {
         return false;
       }
 
-      if (candidate->IsInitialized()) return false;
-      constexpr const char* kProbeName = "SyncAbiProbe";
-      candidate->SetSenderName(kProbeName);
-      const char* named = candidate->GetName();
-      if (named == nullptr || std::strcmp(named, kProbeName) != 0) return false;
-      // Leave the instance as it was found, so the probe cannot influence the
-      // name a real sender is later opened with.
-      candidate->SetSenderName(nullptr);
-      return true;
+      // A fresh SPOUTLIBRARY instance has no sender, so this must be false.
+      // It is one real call through the vtable returning a known value, which
+      // is what distinguishes a genuine module from something that merely has
+      // a plausible-looking export.
+      //
+      // Deliberately nothing more than this. See the overload warning on the
+      // mirror above: the obvious next check -- SetSenderName() then GetName()
+      // to see the name round-trip -- cannot be written, because GetName is
+      // overloaded and its slot therefore cannot be relied on.
+      return !candidate->IsInitialized();
     };
 
     for (std::size_t index = 0; index < candidate_count; ++index) {

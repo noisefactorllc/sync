@@ -106,6 +106,10 @@ try {
     Where-Object { $_.ParentProcessId -eq $tray.Id })
   if ($helpers.Count -eq 0) { Fail 'managed helper was not found' }
   $helperIds = @($helpers | ForEach-Object { $_.ProcessId })
+  # Hold live Process objects, not just ids: once a process exits, its exit
+  # code is only readable through a handle acquired while it was running.
+  # That code is what separates "asked to stop and did" from "was killed".
+  $helperProcesses = @(Get-Process -Id $helperIds -ErrorAction SilentlyContinue)
 
   # The job object is what guarantees the helper cannot outlive the tray app.
   # Closing the tray app is therefore the assertion, not a cleanup step.
@@ -122,6 +126,20 @@ try {
   }
   $survivors = @(Get-Process -Id $helperIds -ErrorAction SilentlyContinue)
   if ($survivors.Count -ne 0) { Fail 'helper survived app quit' }
+
+  # The helper must have SHUT DOWN, not merely stopped existing. syncd exits
+  # 0 only after an orderly shutdown; the tray app's watchdog terminates it
+  # with exit code 1 when the console control event never arrives. Without
+  # this check a regression in the CTRL_BREAK_EVENT -> SIGBREAK path would
+  # look identical to success here, just two seconds slower -- which is
+  # exactly how that path came to be broken and unnoticed once already.
+  foreach ($helper in $helperProcesses) {
+    if (-not $helper.HasExited) { Fail "helper $($helper.Id) did not exit" }
+    if ($helper.ExitCode -ne 0) {
+      Fail ("helper $($helper.Id) exited with $($helper.ExitCode); it was " +
+            'terminated rather than shut down gracefully')
+    }
+  }
 
   $tray = $null
   Write-Output 'Sync app lifecycle smoke passed'

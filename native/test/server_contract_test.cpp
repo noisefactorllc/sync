@@ -141,6 +141,11 @@ private:
 // scripts/smoke-windows-app.ps1 quits the tray app and asserts the managed
 // helper goes with it, which exercises the real CTRL_BREAK_EVENT ->
 // SIGBREAK shutdown path end to end against the shipped binaries.
+void count_platform_pump(void *context) noexcept {
+  auto *calls = static_cast<std::atomic<std::size_t> *>(context);
+  calls->fetch_add(1, std::memory_order_relaxed);
+}
+
 #if !defined(_WIN32)
 void stop_after_platform_pump(void *context) noexcept {
   auto *calls = static_cast<std::atomic<std::size_t> *>(context);
@@ -257,12 +262,14 @@ SYNC_TEST(server_rejects_half_configured_or_mixed_pairing_authority_modes) {
   SYNC_REQUIRE(!destroyed);
 }
 
-#if !defined(_WIN32)
+// Not guarded to POSIX, unlike its neighbours: a fatal provider failure
+// shuts the server down through begin_fatal_shutdown() -> begin_shutdown()
+// with no signal involved, so the pump here only has to count.
 SYNC_TEST(server_exits_nonzero_once_after_a_fatal_provider_failure) {
   FatalPublisher publisher;
   std::atomic<std::size_t> pump_calls{0};
   auto options = base_options();
-  options.platform_event_pump = stop_after_second_platform_pump;
+  options.platform_event_pump = count_platform_pump;
   options.platform_event_pump_context = &pump_calls;
 
   ScopedStreamCapture capture;
@@ -274,4 +281,3 @@ SYNC_TEST(server_exits_nonzero_once_after_a_fatal_provider_failure) {
   SYNC_REQUIRE(capture.stderr_text() ==
       "syncd: fatal provider failure: metal_command_failed status=5 error=-9\n");
 }
-#endif

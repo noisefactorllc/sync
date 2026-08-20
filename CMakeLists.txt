@@ -485,7 +485,7 @@ elseif(WIN32)
   # ignore that pragma.
   target_link_libraries(sync_companion_process
     PUBLIC sync_companion_model
-    PRIVATE sync_protocol winhttp ws2_32
+    PRIVATE sync_protocol winhttp ws2_32 user32
   )
 
   add_executable(sync_companion_process_tests
@@ -576,6 +576,7 @@ elseif(WIN32)
       -Version ${SYNC_PRODUCT_VERSION}
       -SpoutLibrary ${SYNC_SPOUT_LIBRARY_PATH}
       -DependencySearchPath ${SYNC_WINDOWS_DEPENDENCY_PATH}
+      -BinaryDir $<TARGET_FILE_DIR:syncd>
     DEPENDS
       sync_menu syncd
       LICENSE

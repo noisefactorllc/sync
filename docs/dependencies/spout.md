@@ -60,8 +60,9 @@ extern "C" SPOUTAPI SPOUTHANDLE WINAPI GetSpout(VOID);
 ```
 
 Sync calls seven methods on the returned interface: `SetSenderName`,
-`SendImage`, `ReleaseSender`, `IsInitialized`, `GetName`, `CreateOpenGL`,
-`CloseOpenGL`, and `Release`. Because the real `SpoutLibrary.h` cannot be
+`SendImage`, `ReleaseSender`, `IsInitialized`, `CreateOpenGL`,
+`CloseOpenGL`, and `Release`. Every one of them is declared exactly once
+upstream -- see "Overloaded methods" below for why that matters. Because the real `SpoutLibrary.h` cannot be
 vendored into this repository (see the vendor boundary in `CLAUDE.md`),
 `spout_publisher.cpp` declares a local mirror of the `SPOUTLIBRARY` vtable's
 *shape*: correctly-ordered placeholder slots for every intervening method it
@@ -88,21 +89,48 @@ Two things keep that assumption honest:
    Factor release workflow, so the shipped configuration is controlled
    rather than discovered.
 2. `probe_abi()` reads the vtable entry at index 171 and refuses the module
-   unless it points inside the module's own image, which a 166-slot vtable's
-   would not. It then exercises the early, unconditional slots behaviourally.
-   A module that fails the probe is never called through any late slot,
-   including `Release`.
+   unless it points inside the module's own image, then exercises the early,
+   unconditional slots behaviourally. Treat that as a cheap smoke test rather
+   than a proof: reading one entry past a shorter vtable lands on whatever
+   the linker placed next, which in a DLL full of vtables and RTTI records
+   may well be another in-image pointer. It reliably rejects a module that is
+   not `SPOUTLIBRARY` at all; it does not reliably tell a 166-slot build from
+   a 172-slot one. The pinned DLL is what actually carries that guarantee,
+   which is why the revision and hash above must be filled in before release.
 
 `--spout-library` is therefore a developer escape hatch pointed at a
 known-good build, not a general compatibility mechanism.
 
-### Still to confirm against a real install
+### Verified against a real install
 
-Frame orientation. `SendImage`'s `bInvert` is passed `false`, because Sync's
-protocol guarantees top-down rows and a DXGI texture's row 0 is likewise its
-top row, which is also why `bInvert` defaults to `false` upstream (unlike
-`SendTexture`, which defaults to `true` for OpenGL's bottom-left origin). No
-unit test can confirm orientation; check one real receiver.
+The provider has been run against the official `SpoutLibrary.dll` from Spout
+2.007.017. Confirmed there: the module loads, `probe_abi()` accepts it,
+`CreateOpenGL()` succeeds, `SetSenderName()` and `SendImage()` work through
+the mirrored vtable, and Spout registers the result as a discoverable sender
+with the right name and dimensions (`GetSenderCount` → 1, `64x64`, format 87 =
+`DXGI_FORMAT_B8G8R8A8_UNORM`).
+
+**Frame orientation is correct.** `SendImage`'s `bInvert` is passed `false`,
+and the DXGI shared texture Sync publishes was read back directly (open the
+share handle, copy to a staging texture, map it) with a pattern that is
+asymmetric in both axes. The top-left of what was sent is the top-left of the
+texture, which is what every Spout receiver reads. This matches the upstream
+default for `SendImage` — unlike `SendTexture`, which defaults to `true` for
+OpenGL's bottom-left origin.
+
+### Overloaded methods cannot be called through the mirror
+
+Five names in `SPOUTLIBRARY` are declared twice or more: `GetName`,
+`SpoutMessageBox`, `SpoutMessageBoxIcon`, `GetAdapterInfo`, and `FlipBuffer`.
+For those, the slot computed from declaration order does not agree with the
+slot the MSVC-built DLL uses, and calling one lands on a function with a
+different signature. `GetName` was tried and crashes — including when driven
+from the vendor's own shipped header rather than Sync's mirror, which is how
+we know this is a property of the interface and not a transcription mistake.
+
+Every method Sync calls is declared exactly once, and an overload set only
+permutes its own slots, so none of them are affected. Anything added to the
+mirror later must be checked for this first.
 
 ## License
 

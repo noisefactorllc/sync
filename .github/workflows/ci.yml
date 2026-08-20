@@ -164,10 +164,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
           choco install --no-progress --yes innosetup imagemagick.tool
           if ($LASTEXITCODE -ne 0) { throw "choco install failed" }
-          # Inno Setup and ImageMagick land outside the default PATH for the
-          # current step, so they are appended for every step that follows.
-          "C:\Program Files (x86)\Inno Setup 6" |
-            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # Neither tool lands on PATH for the steps that follow, and both are
+          # hard requirements of the packaging target -- a missing `magick`
+          # only surfaces much later, as a confusing "the build did not
+          # produce Sync.ico". Resolve both now and fail here if either is
+          # genuinely absent.
+          $innoDir = "C:\Program Files (x86)\Inno Setup 6"
+          if (-not (Test-Path (Join-Path $innoDir "ISCC.exe"))) {
+            throw "Inno Setup did not install to $innoDir"
+          }
+          $magick = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\imagemagick.tool" `
+            -Filter magick.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($null -eq $magick) { throw "magick.exe not found after choco install" }
+          $innoDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $magick.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Spout is BSD-2-Clause and therefore redistributable, so the packaged
       # app carries a pinned build of SpoutLibrary.dll. The release workflow

@@ -20,13 +20,35 @@
 // it is given (via open_secure_directory, or the platform's equivalent
 // walk) rather than accepting an already-open directory handle from a
 // sibling call. This mirrors what acquire_store_lock already did before
-// this refactor -- it has always re-resolved its directory rather than
-// reusing a handle threaded in from PairingStore::open() -- so every entry
-// point below now follows that same, already-proven-safe pattern. The
-// extra directory open this costs on some call paths is the same walk
-// acquire_store_lock already performs on nearly every PairingStore
-// operation; it buys a uniform, easy-to-review seam that is trivial to keep
-// identical in shape across two platform implementations.
+// this refactor, and buys a uniform seam that is easy to keep identical in
+// shape across two platform implementations.
+//
+// HOW FAR THAT VALIDATION ACTUALLY GOES, per platform:
+//
+// POSIX threads one live directory fd through the whole walk and performs
+// every subsequent operation with openat/renameat/unlinkat *relative to it*.
+// The thing validated and the thing used are therefore the same object, and
+// swapping a component for a symlink mid-operation cannot redirect anything.
+//
+// Windows has no documented equivalent of an fd-relative open (the nearest
+// is NtCreateFile with OBJECT_ATTRIBUTES::RootDirectory, which is not a
+// public Win32 API), so the port validates by walking the path and then acts
+// on it by absolute path. Two things narrow the resulting gap rather than
+// closing it: every directory handle is opened WITHOUT FILE_SHARE_DELETE,
+// and each is now HELD for the duration of the operation instead of being
+// closed once validated. A directory cannot be renamed or deleted while such
+// a handle is open, and swapping a directory for a junction requires exactly
+// that -- so the store directory itself cannot be swapped out from under an
+// in-flight operation.
+//
+// What remains, stated plainly: ancestors ABOVE the store directory are
+// validated during the walk but not pinned afterwards, so a same-user
+// attacker able to write to one of them could in principle swap it between
+// the walk and the operation. In the shipped layout those ancestors are
+// %LOCALAPPDATA% and above, and any attacker who can write there can already
+// read and write the store directly -- so this is defence in depth that
+// Windows cannot fully provide, not a hole in the threat model the store is
+// built for. Closing it completely needs NtCreateFile-based relative opens.
 
 #include <sync/pairing_store.hpp>
 

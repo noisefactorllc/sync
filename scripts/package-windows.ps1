@@ -35,7 +35,13 @@ param(
   # Extra directory searched for runtime DLLs (the vcpkg or MSYS bin
   # directory holding libuv and OpenSSL). Mirrors package-macos.sh's
   # dylib search path.
-  [string]$DependencySearchPath = ''
+  [string]$DependencySearchPath = '',
+
+  # Directory the executables were actually written to. Single-config
+  # generators (Ninja) put them at the build root; multi-config generators
+  # (Visual Studio) put them in a per-configuration subdirectory, so CMake
+  # passes $<TARGET_FILE_DIR:syncd> here rather than letting this guess.
+  [string]$BinaryDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,8 +113,10 @@ if ($Mode -eq 'zip') {
 
 $cmake = Resolve-RequiredCommand 'cmake' 'install CMake 3.21 or newer'
 
-$trayExe = Join-Path $BuildDir 'Sync.exe'
-$helperExe = Join-Path $BuildDir 'syncd.exe'
+if ([string]::IsNullOrWhiteSpace($BinaryDir)) { $BinaryDir = $BuildDir }
+$BinaryDir = Resolve-AbsoluteDirectory $BinaryDir 'binary directory'
+$trayExe = Join-Path $BinaryDir 'Sync.exe'
+$helperExe = Join-Path $BinaryDir 'syncd.exe'
 foreach ($required in @($trayExe, $helperExe)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
     Fail "build sync_menu and syncd before packaging: $required is missing"

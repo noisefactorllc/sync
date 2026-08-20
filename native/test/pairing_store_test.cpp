@@ -597,6 +597,45 @@ SYNC_TEST(pairing_store_atomic_pre_rename_failure_preserves_previous_file_and_cl
   SYNC_REQUIRE(store.authenticate(deck, first.token.view()).authenticated);
 }
 
+// The commit reached the filesystem but its durability could not be
+// confirmed. The record must still be readable by a process that opens the
+// store fresh -- syncd reports this as exit code 3, "committed, durability
+// uncertain", and that claim is only honest if the data is genuinely there.
+SYNC_TEST(pairing_store_reports_after_rename_issue_as_committed_but_durability_uncertain) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto store = open_store(path, PairingStoreFailPoint::AfterRenameBeforeDirectorySync);
+  const auto deck = origin("https://deck.example");
+  const auto issued = store.issue(deck);
+  SYNC_REQUIRE(issued.error == PairingStoreError::Io);
+  SYNC_REQUIRE(issued.commit == PairingCommitState::CommittedDurabilityUncertain);
+  SYNC_REQUIRE(all_lowercase_hex(issued.token.view()));
+  SYNC_REQUIRE(store.authenticate(deck, issued.token.view()).authenticated);
+
+  auto fresh = open_store(path);
+  SYNC_REQUIRE(fresh.authenticate(deck, issued.token.view()).authenticated);
+}
+
+// The same for a revocation: an uncertain-durability revoke must still have
+// actually revoked, or a token the operator believes is dead stays live.
+SYNC_TEST(pairing_store_reports_after_rename_revoke_as_visible_but_durability_uncertain) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto initial = open_store(path);
+  const auto deck = origin("https://deck.example");
+  const auto token = initial.issue(deck).token;
+
+  auto store = open_store(path, PairingStoreFailPoint::AfterRenameBeforeDirectorySync);
+  const auto revoked = store.revoke(deck);
+  SYNC_REQUIRE(revoked.error == PairingStoreError::Io);
+  SYNC_REQUIRE(revoked.commit == PairingCommitState::CommittedDurabilityUncertain);
+  SYNC_REQUIRE(revoked.revoked);
+  SYNC_REQUIRE(!store.authenticate(deck, token.view()).authenticated);
+
+  auto fresh = open_store(path);
+  SYNC_REQUIRE(!fresh.authenticate(deck, token.view()).authenticated);
+}
+
 SYNC_TEST(pairing_store_canceled_precommit_issue_leaves_empty_store_unchanged) {
   TempDirectory temporary;
   const auto state = temporary.path() / "state";

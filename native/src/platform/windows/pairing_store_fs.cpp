@@ -431,7 +431,13 @@ PairingStoreError acquire_store_lock(std::string_view directory, ScopedHandle& l
   ScopedHandle dir;
   const PairingStoreError directory_error = open_secure_directory(directory, dir, false);
   if (directory_error != PairingStoreError::None) return directory_error;
-  dir.close();  // only needed to validate/refuse a reparse-pointed ancestor.
+  // The validated handle is deliberately HELD for the rest of this function
+  // rather than closed here. It is opened without FILE_SHARE_DELETE, so while
+  // it is alive this directory cannot be renamed or deleted -- and swapping a
+  // directory for a junction requires exactly that. Closing it before doing
+  // the real work, as this used to, reopened the window between validating a
+  // path and using it. See the TOCTOU note in pairing_store_fs.hpp for what
+  // this does and does not cover.
 
   ScopedSid user;
   if (!get_current_user_sid(user)) return PairingStoreError::Io;
@@ -493,7 +499,7 @@ LoadResult load_secure_regular_file(std::string_view directory, std::string_view
     result.error = directory_error;
     return result;
   }
-  dir.close();
+  // Handle held, not closed -- see the first such site above.
 
   ScopedSid user;
   if (!get_current_user_sid(user)) {
@@ -568,7 +574,7 @@ PairingStoreError write_new_secure_regular_file(std::string_view directory,
   ScopedHandle dir;
   const PairingStoreError directory_error = open_secure_directory(directory, dir, false);
   if (directory_error != PairingStoreError::None) return directory_error;
-  dir.close();
+  // Handle held, not closed -- see the first such site above.
 
   ScopedSid user;
   if (!get_current_user_sid(user)) return PairingStoreError::Io;
@@ -606,7 +612,7 @@ PairingStoreError write_new_secure_regular_file(std::string_view directory,
 void remove_file(std::string_view directory, std::string_view filename) noexcept {
   ScopedHandle dir;
   if (open_secure_directory(directory, dir, false) != PairingStoreError::None) return;
-  dir.close();
+  // Handle held, not closed -- see the first such site above.
   WidePath wide_path{};
   if (!build_extended_path(directory, filename, wide_path)) return;
   ::DeleteFileW(wide_path.c_str());
@@ -623,7 +629,7 @@ CommitResult rename_into_place(std::string_view directory, std::string_view temp
     result.error = directory_error;
     return result;
   }
-  dir.close();
+  // Handle held, not closed -- see the first such site above.
 
   WidePath temporary_path{};
   WidePath final_path{};

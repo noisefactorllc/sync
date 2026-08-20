@@ -2,8 +2,19 @@
 
 // This is the platform-specific half of PairingStore that used to live
 // directly in native/src/pairing_store.cpp before the Windows port required
-// splitting it out. Every function here, and its exact behaviour, is moved
-// verbatim from that file -- nothing about POSIX semantics changes.
+// splitting it out. Each function here is moved verbatim from that file:
+// same syscalls, same flags, same order, same error mapping.
+//
+// One thing above this seam did change, and it is worth stating rather
+// than leaving to be discovered: PairingStore::persist() used to open the
+// store directory once and use that single fd for the temp-file create,
+// write, fsync, rename, and cleanup. It now calls three separate seam
+// functions, each of which resolves the directory itself. The individual
+// operations are still fd-anchored and so still cannot be redirected by a
+// symlink swap; what is no longer guaranteed is that all of them act on
+// the same directory *object* if it is replaced between calls. Against the
+// owner-only directory this store requires, an attacker able to do that
+// can already read and write the store directly.
 
 #include <array>
 #include <cerrno>

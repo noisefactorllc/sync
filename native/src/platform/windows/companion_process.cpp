@@ -39,6 +39,22 @@
 namespace noisefactor::sync::companion {
 namespace {
 
+// GenerateConsoleCtrlEvent can only be SENT by a process that owns a console
+// and only RECEIVED by one that has a console. Sync.exe is built for the
+// WIN32 subsystem, so it starts with neither -- which silently made the
+// whole graceful-shutdown path unreachable: the call failed with
+// ERROR_INVALID_HANDLE and every stop fell through to TerminateProcess after
+// the full termination timeout. Allocating a console and hiding its window
+// gives both sides what the API needs while showing the user nothing.
+// Idempotent, and a no-op when a console already exists.
+void ensure_console_for_control_events() noexcept {
+  if (::GetConsoleWindow() != nullptr) return;
+  if (::AllocConsole() == 0) return;
+  if (HWND console = ::GetConsoleWindow(); console != nullptr) {
+    ::ShowWindow(console, SW_HIDE);
+  }
+}
+
 constexpr std::size_t kMaximumHealthBodyBytes = 65'536;
 constexpr std::size_t kManagementOutputLimit = 65'536;
 
@@ -1027,10 +1043,17 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   // CREATE_NEW_PROCESS_GROUP: lets terminate() target this child alone
   // with a console control event later, instead of broadcasting to every
   // process attached to our console (which would include Sync.exe itself).
-  // CREATE_NO_WINDOW: syncd is a headless helper; it must never flash a
-  // console window when launched from the tray app.
-  const DWORD creation_flags =
-      CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+  // Must precede CreateProcessW: the child inherits this console, and
+  // GenerateConsoleCtrlEvent needs the caller to have one too.
+  ensure_console_for_control_events();
+
+  // Deliberately NOT CREATE_NO_WINDOW. That flag leaves the child with no
+  // console at all, and a process without one can never receive a console
+  // control event -- which would make terminate()'s graceful path dead code
+  // and leave TerminateProcess as the only way to stop the helper. The child
+  // inherits the hidden console allocated just above instead, so nothing is
+  // displayed to the user either way.
+  const DWORD creation_flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
   const BOOL created = ::CreateProcessW(
       impl_->options.helper_path.c_str(), command_line.data(), nullptr,
       nullptr, /*bInheritHandles=*/TRUE, creation_flags, nullptr, nullptr,
@@ -1178,7 +1201,13 @@ void CompanionProcess::terminate(Completion completion) {
   // process sharing our console, which would include Sync.exe itself)
   // because the child was created with CREATE_NEW_PROCESS_GROUP, making its
   // own PID double as its process group id.
-  ::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, state->pid);
+  //
+  // Requires BOTH processes to have a console, which is why start() allocates
+  // a hidden one and does not pass CREATE_NO_WINDOW. The result is
+  // deliberately not treated as an error: the watchdog below bounds the
+  // shutdown either way, so a failure here costs a clean exit and the
+  // termination timeout, never correctness.
+  (void)::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, state->pid);
 
   Impl* impl = impl_.get();
   impl->begin_operation();

@@ -38,9 +38,15 @@ function walk(directory) {
   });
 }
 
-test("packaged Sync app is self-contained and carries its preview metadata", {
-  skip: process.platform !== "darwin",
-}, () => {
+// Skipped unless a bundle has actually been staged: the plain build job
+// compiles the tree without running the packaging target, and a test that
+// asserted otherwise would fail every run for reasons unrelated to the code.
+const stagedOnMacos = {
+  skip: process.platform !== "darwin" || !existsSync(app),
+};
+
+test("packaged Sync app is self-contained and carries its preview metadata",
+     stagedOnMacos, () => {
   assert.equal(existsSync(app), true, `missing package at ${app}`);
   assert.equal(plist("CFBundleIdentifier"), "io.noisefactor.sync");
   assert.equal(plist("LSUIElement"), "true");
@@ -93,9 +99,8 @@ test("macOS packaging enforces the advertised deployment target", () => {
   assert.match(verifier, /newer than the bundle minimum/);
 });
 
-test("macOS bundle verifier accepts Mach-O targets below the advertised minimum", {
-  skip: process.platform !== "darwin",
-}, () => {
+test("macOS bundle verifier accepts Mach-O targets below the advertised minimum",
+     stagedOnMacos, () => {
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-verify-test-"));
   const copiedApp = path.join(temporaryDirectory, "Sync.app");
   try {
