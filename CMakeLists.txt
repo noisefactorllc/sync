@@ -632,3 +632,17 @@ elseif(WIN32)
 else()
   target_link_libraries(syncd PRIVATE sync_protocol)
 endif()
+
+# Every test gets a deadline, applied here rather than left to whoever invokes
+# ctest. A hung test with no timeout consumes the whole CI job budget and then
+# reports only that the job timed out -- no test name, and no log, because the
+# logs of a cancelled job are never published. That is the worst possible
+# failure mode: the one case where the signal is most needed is the one where
+# there is none. With a deadline the run reports "test X timed out" and keeps
+# going. The bound is deliberately loose; the slowest test here runs in about
+# fifteen seconds, so this catches hangs without ever failing slow-but-working
+# tests on a loaded runner.
+get_property(SYNC_ALL_TESTS DIRECTORY PROPERTY TESTS)
+if(SYNC_ALL_TESTS)
+  set_tests_properties(${SYNC_ALL_TESTS} PROPERTIES TIMEOUT 300)
+endif()
