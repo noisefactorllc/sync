@@ -501,13 +501,29 @@ elseif(WIN32)
     PRIVATE sync_protocol winhttp ws2_32 user32
   )
 
+  # A controllable stand-in for syncd.exe, so the lifecycle tests can drive
+  # behaviour the real helper cannot be asked for on demand -- ignoring a
+  # console control event, or exiting instantly with a chosen status --
+  # without binding TCP 53979 or touching the real pairing store. It is a
+  # test fixture and is never installed or packaged.
+  add_executable(sync_test_helper_process
+    native/test/windows/test_helper_process.cpp
+  )
+  target_compile_features(sync_test_helper_process PRIVATE cxx_std_20)
+
   add_executable(sync_companion_process_tests
     native/test/windows/companion_process_test.cpp
+    native/test/windows/companion_process_lifecycle_test.cpp
     native/test/test_main.cpp
   )
   target_compile_features(sync_companion_process_tests PRIVATE cxx_std_20)
   target_include_directories(sync_companion_process_tests PRIVATE native/test)
-  target_link_libraries(sync_companion_process_tests PRIVATE sync_companion_process)
+  # ws2_32 is linked PRIVATE into sync_companion_process, so it does not
+  # propagate; the lifecycle tests open their own loopback listener.
+  target_link_libraries(sync_companion_process_tests PRIVATE sync_companion_process ws2_32)
+  # The lifecycle tests launch it by path from their own directory, so it
+  # has to exist before they run -- ctest does not build dependencies.
+  add_dependencies(sync_companion_process_tests sync_test_helper_process)
   add_test(NAME sync_companion_process_tests COMMAND sync_companion_process_tests)
 
   # The executable's icon is rasterised from the same artwork the macOS bundle

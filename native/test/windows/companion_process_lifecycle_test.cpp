@@ -1,0 +1,597 @@
+// Lifecycle and concurrency tests for CompanionProcess.
+//
+// companion_process_test.cpp covers the pure functions (parsing, path
+// resolution, revocation classification). This file covers the part that is
+// not pure: launching a child, confining it to a job object, pumping its
+// stderr, stopping it gracefully, killing it when it refuses, and -- the
+// guarantee the whole class rests on -- never letting a background thread
+// touch the object after its destructor returns.
+//
+// The child is native/test/windows/test_helper_process.cpp, not the real
+// syncd: see the comment at the top of that file for why.
+
+#include "../test_harness.hpp"
+
+#include "../../src/platform/windows/companion_process.hpp"
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using noisefactor::sync::companion::CompanionProcess;
+using noisefactor::sync::companion::CompanionProcessOptions;
+using noisefactor::sync::companion::HealthSnapshot;
+
+// Long enough that a loaded CI runner does not fail a test that would pass,
+// short enough that a genuine hang is reported as a failure rather than
+// sitting there until ctest's own timeout fires.
+constexpr int kGenerousWaitMs = 15'000;
+
+// The directory this test executable lives in, which is also where the
+// build puts sync_test_helper_process.exe.
+std::wstring executable_directory() {
+  std::wstring path(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD written = ::GetModuleFileNameW(
+        nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (written == 0) return {};
+    if (written < path.size()) {
+      path.resize(written);
+      break;
+    }
+    path.resize(path.size() * 2);
+  }
+  const std::size_t slash = path.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return {};
+  return path.substr(0, slash + 1);
+}
+
+std::wstring fake_helper_path() {
+  return executable_directory() + L"sync_test_helper_process.exe";
+}
+
+void set_helper_mode(const wchar_t* mode) {
+  ::SetEnvironmentVariableW(L"SYNC_TEST_HELPER_MODE", mode);
+}
+
+// Polls rather than sleeping a fixed interval so a fast machine finishes
+// fast and a slow one still gets its full budget. Returns false on timeout,
+// which every caller turns into a named failure.
+template <typename Predicate>
+bool wait_for(Predicate predicate, int timeout_ms = kGenerousWaitMs) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+
+// Callbacks run on whichever background thread produced them (these tests
+// configure no dispatch_to_owner, so Impl::dispatch runs them inline), which
+// is why every observation the tests make goes through one of these.
+struct Recorder {
+  std::mutex mutex;
+  std::atomic<int> exits{0};
+  std::atomic<int> last_exit_status{-1};
+  std::string stderr_text;  // guarded by mutex
+
+  CompanionProcess::StderrCallback stderr_callback() {
+    return [this](std::string_view bytes) {
+      std::lock_guard lock(mutex);
+      stderr_text.append(bytes);
+    };
+  }
+  CompanionProcess::ExitCallback exit_callback() {
+    return [this](int status) {
+      last_exit_status.store(status);
+      exits.fetch_add(1);
+    };
+  }
+  std::string stderr_snapshot() {
+    std::lock_guard lock(mutex);
+    return stderr_text;
+  }
+};
+
+// A listening socket on an ephemeral port, so no test has to guess a port
+// number that might already be in use on the machine running it.
+class LoopbackListener {
+ public:
+  LoopbackListener() {
+    WSADATA data{};
+    started_ = ::WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    if (!started_) return;
+    socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (socket_ == INVALID_SOCKET) return;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = 0;  // let the kernel choose
+    address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    if (::bind(socket_, reinterpret_cast<sockaddr*>(&address),
+               sizeof(address)) != 0) {
+      return;
+    }
+    if (::listen(socket_, SOMAXCONN) != 0) return;
+    sockaddr_in bound{};
+    int length = sizeof(bound);
+    if (::getsockname(socket_, reinterpret_cast<sockaddr*>(&bound), &length) !=
+        0) {
+      return;
+    }
+    port_ = ::ntohs(bound.sin_port);
+  }
+  ~LoopbackListener() {
+    close();
+    if (started_) ::WSACleanup();
+  }
+  LoopbackListener(const LoopbackListener&) = delete;
+  LoopbackListener& operator=(const LoopbackListener&) = delete;
+
+  // Frees the port while keeping the number, so a caller can ask for a port
+  // that is known to have been free a moment ago and is now unoccupied.
+  void close() {
+    if (socket_ != INVALID_SOCKET) {
+      ::closesocket(socket_);
+      socket_ = INVALID_SOCKET;
+    }
+  }
+  [[nodiscard]] std::uint16_t port() const { return port_; }
+
+ private:
+  bool started_ = false;
+  SOCKET socket_ = INVALID_SOCKET;
+  std::uint16_t port_ = 0;
+};
+
+CompanionProcessOptions fake_helper_options() {
+  CompanionProcessOptions options;
+  options.helper_path = fake_helper_path();
+  // Short enough to keep the hard-kill test quick, long enough that a
+  // helper which does honour the console event wins the race on a loaded
+  // machine rather than being killed and reporting a false negative.
+  options.termination_timeout_ms = 1'500;
+  options.health_timeout_ms = 400;
+  return options;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------
+// Operations with no helper running
+// ---------------------------------------------------------------------
+
+SYNC_TEST(windows_terminate_without_a_helper_still_completes_exactly_once) {
+  std::atomic<int> completions{0};
+  {
+    CompanionProcess companion(fake_helper_options());
+    companion.terminate([&completions] { completions.fetch_add(1); });
+    SYNC_REQUIRE(wait_for([&] { return completions.load() == 1; }));
+  }
+  // Nothing may fire a second time during destruction.
+  SYNC_REQUIRE(completions.load() == 1);
+}
+
+SYNC_TEST(windows_probe_reports_unavailable_when_nothing_is_listening) {
+  LoopbackListener listener;
+  SYNC_REQUIRE(listener.port() != 0);
+  listener.close();  // the port number is now known-free
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.port = listener.port();
+
+  std::atomic<bool> done{false};
+  bool had_health = true;
+  std::string message;
+  {
+    CompanionProcess companion(std::move(options));
+    companion.probe(
+        [&](std::optional<HealthSnapshot> health, std::string reason) {
+          had_health = health.has_value();
+          message = std::move(reason);
+          done.store(true);
+        });
+    SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+  }
+  SYNC_REQUIRE(!had_health);
+  SYNC_REQUIRE(message == "Sync status was unavailable.");
+}
+
+SYNC_TEST(windows_probe_reports_an_occupied_port_as_incompatible) {
+  // A socket that accepts connections but never speaks HTTP is exactly the
+  // "something else already holds 53979" case the tray has to distinguish
+  // from "syncd is not running", because the remedies differ.
+  LoopbackListener listener;
+  SYNC_REQUIRE(listener.port() != 0);
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.port = listener.port();
+
+  std::atomic<bool> done{false};
+  std::optional<HealthSnapshot> observed;
+  std::string message;
+  {
+    CompanionProcess companion(std::move(options));
+    companion.probe(
+        [&](std::optional<HealthSnapshot> health, std::string reason) {
+          observed = std::move(health);
+          message = std::move(reason);
+          done.store(true);
+        });
+    SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+  }
+  SYNC_REQUIRE(observed.has_value());
+  SYNC_REQUIRE(observed->reachable);
+  SYNC_REQUIRE(!observed->compatible);
+  SYNC_REQUIRE(message.find("is occupied by an incompatible service") !=
+               std::string::npos);
+}
+
+SYNC_TEST(windows_start_fails_without_launching_when_the_helper_is_missing) {
+  CompanionProcessOptions options = fake_helper_options();
+  options.helper_path = executable_directory() + L"no-such-helper-here.exe";
+
+  Recorder recorder;
+  CompanionProcess companion(std::move(options));
+  std::string error;
+  const bool started = companion.start(recorder.stderr_callback(),
+                                       recorder.exit_callback(), error);
+  SYNC_REQUIRE(!started);
+  SYNC_REQUIRE(!error.empty());
+  SYNC_REQUIRE(!companion.owned_pid().has_value());
+  // A failed start must not report an exit for a process that never ran.
+  SYNC_REQUIRE(recorder.exits.load() == 0);
+}
+
+// ---------------------------------------------------------------------
+// Launching, supervising, and stopping a real child process
+// ---------------------------------------------------------------------
+
+SYNC_TEST(windows_start_launches_the_helper_and_pumps_its_stderr) {
+  set_helper_mode(L"chatty");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  SYNC_REQUIRE(error.empty());
+  SYNC_REQUIRE(companion.owned_pid().has_value());
+
+  // Both writes must arrive, which is the part a single-ReadFile
+  // implementation would get wrong.
+  SYNC_REQUIRE(wait_for([&] {
+    const std::string text = recorder.stderr_snapshot();
+    return text.find("first line from the helper") != std::string::npos &&
+           text.find("second line from the helper") != std::string::npos;
+  }));
+
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return stopped.load(); }));
+}
+
+SYNC_TEST(windows_starting_twice_is_refused_while_the_helper_runs) {
+  set_helper_mode(L"graceful");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  const std::optional<int> first_pid = companion.owned_pid();
+  SYNC_REQUIRE(first_pid.has_value());
+
+  std::string second_error;
+  SYNC_REQUIRE(!companion.start(recorder.stderr_callback(),
+                                recorder.exit_callback(), second_error));
+  SYNC_REQUIRE(!second_error.empty());
+  // The refusal must leave the first helper untouched, not replace it.
+  SYNC_REQUIRE(companion.owned_pid() == first_pid);
+
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return stopped.load(); }));
+}
+
+SYNC_TEST(windows_terminate_stops_a_cooperative_helper_gracefully) {
+  set_helper_mode(L"graceful");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  // Wait until the helper has installed its console control handler --
+  // announced by the line it writes -- or the event could be delivered
+  // before there is anything to receive it.
+  SYNC_REQUIRE(wait_for([&] {
+    return recorder.stderr_snapshot().find("helper ready") != std::string::npos;
+  }));
+
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return stopped.load(); }));
+  SYNC_REQUIRE(wait_for([&] { return recorder.exits.load() == 1; }));
+  // Exit status 0 is the whole point: it distinguishes a helper that was
+  // asked to stop and did from one that had to be killed. This is the same
+  // property scripts/smoke-windows-app.ps1 asserts end to end, proven here
+  // against the code path rather than the packaged app.
+  SYNC_REQUIRE(recorder.last_exit_status.load() == 0);
+  SYNC_REQUIRE(!companion.owned_pid().has_value());
+}
+
+SYNC_TEST(windows_terminate_kills_a_helper_that_ignores_the_console_event) {
+  set_helper_mode(L"stubborn");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  SYNC_REQUIRE(wait_for([&] {
+    return recorder.stderr_snapshot().find("stubborn helper ready") !=
+           std::string::npos;
+  }));
+
+  const auto requested = std::chrono::steady_clock::now();
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return stopped.load(); }));
+  const auto elapsed = std::chrono::steady_clock::now() - requested;
+
+  SYNC_REQUIRE(wait_for([&] { return recorder.exits.load() == 1; }));
+  // Killed, not stopped: TerminateProcess(process, 1) is what ran.
+  SYNC_REQUIRE(recorder.last_exit_status.load() == 1);
+  // Bounded by termination_timeout_ms rather than open-ended. The upper
+  // bound is loose because it only has to catch "waits forever".
+  SYNC_REQUIRE(elapsed < std::chrono::seconds(10));
+  SYNC_REQUIRE(!companion.owned_pid().has_value());
+}
+
+SYNC_TEST(windows_terminate_is_idempotent_and_runs_every_completion) {
+  set_helper_mode(L"graceful");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  SYNC_REQUIRE(wait_for([&] {
+    return recorder.stderr_snapshot().find("helper ready") != std::string::npos;
+  }));
+
+  // Several terminate() calls racing from different threads is what a user
+  // clicking Quit twice, plus the window closing, actually produces. Every
+  // completion must run exactly once and only one shutdown may be started.
+  constexpr int kRequests = 8;
+  std::atomic<int> completions{0};
+  std::vector<std::thread> threads;
+  threads.reserve(kRequests);
+  for (int i = 0; i < kRequests; ++i) {
+    threads.emplace_back([&companion, &completions] {
+      companion.terminate([&completions] { completions.fetch_add(1); });
+    });
+  }
+  for (auto& thread : threads) thread.join();
+
+  SYNC_REQUIRE(wait_for([&] { return completions.load() == kRequests; }));
+  SYNC_REQUIRE(wait_for([&] { return recorder.exits.load() == 1; }));
+  SYNC_REQUIRE(recorder.last_exit_status.load() == 0);
+
+  // A terminate() after the helper is already gone still completes, and
+  // still does not produce a second exit notification.
+  std::atomic<bool> late{false};
+  companion.terminate([&late] { late.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return late.load(); }));
+  SYNC_REQUIRE(recorder.exits.load() == 1);
+  SYNC_REQUIRE(completions.load() == kRequests);
+}
+
+SYNC_TEST(windows_a_helper_that_exits_on_its_own_is_reported_and_disowned) {
+  set_helper_mode(L"instant:7");
+  Recorder recorder;
+  CompanionProcess companion(fake_helper_options());
+
+  std::string error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), error));
+  SYNC_REQUIRE(wait_for([&] { return recorder.exits.load() == 1; }));
+  SYNC_REQUIRE(recorder.last_exit_status.load() == 7);
+  // Ownership must be released, or a restart would be refused forever.
+  SYNC_REQUIRE(wait_for([&] { return !companion.owned_pid().has_value(); }));
+
+  // And a restart must therefore succeed.
+  set_helper_mode(L"graceful");
+  std::string restart_error;
+  SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                               recorder.exit_callback(), restart_error));
+  SYNC_REQUIRE(companion.owned_pid().has_value());
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true); });
+  SYNC_REQUIRE(wait_for([&] { return stopped.load(); }));
+}
+
+// ---------------------------------------------------------------------
+// The supervision and lifetime guarantees
+// ---------------------------------------------------------------------
+
+SYNC_TEST(windows_destroying_the_companion_kills_the_helper) {
+  // The Windows analogue of the macOS supervision guarantee: a helper must
+  // never outlive its supervisor, because it would keep holding TCP 53979
+  // with nothing left to manage it. Here the kill comes from closing the
+  // job object's last handle, so it holds even for a helper that ignores
+  // console control events entirely.
+  set_helper_mode(L"stubborn");
+  Recorder recorder;
+
+  HANDLE helper = nullptr;
+  {
+    CompanionProcess companion(fake_helper_options());
+    std::string error;
+    SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                                 recorder.exit_callback(), error));
+    const std::optional<int> pid = companion.owned_pid();
+    SYNC_REQUIRE(pid.has_value());
+    // Opened while the helper is definitely alive: holding this handle also
+    // keeps the pid from being recycled under us, so the wait below cannot
+    // accidentally observe some unrelated process.
+    helper = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                           FALSE, static_cast<DWORD>(*pid));
+    SYNC_REQUIRE(helper != nullptr);
+    SYNC_REQUIRE(::WaitForSingleObject(helper, 0) == WAIT_TIMEOUT);
+  }  // ~CompanionProcess
+
+  // Already dead by the time the destructor returned -- not merely dying.
+  const DWORD wait = ::WaitForSingleObject(helper, 0);
+  DWORD status = 0;
+  const BOOL read_status = ::GetExitCodeProcess(helper, &status);
+  ::CloseHandle(helper);
+  SYNC_REQUIRE(wait == WAIT_OBJECT_0);
+  SYNC_REQUIRE(read_status != FALSE);
+  SYNC_REQUIRE(status != STILL_ACTIVE);
+}
+
+SYNC_TEST(windows_the_destructor_waits_for_every_outstanding_probe) {
+  // Every probe runs on its own detached thread and touches Impl when it
+  // finishes. If the destructor returned before they did, each one would be
+  // a use-after-free. Point them at a dead port so they are slow enough
+  // (health_timeout_ms plus the reachability check) to still be in flight
+  // when the destructor runs.
+  LoopbackListener listener;
+  SYNC_REQUIRE(listener.port() != 0);
+  listener.close();
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.port = listener.port();
+
+  constexpr int kProbes = 16;
+  std::atomic<int> completions{0};
+  {
+    CompanionProcess companion(std::move(options));
+    for (int i = 0; i < kProbes; ++i) {
+      companion.probe(
+          [&completions](std::optional<HealthSnapshot>, std::string) {
+            completions.fetch_add(1);
+          });
+    }
+  }  // ~CompanionProcess must not return until all sixteen have finished
+  SYNC_REQUIRE(completions.load() == kProbes);
+}
+
+SYNC_TEST(windows_the_destructor_drains_work_queued_from_many_threads) {
+  LoopbackListener listener;
+  SYNC_REQUIRE(listener.port() != 0);
+  listener.close();
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.port = listener.port();
+
+  std::atomic<int> completions{0};
+  std::atomic<int> terminations{0};
+  constexpr int kThreads = 8;
+  {
+    CompanionProcess companion(std::move(options));
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+      threads.emplace_back([&] {
+        companion.probe(
+            [&completions](std::optional<HealthSnapshot>, std::string) {
+              completions.fetch_add(1);
+            });
+        companion.terminate([&terminations] { terminations.fetch_add(1); });
+      });
+    }
+    for (auto& thread : threads) thread.join();
+  }
+  SYNC_REQUIRE(completions.load() == kThreads);
+  SYNC_REQUIRE(terminations.load() == kThreads);
+}
+
+SYNC_TEST(windows_a_queueing_dispatcher_is_honoured_and_may_fall_back_inline) {
+  // The documented contract for dispatch_to_owner: callbacks are marshalled
+  // to the owner thread, and destruction is only safe if the dispatcher can
+  // still run them -- app_main.cpp satisfies this by invoking them inline
+  // once its message loop is gone. This test is that arrangement in
+  // miniature, and it hangs if the inline fallback is ever removed.
+  LoopbackListener listener;
+  SYNC_REQUIRE(listener.port() != 0);
+  listener.close();
+
+  struct Dispatcher {
+    std::mutex mutex;
+    std::deque<std::function<void()>> queue;
+    bool inline_mode = false;
+
+    void post(std::function<void()> callback) {
+      {
+        std::lock_guard lock(mutex);
+        if (!inline_mode) {
+          queue.push_back(std::move(callback));
+          return;
+        }
+      }
+      callback();  // outside the lock, exactly as app_main's fallback does
+    }
+    int drain() {
+      std::deque<std::function<void()>> pending;
+      {
+        std::lock_guard lock(mutex);
+        pending.swap(queue);
+      }
+      for (auto& callback : pending) callback();
+      return static_cast<int>(pending.size());
+    }
+    void go_inline() {
+      std::lock_guard lock(mutex);
+      inline_mode = true;
+    }
+  };
+
+  Dispatcher dispatcher;
+  CompanionProcessOptions options = fake_helper_options();
+  options.port = listener.port();
+  options.dispatch_to_owner = [&dispatcher](std::function<void()> callback) {
+    dispatcher.post(std::move(callback));
+  };
+
+  std::atomic<int> completions{0};
+  {
+    CompanionProcess companion(std::move(options));
+    companion.probe([&completions](std::optional<HealthSnapshot>, std::string) {
+      completions.fetch_add(1);
+    });
+    // Nothing has run yet: the callback is sitting in the owner's queue.
+    SYNC_REQUIRE(wait_for([&] {
+      std::lock_guard lock(dispatcher.mutex);
+      return !dispatcher.queue.empty();
+    }));
+    SYNC_REQUIRE(completions.load() == 0);
+    SYNC_REQUIRE(dispatcher.drain() == 1);
+    SYNC_REQUIRE(completions.load() == 1);
+
+    // Queue one more and then tear down without draining it by hand, the
+    // way a real shutdown does.
+    companion.probe([&completions](std::optional<HealthSnapshot>, std::string) {
+      completions.fetch_add(1);
+    });
+    dispatcher.go_inline();
+    dispatcher.drain();  // whatever landed before the switch
+  }
+  SYNC_REQUIRE(completions.load() == 2);
+}
