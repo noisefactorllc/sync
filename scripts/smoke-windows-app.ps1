@@ -286,3 +286,10 @@ try {
     Remove-ItemProperty -LiteralPath $noticeKey -Name $noticeName -ErrorAction SilentlyContinue
   }
 }
+
+# The script's exit code is its entire contract with CI, and PowerShell does
+# not set it from the script's own success: $LASTEXITCODE keeps whatever the
+# last native command left behind, so a run that printed "smoke passed" still
+# reported failure to the workflow. Every failure path above exits non-zero
+# through Fail, so reaching here means success -- say so explicitly.
+exit 0
