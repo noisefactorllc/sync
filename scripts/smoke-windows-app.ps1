@@ -53,6 +53,8 @@ function Get-ProcessWindow([int]$processId) {
   $windows = New-Object System.Collections.ArrayList
   $callback = [SyncSmoke.Win32+EnumProc]{
     param($window, $context)
+    # Required by the EnumWindows delegate signature; nothing here needs it.
+    $null = $context
     $owner = 0
     [void][SyncSmoke.Win32]::GetWindowThreadProcessId($window, [ref]$owner)
     if ($owner -eq $processId) {
