@@ -29,6 +29,19 @@ endif()
 # which silently mangles those strings on a non-Western-European machine.
 if(MSVC)
   add_compile_options(/utf-8)
+  # /EHsc must be stated here, not left to CMake's default CMAKE_CXX_FLAGS.
+  # That default is a *variable*, so any caller passing -DCMAKE_CXX_FLAGS=...
+  # replaces it wholesale and silently drops /EHsc -- which is precisely what
+  # a CI job passing an empty string for "no extra flags" did. Without it MSVC
+  # compiles throw/catch but emits no unwind code for automatic objects, so
+  # destructors do not run while an exception propagates. The websocket
+  # payload guard, whose entire job is to wipe a token from memory during
+  # unwinding, then does nothing at all -- a security guarantee quietly
+  # downgraded by a build flag. Setting it as a compile option makes it part
+  # of the project rather than something every caller has to remember to
+  # preserve. Repeating it (the warnings matrix entry also names it) is
+  # harmless.
+  add_compile_options(/EHsc)
 endif()
 
 find_package(Threads REQUIRED)

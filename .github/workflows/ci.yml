@@ -86,6 +86,9 @@ jobs:
         include:
           - name: Release
             build_type: Release
+            # Empty means "add nothing". The configure step below skips the
+            # flag entirely rather than passing an empty one -- on MSVC those
+            # are not the same thing; see the comment there.
             cxx_flags: ''
           - name: Warnings as errors
             build_type: Debug
@@ -117,11 +120,21 @@ jobs:
           EXTRA_CXX_FLAGS: ${{ matrix.cxx_flags }}
         run: |
           $ErrorActionPreference = 'Stop'
-          cmake -S . -B build -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DCMAKE_BUILD_TYPE="$env:BUILD_TYPE" `
-            -DCMAKE_CXX_FLAGS="$env:EXTRA_CXX_FLAGS"
+          $arguments = @(
+            '-S', '.', '-B', 'build', '-A', 'x64',
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake",
+            '-DVCPKG_TARGET_TRIPLET=x64-windows',
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE"
+          )
+          # Only pass CMAKE_CXX_FLAGS when the matrix entry actually has flags.
+          # Passing it empty is not a no-op: it REPLACES CMake's Windows
+          # defaults (/DWIN32 /D_WINDOWS /W3 /GR /EHsc), so the Release job was
+          # building without RTTI or unwind semantics and testing a binary that
+          # behaved differently from the one we ship.
+          if ($env:EXTRA_CXX_FLAGS) {
+            $arguments += "-DCMAKE_CXX_FLAGS=$env:EXTRA_CXX_FLAGS"
+          }
+          cmake @arguments
           if ($LASTEXITCODE -ne 0) { throw "configure failed" }
           cmake --build build --config $env:BUILD_TYPE --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
