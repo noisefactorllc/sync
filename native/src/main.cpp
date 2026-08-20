@@ -38,7 +38,12 @@
 
 // Shorthand for a file that names types from this namespace on nearly every
 // line; the alias sits outside the anonymous namespace so main() can use it.
-namespace sync = noisefactor::sync;
+//
+// NOT named `sync`: this file is compiled as Objective-C++ on macOS, where
+// Foundation pulls in <unistd.h> and its POSIX sync() function, and a
+// namespace alias of the same name is a redefinition of a different kind of
+// symbol that fails the whole translation unit.
+namespace nfsync = noisefactor::sync;
 
 namespace {
 
@@ -81,7 +86,7 @@ void pump_windows_events(void *) noexcept {
 // `--publisher syphon` on Windows has to start and report syphon unavailable;
 // silently offering nothing would leave the daemon with no providers at all
 // and fail as a confusing configuration error instead.
-[[nodiscard]] bool configured(const sync::cli::Options &command,
+[[nodiscard]] bool configured(const nfsync::cli::Options &command,
                               std::string_view id,
                               bool implemented_here) noexcept {
   return command.publisher_count == 0 ? implemented_here
@@ -103,13 +108,13 @@ public:
   // sender across all of its providers as a unit — registering one that cannot
   // publish would fail every sender for the ones that can.
   void offer(std::string_view id, bool configured, bool available,
-             sync::FramePublisher *publisher) noexcept {
-    if (!configured || capability_count_ >= sync::kMaximumProviderCapabilities) {
+             nfsync::FramePublisher *publisher) noexcept {
+    if (!configured || capability_count_ >= nfsync::kMaximumProviderCapabilities) {
       return;
     }
     capabilities_[capability_count_++] = {
         .id = std::string(id),
-        .direction = sync::ProviderDirection::Send,
+        .direction = nfsync::ProviderDirection::Send,
         .available = available,
         .selected = true,
     };
@@ -118,44 +123,44 @@ public:
     }
   }
 
-  void apply(sync::ServerOptions &options) const noexcept {
+  void apply(nfsync::ServerOptions &options) const noexcept {
     for (std::size_t index = 0; index < capability_count_; ++index) {
       options.providers[index] = capabilities_[index];
     }
     options.provider_count = capability_count_;
   }
 
-  [[nodiscard]] std::span<sync::FramePublisher *const> publishers()
+  [[nodiscard]] std::span<nfsync::FramePublisher *const> publishers()
       const noexcept {
     return {publishers_.data(), publisher_count_};
   }
 
 private:
-  std::array<sync::ProviderCapability, sync::kMaximumProviderCapabilities>
+  std::array<nfsync::ProviderCapability, nfsync::kMaximumProviderCapabilities>
       capabilities_{};
   std::size_t capability_count_ = 0;
-  std::array<sync::FramePublisher *, sync::PublisherHub::kMaximumProviders>
+  std::array<nfsync::FramePublisher *, nfsync::PublisherHub::kMaximumProviders>
       publishers_{};
   std::size_t publisher_count_ = 0;
 };
 
 // Providers are stack-owned here because they must outlive run_server and must
 // be torn down in reverse construction order when it returns.
-int run_with_providers(sync::ServerOptions &options,
-                       const sync::cli::Options &command) {
+int run_with_providers(nfsync::ServerOptions &options,
+                       const nfsync::cli::Options &command) {
 #if defined(__APPLE__)
-  sync::SyphonMetalConsumer syphon({
+  nfsync::SyphonMetalConsumer syphon({
       .framework_path = command.syphon_framework_path,
   });
-  const std::array<sync::MetalFrameConsumer *, 1> consumers{{&syphon}};
-  sync::MetalFramePublisher metal(consumers);
+  const std::array<nfsync::MetalFrameConsumer *, 1> consumers{{&syphon}};
+  nfsync::MetalFramePublisher metal(consumers);
 #endif
 #if defined(_WIN32)
-  sync::SpoutFramePublisher spout({
+  nfsync::SpoutFramePublisher spout({
       .library_path = command.spout_library_path,
   });
 #endif
-  sync::NdiFramePublisher ndi({
+  nfsync::NdiFramePublisher ndi({
       .runtime_path = command.ndi_runtime_path,
   });
 
@@ -167,20 +172,20 @@ int run_with_providers(sync::ServerOptions &options,
   // ring and the Syphon consumer that republishes it.
   constexpr bool kSyphonImplemented = true;
   const bool syphon_available = syphon.available() && metal.available();
-  sync::FramePublisher *const syphon_publisher = &metal;
+  nfsync::FramePublisher *const syphon_publisher = &metal;
 #else
   constexpr bool kSyphonImplemented = false;
   constexpr bool syphon_available = false;
-  sync::FramePublisher *const syphon_publisher = nullptr;
+  nfsync::FramePublisher *const syphon_publisher = nullptr;
 #endif
 #if defined(_WIN32)
   constexpr bool kSpoutImplemented = true;
   const bool spout_available = spout.available();
-  sync::FramePublisher *const spout_publisher = &spout;
+  nfsync::FramePublisher *const spout_publisher = &spout;
 #else
   constexpr bool kSpoutImplemented = false;
   constexpr bool spout_available = false;
-  sync::FramePublisher *const spout_publisher = nullptr;
+  nfsync::FramePublisher *const spout_publisher = nullptr;
 #endif
 
   ProviderAssembly assembly;
@@ -197,34 +202,34 @@ int run_with_providers(sync::ServerOptions &options,
   options.platform_event_pump = pump_windows_events;
 #endif
 
-  sync::PublisherHub hub(assembly.publishers());
-  return sync::run_server(options, &hub);
+  nfsync::PublisherHub hub(assembly.publishers());
+  return nfsync::run_server(options, &hub);
 }
 
 #if defined(__APPLE__) || defined(_WIN32)
 // Production mode issues and stores real credentials, so it needs both a
 // durable pairing store and a native prompt a person can answer. A platform
 // without both cannot honestly offer it.
-int run_production(sync::ServerOptions &options,
-                   const sync::cli::Options &command) {
-  std::array<char, sync::kMaximumPairingStorePathBytes> store_path{};
+int run_production(nfsync::ServerOptions &options,
+                   const nfsync::cli::Options &command) {
+  std::array<char, nfsync::kMaximumPairingStorePathBytes> store_path{};
   std::size_t store_path_length = 0;
-  if (sync::default_pairing_store_path(store_path, store_path_length) !=
-      sync::PairingStoreError::None) {
+  if (nfsync::default_pairing_store_path(store_path, store_path_length) !=
+      nfsync::PairingStoreError::None) {
     std::cerr << "syncd: default pairing store path is unavailable\n";
-    return sync::cli::kFailureExit;
+    return nfsync::cli::kFailureExit;
   }
-  sync::PairingStore store;
+  nfsync::PairingStore store;
   if (store.open({.path = {store_path.data(), store_path_length}}) !=
-      sync::PairingStoreError::None) {
+      nfsync::PairingStoreError::None) {
     std::cerr << "syncd: failed to open the pairing store\n";
-    return sync::cli::kFailureExit;
+    return nfsync::cli::kFailureExit;
   }
-  sync::pairing::StorePairingAuthority authority(store);
+  nfsync::pairing::StorePairingAuthority authority(store);
 #if defined(__APPLE__)
-  sync::platform::MacPairingPrompt prompt;
+  nfsync::platform::MacPairingPrompt prompt;
 #else
-  sync::platform::WindowsPairingPrompt prompt;
+  nfsync::platform::WindowsPairingPrompt prompt;
 #endif
   options.pairing_authority = &authority;
   options.pairing_prompt = &prompt;
@@ -247,32 +252,32 @@ int main(int argc, char** argv) {
     std::vector<std::string_view> arguments;
     arguments.reserve(argc > 1 ? static_cast<std::size_t>(argc - 1) : 0);
     for (int index = 1; index < argc; ++index) arguments.emplace_back(argv[index]);
-    const sync::cli::ParseResult parsed = sync::cli::parse(arguments);
+    const nfsync::cli::ParseResult parsed = nfsync::cli::parse(arguments);
     if (!parsed.ok()) {
-      sync::cli::print_usage(std::cerr);
-      return sync::cli::kUsageExit;
+      nfsync::cli::print_usage(std::cerr);
+      return nfsync::cli::kUsageExit;
     }
-    const sync::cli::Options& command = parsed.options;
-    if (command.mode == sync::cli::Mode::ListPairings ||
-        command.mode == sync::cli::Mode::RevokeOrigin) {
-      return sync::cli::run_management(command, std::cout, std::cerr);
+    const nfsync::cli::Options& command = parsed.options;
+    if (command.mode == nfsync::cli::Mode::ListPairings ||
+        command.mode == nfsync::cli::Mode::RevokeOrigin) {
+      return nfsync::cli::run_management(command, std::cout, std::cerr);
     }
 
-    sync::ServerOptions options;
+    nfsync::ServerOptions options;
     options.port = command.port;
-    if (command.mode == sync::cli::Mode::StaticTest) {
+    if (command.mode == nfsync::cli::Mode::StaticTest) {
       options.allowed_origin = command.allowed_origin;
       options.test_token = command.test_token;
       options.test_receiver = command.test_receiver;
       if (options.test_receiver) {
         options.providers[0] = {
             .id = "test",
-            .direction = sync::ProviderDirection::Send,
+            .direction = nfsync::ProviderDirection::Send,
             .available = true,
             .selected = true,
         };
         options.provider_count = 1;
-        return sync::run_server(options);
+        return nfsync::run_server(options);
       }
       // Static test mode authenticates against a supplied token instead of the
       // pairing store, so it needs no prompt and runs wherever a provider does.
@@ -283,11 +288,11 @@ int main(int argc, char** argv) {
     return run_production(options, command);
 #else
     std::cerr << "syncd: production mode requires macOS or Windows\n";
-    sync::cli::print_usage(std::cerr);
-    return sync::cli::kUsageExit;
+    nfsync::cli::print_usage(std::cerr);
+    return nfsync::cli::kUsageExit;
 #endif
   } catch (const std::exception& error) {
     std::cerr << "syncd: fatal error: " << error.what() << '\n';
-    return sync::cli::kFailureExit;
+    return nfsync::cli::kFailureExit;
   }
 }

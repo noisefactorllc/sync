@@ -6,7 +6,7 @@
 .DESCRIPTION
   The Windows counterpart to scripts/verify-macos-bundle.sh. It asserts that
   the bundle is complete, that both executables are 64-bit, that they carry the
-  advertised version, and — the point of the exercise — that nothing in the
+  advertised version, and -- the point of the exercise -- that nothing in the
   bundle still depends on a DLL that is neither bundled nor part of Windows.
 #>
 [CmdletBinding()]
