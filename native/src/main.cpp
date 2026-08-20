@@ -47,6 +47,39 @@ namespace nfsync = noisefactor::sync;
 
 namespace {
 
+// A short, non-secret phrase for each way opening the store can fail. It never
+// names a token or a hash -- only which class of problem occurred, so the
+// message can be printed to stderr and pasted into a bug report safely.
+const char *describe(nfsync::PairingStoreError error) noexcept {
+  switch (error) {
+    case nfsync::PairingStoreError::None:
+      return "no error";
+    case nfsync::PairingStoreError::InvalidPath:
+      return "the store path is not usable";
+    case nfsync::PairingStoreError::DirectorySecurity:
+      return "the containing directory is not owner-only, or is a link";
+    case nfsync::PairingStoreError::FileSecurity:
+      return "the store or lock file is not owner-only, or is a link";
+    case nfsync::PairingStoreError::Io:
+      return "the store could not be read or written";
+    case nfsync::PairingStoreError::Corrupt:
+      return "the store file is damaged";
+    case nfsync::PairingStoreError::UnknownVersion:
+      return "the store was written by a newer version of Sync";
+    case nfsync::PairingStoreError::Capacity:
+      return "the store is full";
+    case nfsync::PairingStoreError::RandomFailure:
+      return "secure random numbers were unavailable";
+    case nfsync::PairingStoreError::InvalidToken:
+      return "a stored record is invalid";
+    case nfsync::PairingStoreError::Busy:
+      return "another Sync instance is using the store";
+    case nfsync::PairingStoreError::Canceled:
+      return "the operation was canceled";
+  }
+  return "unrecognized error";
+}
+
 #if defined(__APPLE__)
 void pump_macos_events(void *) noexcept {
   @autoreleasepool {
@@ -220,9 +253,19 @@ int run_production(nfsync::ServerOptions &options,
     return nfsync::cli::kFailureExit;
   }
   nfsync::PairingStore store;
-  if (store.open({.path = {store_path.data(), store_path_length}}) !=
-      nfsync::PairingStoreError::None) {
-    std::cerr << "syncd: failed to open the pairing store\n";
+  const nfsync::PairingStoreError opened =
+      store.open({.path = {store_path.data(), store_path_length}});
+  if (opened != nfsync::PairingStoreError::None) {
+    // The bare message this used to print gave a person nothing to act on,
+    // and gave a diagnostic log even less: a store that cannot be opened is
+    // the difference between "another instance holds it", "someone widened
+    // the permissions on it", and "the file is damaged", and every one of
+    // those has a different remedy. Naming the reason and the path costs one
+    // line and is what makes the failure actionable.
+    std::cerr << "syncd: failed to open the pairing store: "
+              << describe(opened) << " ("
+              << std::string_view(store_path.data(), store_path_length)
+              << ")\n";
     return nfsync::cli::kFailureExit;
   }
   nfsync::pairing::StorePairingAuthority authority(store);
