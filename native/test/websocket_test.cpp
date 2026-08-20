@@ -330,13 +330,33 @@ SYNC_TEST(client_decoder_rejects_a_zero_message_limit) {
   SYNC_REQUIRE(threw);
 }
 
+// What an empty std::pmr::vector charges its resource before it holds a
+// single element. On libstdc++ and libc++ that is zero. MSVC's debug STL
+// allocates a _Container_proxy for iterator checking through the container's
+// own allocator, so there a pmr vector bills its resource for two pointers on
+// construction. Tests that assert exact byte accounting have to measure that
+// rather than assume it away: with a hard-coded twelve-byte budget the proxy
+// alone exhausted it, the allocation threw from inside the vector's
+// constructor, and the process died before the first assertion -- which is
+// how a Debug CI leg spent an hour in this file.
+std::size_t empty_pmr_vector_overhead() {
+  ws::PayloadMemoryResource generous(4096);
+  std::pmr::vector<std::byte> measured(&generous);
+  return generous.used_bytes();
+}
+
 SYNC_TEST(payload_memory_resource_counts_transient_reallocation) {
-  ws::PayloadMemoryResource budget(12);
+  const std::size_t overhead = empty_pmr_vector_overhead();
+  // Room for the vector's own overhead, the 8 bytes reserved below, and three
+  // bytes to spare -- so the 12-byte reservation cannot fit and must throw.
+  const std::size_t limit = overhead + 11;
+
+  ws::PayloadMemoryResource budget(limit);
   std::pmr::vector<std::byte> payload(&budget);
   payload.reserve(8);
-  SYNC_REQUIRE(budget.limit_bytes() == 12);
-  SYNC_REQUIRE(budget.used_bytes() == 8);
-  SYNC_REQUIRE(budget.peak_bytes() == 8);
+  SYNC_REQUIRE(budget.limit_bytes() == limit);
+  SYNC_REQUIRE(budget.used_bytes() == overhead + 8);
+  SYNC_REQUIRE(budget.peak_bytes() == overhead + 8);
 
   bool threw = false;
   try {
@@ -346,12 +366,26 @@ SYNC_TEST(payload_memory_resource_counts_transient_reallocation) {
   }
   SYNC_REQUIRE(threw);
   SYNC_REQUIRE(payload.capacity() == 8);
-  SYNC_REQUIRE(budget.used_bytes() == 8);
-  SYNC_REQUIRE(budget.peak_bytes() == 8);
+  SYNC_REQUIRE(budget.used_bytes() == overhead + 8);
+  SYNC_REQUIRE(budget.peak_bytes() == overhead + 8);
 }
 
 SYNC_TEST(client_decoders_share_a_bounded_payload_resource) {
-  ws::PayloadMemoryResource budget(128);
+  // Each decoder owns pmr vectors, so on MSVC's debug STL it charges the
+  // resource for their container proxies before decoding anything. Measured
+  // rather than assumed, for the reason given on empty_pmr_vector_overhead.
+  std::size_t idle = 0;
+  {
+    ws::PayloadMemoryResource generous(4096);
+    ws::ClientFrameDecoder measured(
+        128, ws::PayloadSensitivity::NonSensitive, nullptr,
+        ws::kMaximumReusablePayloadBytes, &generous);
+    idle = generous.used_bytes();
+  }
+
+  // Two idle decoders plus 128 bytes of payload budget: one 80-byte message
+  // fits, a second does not.
+  ws::PayloadMemoryResource budget(2 * idle + 128);
   std::vector<ws::Message> first_output;
   std::vector<ws::Message> second_output;
   const auto header = masked_binary_header(80);
@@ -364,10 +398,10 @@ SYNC_TEST(client_decoders_share_a_bounded_payload_resource) {
       ws::kMaximumReusablePayloadBytes, &budget);
 
   SYNC_REQUIRE(first->feed(header, first_output) == ws::DecodeError::None);
-  SYNC_REQUIRE(budget.used_bytes() == 80);
+  SYNC_REQUIRE(budget.used_bytes() == 2 * idle + 80);
   SYNC_REQUIRE(second.feed(header, second_output) ==
                ws::DecodeError::ResourceExhausted);
-  SYNC_REQUIRE(budget.used_bytes() == 80);
+  SYNC_REQUIRE(budget.used_bytes() == 2 * idle + 80);
 
   first.reset();
   ws::ClientFrameDecoder replacement(

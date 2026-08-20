@@ -1,5 +1,7 @@
 #include "test_harness.hpp"
 
+#include <exception>
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -49,6 +51,25 @@ void report_failures_without_blocking() noexcept {
 
 int main() {
   report_failures_without_blocking();
+
+  // An exception that escapes a noexcept path -- or any other route to
+  // std::terminate -- otherwise kills this process with no output at all,
+  // leaving a RUN line and silence. Naming the exception turns that into a
+  // diagnosis. abort() follows, because terminate must not return.
+  std::set_terminate([] {
+    std::cerr << "TERMINATE in the test above";
+    if (std::current_exception() != nullptr) {
+      try {
+        std::rethrow_exception(std::current_exception());
+      } catch (const std::exception& error) {
+        std::cerr << ": " << error.what();
+      } catch (...) {
+        std::cerr << ": a non-standard exception";
+      }
+    }
+    std::cerr << std::endl;
+    std::abort();
+  });
 
   int failures = 0;
   for (const auto& test : noisefactor::sync::test::registry()) {
