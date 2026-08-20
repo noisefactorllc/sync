@@ -782,11 +782,44 @@ struct OwnedProcessState {
   // threads and tracked through CompanionProcess::Impl's begin_operation/
   // end_operation bracketing (the same mechanism probe() and
   // run_management() use), which needs no named thread handle at all.
-  CompanionProcess::StderrCallback stderr_callback;
-  CompanionProcess::ExitCallback exit_callback;
+  // Guards the two callbacks below. ~CompanionProcess clears them from the
+  // owner thread while the stderr reader and the exit waiter may still be
+  // invoking them -- and when no dispatcher is configured, Impl::dispatch
+  // runs those inline, on the background thread. Reading a std::function on
+  // one thread while another assigns to it is a data race whose failure mode
+  // is a call through a half-torn object, so every access goes through the
+  // accessors below.
+  std::mutex callback_mutex;
+  CompanionProcess::StderrCallback stderr_callback;  // guarded
+  CompanionProcess::ExitCallback exit_callback;      // guarded
+
+  // Copied rather than moved: stderr arrives in many chunks, so this one has
+  // to survive being invoked repeatedly.
+  [[nodiscard]] CompanionProcess::StderrCallback copy_stderr_callback() {
+    std::lock_guard lock(callback_mutex);
+    return stderr_callback;
+  }
+  // Moved out: a process exits once, and taking it here is what guarantees
+  // it cannot be invoked twice.
+  [[nodiscard]] CompanionProcess::ExitCallback take_exit_callback() {
+    std::lock_guard lock(callback_mutex);
+    return std::move(exit_callback);
+  }
+  void clear_callbacks() {
+    std::lock_guard lock(callback_mutex);
+    stderr_callback = nullptr;
+    exit_callback = nullptr;
+  }
+
   std::mutex termination_mutex;
   std::vector<CompanionProcess::Completion> termination_completions;
   bool termination_requested = false;
+  // Set once the exit waiter has taken the completions above and run them.
+  // A completion pushed after that point would sit in a vector nothing will
+  // ever look at again, so terminate() has to run it directly instead --
+  // otherwise a caller that asked to stop a helper which had just exited on
+  // its own waits for a completion that never comes.
+  bool termination_completions_drained = false;
 };
 
 struct CompanionProcess::Impl {
@@ -829,6 +862,41 @@ struct CompanionProcess::Impl {
   void drain_operations() noexcept {
     std::unique_lock lock(outstanding_mutex);
     outstanding_condition.wait(lock, [this] { return outstanding == 0; });
+  }
+
+  // Spawns a detached background thread under the begin/end_operation
+  // bracket. The bracket has to be taken before the thread starts (or the
+  // thread could finish before it was ever counted), which leaves one hole:
+  // std::thread's constructor throws std::system_error when the system
+  // cannot create a thread, and an increment with no matching decrement
+  // means `outstanding` never returns to zero and drain_operations() waits
+  // for a thread that does not exist -- a permanent hang on shutdown, from a
+  // transient resource failure. Undoing the bracket on that path closes it.
+  // Returns false if the thread could not be started; callers that owe
+  // someone a completion must still deliver one.
+  template <typename Work>
+  [[nodiscard]] bool spawn_tracked(Work work) {
+    begin_operation();
+    try {
+      std::thread(std::move(work)).detach();
+      return true;
+    } catch (...) {
+      end_operation();
+      return false;
+    }
+  }
+
+  // Hands a completion to the owner thread as a tracked operation. Plain
+  // dispatch() is not enough for anything user-visible: without the bracket
+  // ~CompanionProcess can return while the completion is still sitting in
+  // the owner's queue, and it then runs against state the caller believed
+  // was finished with.
+  void dispatch_tracked(std::function<void()> callback) {
+    begin_operation();
+    dispatch([this, callback = std::move(callback)]() mutable {
+      callback();
+      end_operation();
+    });
   }
 
   void run_management(std::vector<std::wstring> arguments,
@@ -898,16 +966,28 @@ void CompanionProcess::Impl::run_management(
   // Bounded, self-contained watchdog: it captures only shared_ptr/atomic
   // state (never `this`), so it is safe to detach outright -- it cannot
   // outlive anything it touches, and it never needs Impl to still exist.
-  std::thread([process, timed_out, timeout_ms] {
-    if (::WaitForSingleObject(process->get(), timeout_ms) == WAIT_TIMEOUT) {
-      timed_out->store(true, std::memory_order_release);
-      ::TerminateProcess(process->get(), 1);
-    }
-  }).detach();
+  try {
+    std::thread([process, timed_out, timeout_ms] {
+      if (::WaitForSingleObject(process->get(), timeout_ms) == WAIT_TIMEOUT) {
+        timed_out->store(true, std::memory_order_release);
+        ::TerminateProcess(process->get(), 1);
+      }
+    }).detach();
+  } catch (...) {
+    // Nothing would bound the child, and the reader below waits on it with
+    // INFINITE -- so a helper that hung would hang this operation, and with
+    // it ~CompanionProcess. Ending the child now keeps the bound.
+    timed_out->store(true, std::memory_order_release);
+    ::TerminateProcess(process->get(), 1);
+  }
 
+  // `completion` is captured by copy, not moved: if the thread cannot be
+  // created the lambda is destroyed and a moved-from completion would leave
+  // the catch below with nothing to call.
+  try {
   std::thread([this, process, thread_handle = std::move(thread_handle),
               stdout_read = std::move(stdout_read), timed_out,
-              completion = std::move(completion)]() mutable {
+              completion]() mutable {
     std::string output;
     output.reserve(4096);
     std::array<char, 4096> buffer{};
@@ -933,6 +1013,16 @@ void CompanionProcess::Impl::run_management(
       end_operation();
     });
   }).detach();
+  } catch (...) {
+    // This thread carries the begin_operation() taken at the top of this
+    // function and owes the caller a completion. Without both, the caller
+    // waits forever and so does ~CompanionProcess.
+    ::TerminateProcess(process->get(), 1);
+    dispatch([this, completion = std::move(completion)]() mutable {
+      completion(-1, {}, false);
+      end_operation();
+    });
+  }
 }
 
 CompanionProcess::CompanionProcess(CompanionProcessOptions options)
@@ -950,8 +1040,7 @@ CompanionProcess::~CompanionProcess() {
     // marshaling a previously-queued stderr/exit notification onto the
     // owner thread, and once this destructor returns nothing may call back
     // into whatever those callbacks' captures depended on.
-    state->stderr_callback = nullptr;
-    state->exit_callback = nullptr;
+    state->clear_callbacks();
     // Closing the job object is the actual kill: JOB_OBJECT_LIMIT_KILL_ON_
     // JOB_CLOSE means every process in it, including syncd.exe, is
     // terminated by the kernel the instant the job's last handle closes.
@@ -965,9 +1054,17 @@ CompanionProcess::~CompanionProcess() {
   // helper's stderr reader and exit waiter (if `state` was non-null above,
   // killing the job just unblocked them) as well as any still-running
   // probe()/list_pairings()/revoke_pairing()/terminate() work -- to finish
-  // touching *impl_. Each is bounded (by the job kill just performed, or by
-  // its own *_timeout_ms), so this cannot hang, and it is what guarantees
-  // no background thread can use-after-free once this destructor returns.
+  // touching *impl_. Each is bounded by the job kill just performed or by its
+  // own *_timeout_ms, and it is what guarantees no background thread can
+  // use-after-free once this destructor returns.
+  //
+  // It is NOT unconditionally bounded, and it would be wrong to claim so: an
+  // operation completes by being dispatched, so if options.dispatch_to_owner
+  // stops running callbacks before this destructor is reached, this waits
+  // forever. That is the contract documented on dispatch_to_owner in the
+  // header, and app_main.cpp satisfies it by falling back to running them
+  // inline once its message loop is gone. A caller that cannot make that
+  // guarantee must not destroy a CompanionProcess.
   impl_->drain_operations();
 }
 
@@ -1088,8 +1185,10 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   Impl* impl = impl_.get();
   HANDLE stderr_read_handle = state->stderr_read.get();
   HANDLE process_handle = state->process.get();
-  impl->begin_operation();
-  std::thread([impl, state, stderr_read_handle] {
+  // A helper with no stderr reader is degraded but still supervised, so a
+  // failure here is not fatal to the launch; a helper with no exit waiter is
+  // a different matter and is handled below.
+  (void)impl->spawn_tracked([impl, state, stderr_read_handle] {
     std::array<char, 4096> buffer{};
     for (;;) {
       DWORD read = 0;
@@ -1099,16 +1198,16 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
       if (!ok || read == 0) break;
       std::string bytes(buffer.data(), read);
       impl->dispatch([state, bytes = std::move(bytes)] {
-        if (state->stderr_callback) state->stderr_callback(bytes);
+        if (auto callback = state->copy_stderr_callback()) callback(bytes);
       });
     }
     // end_operation() is safe to call from any thread (it only touches its
     // own mutex/condition_variable), so this does not need to go through
     // dispatch() the way user-visible callbacks do.
     impl->end_operation();
-  }).detach();
-  impl->begin_operation();
-  std::thread([impl, state, process_handle] {
+  });
+  const bool watching_exit = impl->spawn_tracked([impl, state,
+                                                  process_handle] {
     ::WaitForSingleObject(process_handle, INFINITE);
     DWORD status = 0;
     ::GetExitCodeProcess(process_handle, &status);
@@ -1117,19 +1216,35 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
         std::lock_guard lock(impl->state_mutex);
         if (impl->owned == state) impl->owned.reset();
       }
-      if (state->exit_callback) {
-        auto callback = std::move(state->exit_callback);
+      if (auto callback = state->take_exit_callback()) {
         callback(static_cast<int>(status));
       }
       std::vector<CompanionProcess::Completion> completions;
       {
         std::lock_guard lock(state->termination_mutex);
         completions = std::move(state->termination_completions);
+        // Anything pushed after this point must be run by terminate()
+        // itself; nothing will look at the vector again.
+        state->termination_completions_drained = true;
       }
       for (auto& completion : completions) completion();
       impl->end_operation();
     });
-  }).detach();
+  });
+  if (!watching_exit) {
+    // Without this thread nothing would ever notice the helper exiting, so
+    // the tray would show a running helper forever and terminate() would
+    // never complete. Refuse the launch -- but kill the child here rather
+    // than leaving it to `state` going out of scope, which would not happen:
+    // the stderr reader (if it started) holds a reference to `state`, and it
+    // is blocked in ReadFile until the child closes its end of the pipe,
+    // which only happens when the child dies. Closing the job breaks that
+    // cycle; the reader then sees end-of-file and releases `state`.
+    state->clear_callbacks();
+    state->job.reset();
+    error = "Could not supervise Sync helper.";
+    return false;
+  }
 
   {
     std::lock_guard lock(impl_->state_mutex);
@@ -1141,11 +1256,10 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
 
 void CompanionProcess::probe(ProbeCallback completion) {
   Impl* impl = impl_.get();
-  impl->begin_operation();
   const std::uint16_t port = impl_->options.port;
   const std::uint32_t timeout_ms = impl_->options.health_timeout_ms;
-  std::thread([impl, port, timeout_ms,
-              completion = std::move(completion)]() mutable {
+  const bool spawned = impl->spawn_tracked([impl, port, timeout_ms,
+                                            completion]() mutable {
     bool http_ok = false;
     DWORD http_status = 0;
     std::string body;
@@ -1176,7 +1290,15 @@ void CompanionProcess::probe(ProbeCallback completion) {
       completion(std::move(health), std::move(message));
       impl->end_operation();
     });
-  }).detach();
+  });
+  if (!spawned) {
+    // A caller that asked for a probe is waiting for exactly one answer, so
+    // failing to start the thread still has to produce one -- silently
+    // dropping it would leave the tray showing a stale status forever.
+    impl->dispatch_tracked([completion = std::move(completion)]() mutable {
+      completion(std::nullopt, "Sync status was unavailable.");
+    });
+  }
 }
 
 void CompanionProcess::terminate(Completion completion) {
@@ -1186,14 +1308,35 @@ void CompanionProcess::terminate(Completion completion) {
     state = impl_->owned;
   }
   if (state == nullptr) {
-    impl_->dispatch(std::move(completion));
+    // Tracked, not a bare dispatch: the destructor must wait for this
+    // completion like any other, or it can run after ~CompanionProcess has
+    // returned and the caller has torn down whatever it captured.
+    impl_->dispatch_tracked(std::move(completion));
     return;
   }
+  bool already_stopped = false;
   {
     std::lock_guard lock(state->termination_mutex);
-    state->termination_completions.push_back(std::move(completion));
-    if (state->termination_requested) return;
-    state->termination_requested = true;
+    // The helper can exit between reading `owned` above and taking this
+    // lock. The exit waiter empties termination_completions and marks it
+    // drained, so a completion pushed after that would sit in a vector
+    // nothing reads again -- the caller would wait forever for a helper that
+    // has already stopped.
+    if (state->termination_completions_drained) {
+      already_stopped = true;
+    } else {
+      state->termination_completions.push_back(std::move(completion));
+      if (state->termination_requested) return;
+      state->termination_requested = true;
+    }
+  }
+  if (already_stopped) {
+    // Deliberately outside the lock above: with no dispatcher configured,
+    // dispatch() runs the completion inline on this thread, and running
+    // caller code while holding termination_mutex would deadlock the moment
+    // that code called back into terminate().
+    impl_->dispatch_tracked(std::move(completion));
+    return;
   }
   // CTRL_BREAK_EVENT is the closest Windows analogue to POSIX SIGTERM for a
   // console-subsystem child: it asks the process to shut down instead of
@@ -1210,9 +1353,8 @@ void CompanionProcess::terminate(Completion completion) {
   (void)::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, state->pid);
 
   Impl* impl = impl_.get();
-  impl->begin_operation();
   const std::uint32_t timeout_ms = impl_->options.termination_timeout_ms;
-  std::thread([impl, state, timeout_ms] {
+  const bool watching = impl->spawn_tracked([impl, state, timeout_ms] {
     const HANDLE process = state->process.get();
     if (::WaitForSingleObject(process, timeout_ms) == WAIT_TIMEOUT) {
       ::TerminateProcess(process, 1);
@@ -1221,7 +1363,15 @@ void CompanionProcess::terminate(Completion completion) {
     // started in start() once the process is actually gone; this watchdog
     // only has to guarantee that happens within timeout_ms.
     impl->end_operation();
-  }).detach();
+  });
+  if (!watching) {
+    // Nothing is left to bound the shutdown, and the console event above may
+    // not have been honoured, so stopping the helper falls to this thread.
+    // Killing it outright is worse than a graceful exit and better than a
+    // helper that never stops: the exit waiter still reports it, and the
+    // queued completions still run.
+    ::TerminateProcess(state->process.get(), 1);
+  }
 }
 
 void CompanionProcess::list_pairings(PairingsCallback completion) {
