@@ -1291,16 +1291,19 @@ SYNC_TEST(pairing_store_rejects_widened_dacls_on_existing_sensitive_objects) {
 // ordinary user and can differ for a member of the Administrators group,
 // where the default owner may be the BUILTIN\Administrators group instead. On
 // such an account every object the store created failed its own verification,
-// so
-// syncd could not open its pairing store at all -- it exited with "failed to
-// open the pairing store" before serving anything.
+// so syncd could not open its pairing store at all -- it exited with "failed
+// to open the pairing store" before serving anything.
 //
-// This test pins the property that fixes it: what the store creates is owned
-// by the token user, explicitly, whatever the token default owner happens to
-// be. It can only *fail* on an account where the two differ, so it also
-// prints both SIDs -- a green run on a machine that prints them as equal has
-// not actually exercised the regression, and the log should say so rather
-// than let the pass be read as proof.
+// Be clear about what this is worth. The three ownership assertions below are
+// a restatement, not independent coverage: open_store() at the top would
+// already have thrown on any machine where they could fail, because the store
+// verifies these same three objects itself as it creates them. What this test
+// adds is the printed pair of SIDs, which answers a question no assertion in
+// this file can -- whether the machine that just ran the suite is one where
+// the two values differ, and therefore whether the run could have caught the
+// regression at all. A green suite on a machine where they are equal proves
+// nothing about this bug, and the log should say so rather than let the pass
+// be read as proof.
 SYNC_TEST(pairing_store_owns_what_it_creates_regardless_of_the_token_default_owner) {
   std::vector<unsigned char> user_buffer;
   PSID user_sid = nullptr;
@@ -1308,25 +1311,38 @@ SYNC_TEST(pairing_store_owns_what_it_creates_regardless_of_the_token_default_own
 
   // TokenOwner is the SID Windows stamps on objects created with a security
   // descriptor that names no owner -- the value this code used to depend on.
-  HANDLE token = nullptr;
-  SYNC_REQUIRE(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token) != 0);
+  // The handle is held by a guard rather than closed at the end: every
+  // SYNC_REQUIRE below throws, the harness catches it and runs the next test
+  // in the same process, and a bare CloseHandle would simply be skipped.
+  HANDLE raw_token = nullptr;
+  SYNC_REQUIRE(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &raw_token) != 0);
+  struct TokenGuard {
+    HANDLE value;
+    ~TokenGuard() {
+      if (value != nullptr) ::CloseHandle(value);
+    }
+  } token{raw_token};
   DWORD needed = 0;
-  ::GetTokenInformation(token, TokenOwner, nullptr, 0, &needed);
+  ::GetTokenInformation(token.value, TokenOwner, nullptr, 0, &needed);
   SYNC_REQUIRE(needed != 0);
   std::vector<unsigned char> owner_buffer(needed);
-  SYNC_REQUIRE(::GetTokenInformation(token, TokenOwner, owner_buffer.data(), needed, &needed) != 0);
+  SYNC_REQUIRE(::GetTokenInformation(token.value, TokenOwner, owner_buffer.data(),
+                                     needed, &needed) != 0);
   PSID default_owner = reinterpret_cast<const TOKEN_OWNER*>(owner_buffer.data())->Owner;
-  ::CloseHandle(token);
 
   const bool differ = ::EqualSid(user_sid, default_owner) == 0;
-  LPWSTR user_text = nullptr;
-  LPWSTR owner_text = nullptr;
-  if (::ConvertSidToStringSidW(user_sid, &user_text) != 0 &&
-      ::ConvertSidToStringSidW(default_owner, &owner_text) != 0) {
-    std::wcerr << L"token user=" << user_text << L" token default owner=" << owner_text
-               << (differ ? L" (they DIFFER: this run exercises the regression)"
-                          : L" (identical: this run cannot detect the regression)")
-               << L'\n';
+  // Narrow SIDs on purpose. std::wcerr and std::cerr share one underlying C
+  // stream, and mixing wide and byte operations on a stream is undefined --
+  // a poor trade for a diagnostic whose whole job is to survive and be read.
+  LPSTR user_text = nullptr;
+  LPSTR owner_text = nullptr;
+  if (::ConvertSidToStringSidA(user_sid, &user_text) != 0 &&
+      ::ConvertSidToStringSidA(default_owner, &owner_text) != 0) {
+    std::cerr << "token user=" << user_text << " token default owner="
+              << owner_text
+              << (differ ? " (they DIFFER: this run exercises the regression)"
+                         : " (identical: this run cannot detect the regression)")
+              << '\n';
   }
   if (user_text != nullptr) ::LocalFree(user_text);
   if (owner_text != nullptr) ::LocalFree(owner_text);

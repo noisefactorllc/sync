@@ -47,39 +47,6 @@ namespace nfsync = noisefactor::sync;
 
 namespace {
 
-// A short, non-secret phrase for each way opening the store can fail. It never
-// names a token or a hash -- only which class of problem occurred, so the
-// message can be printed to stderr and pasted into a bug report safely.
-const char *describe(nfsync::PairingStoreError error) noexcept {
-  switch (error) {
-    case nfsync::PairingStoreError::None:
-      return "no error";
-    case nfsync::PairingStoreError::InvalidPath:
-      return "the store path is not usable";
-    case nfsync::PairingStoreError::DirectorySecurity:
-      return "the containing directory is not owner-only, or is a link";
-    case nfsync::PairingStoreError::FileSecurity:
-      return "the store or lock file is not owner-only, or is a link";
-    case nfsync::PairingStoreError::Io:
-      return "the store could not be read or written";
-    case nfsync::PairingStoreError::Corrupt:
-      return "the store file is damaged";
-    case nfsync::PairingStoreError::UnknownVersion:
-      return "the store was written by a newer version of Sync";
-    case nfsync::PairingStoreError::Capacity:
-      return "the store is full";
-    case nfsync::PairingStoreError::RandomFailure:
-      return "secure random numbers were unavailable";
-    case nfsync::PairingStoreError::InvalidToken:
-      return "a stored record is invalid";
-    case nfsync::PairingStoreError::Busy:
-      return "another Sync instance is using the store";
-    case nfsync::PairingStoreError::Canceled:
-      return "the operation was canceled";
-  }
-  return "unrecognized error";
-}
-
 #if defined(__APPLE__)
 void pump_macos_events(void *) noexcept {
   @autoreleasepool {
@@ -240,6 +207,39 @@ int run_with_providers(nfsync::ServerOptions &options,
 }
 
 #if defined(__APPLE__) || defined(_WIN32)
+// A short, non-secret phrase for each way opening the store can fail. It never
+// names a token or a hash -- only which class of problem occurred, so the
+// message can be printed to stderr and pasted into a bug report safely.
+const char *describe(nfsync::PairingStoreError error) noexcept {
+  switch (error) {
+    case nfsync::PairingStoreError::None:
+      return "no error";
+    case nfsync::PairingStoreError::InvalidPath:
+      return "the store path is not usable";
+    case nfsync::PairingStoreError::DirectorySecurity:
+      return "the containing directory is not owner-only, or is a link";
+    case nfsync::PairingStoreError::FileSecurity:
+      return "the store or lock file is not owner-only, or is a link";
+    case nfsync::PairingStoreError::Io:
+      return "the store could not be read or written";
+    case nfsync::PairingStoreError::Corrupt:
+      return "the store file is damaged";
+    case nfsync::PairingStoreError::UnknownVersion:
+      return "the store was written by a newer version of Sync";
+    case nfsync::PairingStoreError::Capacity:
+      return "the store is full";
+    case nfsync::PairingStoreError::RandomFailure:
+      return "secure random numbers were unavailable";
+    case nfsync::PairingStoreError::InvalidToken:
+      return "a stored record is invalid";
+    case nfsync::PairingStoreError::Busy:
+      return "another Sync instance is using the store";
+    case nfsync::PairingStoreError::Canceled:
+      return "the operation was canceled";
+  }
+  return "unrecognized error";
+}
+
 // Production mode issues and stores real credentials, so it needs both a
 // durable pairing store and a native prompt a person can answer. A platform
 // without both cannot honestly offer it.
@@ -266,6 +266,23 @@ int run_production(nfsync::ServerOptions &options,
               << describe(opened) << " ("
               << std::string_view(store_path.data(), store_path_length)
               << ")\n";
+    // The path is deliberately included even though it carries the account
+    // name, because it is the actionable half: without it the two messages
+    // below name a folder the reader cannot find. It is the user's own path
+    // on the user's own machine, and syncd's stderr is surfaced only in the
+    // diagnostics the user chooses to copy.
+    if (opened == nfsync::PairingStoreError::DirectorySecurity ||
+        opened == nfsync::PairingStoreError::FileSecurity) {
+      // Sync will not use a store it does not exclusively own, and it will
+      // not silently take ownership of one it finds -- so a store left behind
+      // by something else is refused every time, forever, with no way out
+      // that the product itself offers. Saying how to clear it is the
+      // difference between a fixable problem and a dead install.
+      std::cerr << "syncd: Sync only uses a pairing store it exclusively "
+                   "owns. Correct that folder's ownership and permissions, "
+                   "or delete it to start over -- paired browsers will "
+                   "simply ask to pair again.\n";
+    }
     return nfsync::cli::kFailureExit;
   }
   nfsync::pairing::StorePairingAuthority authority(store);

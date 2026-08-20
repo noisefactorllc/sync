@@ -79,6 +79,15 @@ class ScopedSid {
   ScopedSid() noexcept = default;
   ScopedSid(std::vector<unsigned char> buffer, PSID sid) noexcept
       : buffer_(std::move(buffer)), sid_(sid) {}
+  // Copying would deep-copy buffer_ while copying sid_ verbatim, leaving the
+  // copy's sid() pointing into the *original's* buffer -- a dangling pointer
+  // the moment the original dies. Moving is safe and is what this class is
+  // for, so the move operations are kept and only copying is refused.
+  // Declaring these at all suppresses the implicit moves, hence the defaults.
+  ScopedSid(const ScopedSid&) = delete;
+  ScopedSid& operator=(const ScopedSid&) = delete;
+  ScopedSid(ScopedSid&&) noexcept = default;
+  ScopedSid& operator=(ScopedSid&&) noexcept = default;
   [[nodiscard]] PSID sid() const noexcept { return sid_; }
 
  private:
@@ -123,6 +132,17 @@ struct OwnerOnlySecurity {
   std::array<unsigned char, sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes>
       acl_buffer{};
   SECURITY_ATTRIBUTES attributes{};
+
+  // Every pointer in here is self-referential: attributes points at
+  // descriptor, and descriptor points at acl_buffer and at a SID owned
+  // elsewhere. A copy or a move would carry those pointers over unchanged and
+  // leave them aimed at the original object. Nothing copies one today; these
+  // make that a compile error rather than a comment nobody reads.
+  OwnerOnlySecurity() = default;
+  OwnerOnlySecurity(const OwnerOnlySecurity&) = delete;
+  OwnerOnlySecurity& operator=(const OwnerOnlySecurity&) = delete;
+  OwnerOnlySecurity(OwnerOnlySecurity&&) = delete;
+  OwnerOnlySecurity& operator=(OwnerOnlySecurity&&) = delete;
 };
 
 bool build_owner_only_security(PSID user_sid, OwnerOnlySecurity& out) noexcept {

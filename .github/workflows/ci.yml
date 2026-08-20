@@ -128,9 +128,12 @@ jobs:
           )
           # Only pass CMAKE_CXX_FLAGS when the matrix entry actually has flags.
           # Passing it empty is not a no-op: it REPLACES CMake's Windows
-          # defaults (/DWIN32 /D_WINDOWS /W3 /GR /EHsc), so the Release job was
-          # building without RTTI or unwind semantics and testing a binary that
-          # behaved differently from the one we ship.
+          # defaults (/DWIN32 /D_WINDOWS /W3 /GR /EHsc). The one that mattered
+          # was /EHsc -- without it MSVC runs no destructors during unwinding,
+          # so this job was testing a binary that behaved differently from the
+          # one we ship. (/GR is MSVC's default and stays on whether or not it
+          # is named, so RTTI was never actually lost; the project now states
+          # /EHsc itself, which is the real guarantee.)
           if ($env:EXTRA_CXX_FLAGS) {
             $arguments += "-DCMAKE_CXX_FLAGS=$env:EXTRA_CXX_FLAGS"
           }
