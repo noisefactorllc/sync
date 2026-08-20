@@ -37,8 +37,14 @@ using noisefactor::sync::companion::HealthSnapshot;
 
 // Long enough that a loaded CI runner does not fail a test that would pass,
 // short enough that a genuine hang is reported as a failure rather than
-// sitting there until ctest's own timeout fires.
-constexpr int kGenerousWaitMs = 15'000;
+// sitting there until ctest's own timeout fires. That second half is a real
+// constraint, not a preference: there are twenty wait_for sites in this file
+// and they share one 300-second ctest deadline with every test in this
+// binary, so a budget of fifteen seconds each would let a systemic failure
+// consume the whole allowance and report one anonymous timeout instead of
+// individually named failures. Every operation waited on here completes in
+// milliseconds when it works at all.
+constexpr int kGenerousWaitMs = 5'000;
 
 // The directory this test executable lives in, which is also where the
 // build puts sync_test_helper_process.exe.
@@ -158,9 +164,42 @@ class LoopbackListener {
   std::uint16_t port_ = 0;
 };
 
+// Closes on every path out of a test, including the throw a failed
+// SYNC_REQUIRE performs -- the harness catches it and runs the next test in
+// the same process, so a leaked handle would outlive the failure.
+class ScopedHandle {
+ public:
+  explicit ScopedHandle(HANDLE value) noexcept : value_(value) {}
+  ~ScopedHandle() {
+    if (value_ != nullptr) ::CloseHandle(value_);
+  }
+  ScopedHandle(const ScopedHandle&) = delete;
+  ScopedHandle& operator=(const ScopedHandle&) = delete;
+  ScopedHandle(ScopedHandle&& other) noexcept : value_(other.value_) {
+    other.value_ = nullptr;
+  }
+  ScopedHandle& operator=(ScopedHandle&& other) noexcept {
+    if (this != &other) {
+      if (value_ != nullptr) ::CloseHandle(value_);
+      value_ = other.value_;
+      other.value_ = nullptr;
+    }
+    return *this;
+  }
+  [[nodiscard]] HANDLE get() const noexcept { return value_; }
+
+ private:
+  HANDLE value_ = nullptr;
+};
+
 CompanionProcessOptions fake_helper_options() {
   CompanionProcessOptions options;
   options.helper_path = fake_helper_path();
+  // Checked here rather than left to start() failing: a missing fixture
+  // otherwise surfaces as seven unrelated tests failing on start(), with
+  // nothing pointing at the build.
+  SYNC_REQUIRE(::GetFileAttributesW(options.helper_path.c_str()) !=
+               INVALID_FILE_ATTRIBUTES);
   // Short enough to keep the hard-kill test quick, long enough that a
   // helper which does honour the console event wins the race on a loaded
   // machine rather than being killed and reporting a false negative.
@@ -357,9 +396,14 @@ SYNC_TEST(windows_terminate_kills_a_helper_that_ignores_the_console_event) {
   SYNC_REQUIRE(wait_for([&] { return recorder.exits.load() == 1; }));
   // Killed, not stopped: TerminateProcess(process, 1) is what ran.
   SYNC_REQUIRE(recorder.last_exit_status.load() == 1);
-  // Bounded by termination_timeout_ms rather than open-ended. The upper
-  // bound is loose because it only has to catch "waits forever".
-  SYNC_REQUIRE(elapsed < std::chrono::seconds(10));
+  // Bracketed, not merely bounded. The lower bound is what proves the
+  // watchdog is the thing that killed it: this helper claims the console
+  // event and then ignores it, so nothing else can end it, and anything
+  // faster than the configured 1500ms would mean it died for some other
+  // reason and the test was passing by accident. The upper bound catches a
+  // watchdog that was silently lengthened.
+  SYNC_REQUIRE(elapsed >= std::chrono::milliseconds(1'000));
+  SYNC_REQUIRE(elapsed < std::chrono::seconds(6));
   SYNC_REQUIRE(!companion.owned_pid().has_value());
 }
 
@@ -439,7 +483,7 @@ SYNC_TEST(windows_destroying_the_companion_kills_the_helper) {
   set_helper_mode(L"stubborn");
   Recorder recorder;
 
-  HANDLE helper = nullptr;
+  ScopedHandle helper{nullptr};
   {
     CompanionProcess companion(fake_helper_options());
     std::string error;
@@ -450,20 +494,15 @@ SYNC_TEST(windows_destroying_the_companion_kills_the_helper) {
     // Opened while the helper is definitely alive: holding this handle also
     // keeps the pid from being recycled under us, so the wait below cannot
     // accidentally observe some unrelated process.
-    helper = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                           FALSE, static_cast<DWORD>(*pid));
-    SYNC_REQUIRE(helper != nullptr);
-    SYNC_REQUIRE(::WaitForSingleObject(helper, 0) == WAIT_TIMEOUT);
+    helper = ScopedHandle(::OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+        static_cast<DWORD>(*pid)));
+    SYNC_REQUIRE(helper.get() != nullptr);
+    SYNC_REQUIRE(::WaitForSingleObject(helper.get(), 0) == WAIT_TIMEOUT);
   }  // ~CompanionProcess
 
   // Already dead by the time the destructor returned -- not merely dying.
-  const DWORD wait = ::WaitForSingleObject(helper, 0);
-  DWORD status = 0;
-  const BOOL read_status = ::GetExitCodeProcess(helper, &status);
-  ::CloseHandle(helper);
-  SYNC_REQUIRE(wait == WAIT_OBJECT_0);
-  SYNC_REQUIRE(read_status != FALSE);
-  SYNC_REQUIRE(status != STILL_ACTIVE);
+  SYNC_REQUIRE(::WaitForSingleObject(helper.get(), 0) == WAIT_OBJECT_0);
 }
 
 SYNC_TEST(windows_the_destructor_waits_for_every_outstanding_probe) {
@@ -494,6 +533,12 @@ SYNC_TEST(windows_the_destructor_waits_for_every_outstanding_probe) {
 }
 
 SYNC_TEST(windows_the_destructor_drains_work_queued_from_many_threads) {
+  // A helper is started first on purpose. Without one, terminate() takes
+  // its no-helper path and completes synchronously, so counting those
+  // completions would assert nothing about the drain -- they would all have
+  // run before the threads were even joined.
+  set_helper_mode(L"graceful");
+  Recorder recorder;
   LoopbackListener listener;
   SYNC_REQUIRE(listener.port() != 0);
   listener.close();
@@ -506,6 +551,13 @@ SYNC_TEST(windows_the_destructor_drains_work_queued_from_many_threads) {
   constexpr int kThreads = 8;
   {
     CompanionProcess companion(std::move(options));
+    std::string error;
+    SYNC_REQUIRE(companion.start(recorder.stderr_callback(),
+                                 recorder.exit_callback(), error));
+    SYNC_REQUIRE(wait_for([&] {
+      return recorder.stderr_snapshot().find("helper ready") !=
+             std::string::npos;
+    }));
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
     for (int i = 0; i < kThreads; ++i) {
@@ -521,6 +573,13 @@ SYNC_TEST(windows_the_destructor_drains_work_queued_from_many_threads) {
   }
   SYNC_REQUIRE(completions.load() == kThreads);
   SYNC_REQUIRE(terminations.load() == kThreads);
+  // Deliberately NOT asserting that the exit callback fired. The destructor
+  // clears stderr_callback and exit_callback before closing the job, because
+  // once it returns nothing may call back into whatever the owner captured.
+  // The helper here is usually still stopping at that moment, so its exit is
+  // reported to nobody -- by design. Termination completions are different:
+  // somebody is waiting on each one, so they must all still run, which is
+  // what the two assertions above check.
 }
 
 SYNC_TEST(windows_a_queueing_dispatcher_is_honoured_and_may_fall_back_inline) {
@@ -573,6 +632,20 @@ SYNC_TEST(windows_a_queueing_dispatcher_is_honoured_and_may_fall_back_inline) {
   std::atomic<int> completions{0};
   {
     CompanionProcess companion(std::move(options));
+    // Declared after `companion`, so it is destroyed BEFORE it -- which is
+    // the whole point. Every assertion below can throw, and if one does while
+    // the dispatcher is still queueing, ~CompanionProcess would wait for a
+    // completion that only a drain could deliver and nothing would ever drain
+    // it again: a failed assertion would become a permanent hang, taking out
+    // every other test in this binary instead of reporting one failure.
+    struct FallBackInlineOnExit {
+      Dispatcher& dispatcher;
+      ~FallBackInlineOnExit() {
+        dispatcher.go_inline();
+        dispatcher.drain();
+      }
+    } fall_back_inline{dispatcher};
+
     companion.probe([&completions](std::optional<HealthSnapshot>, std::string) {
       completions.fetch_add(1);
     });
@@ -586,12 +659,13 @@ SYNC_TEST(windows_a_queueing_dispatcher_is_honoured_and_may_fall_back_inline) {
     SYNC_REQUIRE(completions.load() == 1);
 
     // Queue one more and then tear down without draining it by hand, the
-    // way a real shutdown does.
+    // way a real shutdown does: the guard above switches the dispatcher to
+    // inline just before ~CompanionProcess runs, exactly as app_main.cpp
+    // does once its message loop has exited. If that fallback is removed
+    // from either place, this blocks.
     companion.probe([&completions](std::optional<HealthSnapshot>, std::string) {
       completions.fetch_add(1);
     });
-    dispatcher.go_inline();
-    dispatcher.drain();  // whatever landed before the switch
   }
   SYNC_REQUIRE(completions.load() == 2);
 }
