@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <random>
 #include <span>
@@ -28,6 +29,7 @@
 #include <windows.h>
 
 #include <aclapi.h>
+#include <sddl.h>      // ConvertSidToStringSidW, for the ownership diagnostic
 #include <winioctl.h>  // FSCTL_SET_REPARSE_POINT
 #include <cwchar>  // _snwprintf_s
 #else
@@ -413,10 +415,18 @@ PairingStore open_store(const std::filesystem::path& path,
                         PairingStoreFailPoint fail = PairingStoreFailPoint::None,
                         PairingStoreCommitHook* commit_hook = nullptr) {
   PairingStore store;
-  SYNC_REQUIRE(store.open({.path = path.string(),
-                           .fail_point = fail,
-                           .commit_hook = commit_hook}) ==
-               PairingStoreError::None);
+  const PairingStoreError opened = store.open(
+      {.path = path.string(), .fail_point = fail, .commit_hook = commit_hook});
+  // Almost every test in this file starts here, so when the store cannot be
+  // opened at all they fail en masse with an assertion that names only the
+  // expression. Naming the error -- and the path -- turns that wall of
+  // identical failures into one readable cause, which is exactly what was
+  // missing when an administrator account could not open a store at all.
+  if (opened != PairingStoreError::None) {
+    std::cerr << "open_store failed: error=" << static_cast<int>(opened)
+              << " path=" << path.string() << '\n';
+  }
+  SYNC_REQUIRE(opened == PairingStoreError::None);
   return store;
 }
 
@@ -623,6 +633,12 @@ SYNC_TEST(pairing_store_rejects_symlinked_directories_files_and_parent_traversal
 #else
   const auto real = temporary.path() / "real";
   std::filesystem::create_directory(real);
+  // The POSIX branch above chmods this to 0700 for the same reason: without
+  // it the containing directory is rejected first and open() never reaches
+  // the file check the assertion below is actually about. std::filesystem
+  // creates it with whatever the parent hands down, which is never the
+  // owner-only, inheritance-protected DACL PairingStore requires.
+  secure_file_for_test(real);
   const auto linked = temporary.path() / "linked";
   if (try_create_symlink(linked, real, true)) {
     PairingStore directory_link;
@@ -1268,5 +1284,72 @@ SYNC_TEST(pairing_store_rejects_widened_dacls_on_existing_sensitive_objects) {
   widen_permissions_for_test(state / ".pairings.lock");
   PairingStore lock_dacl;
   SYNC_REQUIRE(lock_dacl.open({.path = path.string()}) == PairingStoreError::FileSecurity);
+}
+// The store verifies that everything it creates is owned by the token user,
+// but for a long time it never *set* an owner -- it let each object take the
+// creating token's default owner (TokenOwner). Those two are the same for an
+// ordinary user and can differ for a member of the Administrators group,
+// where the default owner may be the BUILTIN\Administrators group instead. On
+// such an account every object the store created failed its own verification,
+// so
+// syncd could not open its pairing store at all -- it exited with "failed to
+// open the pairing store" before serving anything.
+//
+// This test pins the property that fixes it: what the store creates is owned
+// by the token user, explicitly, whatever the token default owner happens to
+// be. It can only *fail* on an account where the two differ, so it also
+// prints both SIDs -- a green run on a machine that prints them as equal has
+// not actually exercised the regression, and the log should say so rather
+// than let the pass be read as proof.
+SYNC_TEST(pairing_store_owns_what_it_creates_regardless_of_the_token_default_owner) {
+  std::vector<unsigned char> user_buffer;
+  PSID user_sid = nullptr;
+  SYNC_REQUIRE(get_current_user_sid_for_test(user_buffer, user_sid));
+
+  // TokenOwner is the SID Windows stamps on objects created with a security
+  // descriptor that names no owner -- the value this code used to depend on.
+  HANDLE token = nullptr;
+  SYNC_REQUIRE(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token) != 0);
+  DWORD needed = 0;
+  ::GetTokenInformation(token, TokenOwner, nullptr, 0, &needed);
+  SYNC_REQUIRE(needed != 0);
+  std::vector<unsigned char> owner_buffer(needed);
+  SYNC_REQUIRE(::GetTokenInformation(token, TokenOwner, owner_buffer.data(), needed, &needed) != 0);
+  PSID default_owner = reinterpret_cast<const TOKEN_OWNER*>(owner_buffer.data())->Owner;
+  ::CloseHandle(token);
+
+  const bool differ = ::EqualSid(user_sid, default_owner) == 0;
+  LPWSTR user_text = nullptr;
+  LPWSTR owner_text = nullptr;
+  if (::ConvertSidToStringSidW(user_sid, &user_text) != 0 &&
+      ::ConvertSidToStringSidW(default_owner, &owner_text) != 0) {
+    std::wcerr << L"token user=" << user_text << L" token default owner=" << owner_text
+               << (differ ? L" (they DIFFER: this run exercises the regression)"
+                          : L" (identical: this run cannot detect the regression)")
+               << L'\n';
+  }
+  if (user_text != nullptr) ::LocalFree(user_text);
+  if (owner_text != nullptr) ::LocalFree(owner_text);
+
+  TempDirectory temporary;
+  const auto state = temporary.path() / "state";
+  const auto path = state / "pairings.bin";
+  auto store = open_store(path);
+  SYNC_REQUIRE(store.issue(origin("https://deck.example")).error == PairingStoreError::None);
+
+  // The directory, the store file, and the lock file are the three objects
+  // the store creates; every one of them must carry the token user as its
+  // owner, not whatever the token would have defaulted to.
+  for (const auto& created : {state, path, state / ".pairings.lock"}) {
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const DWORD status = ::GetNamedSecurityInfoW(created.c_str(), SE_FILE_OBJECT,
+                                                 OWNER_SECURITY_INFORMATION, &owner, nullptr,
+                                                 nullptr, nullptr, &descriptor);
+    SYNC_REQUIRE(status == ERROR_SUCCESS);
+    const bool owned_by_user = owner != nullptr && ::EqualSid(owner, user_sid) != 0;
+    if (descriptor != nullptr) ::LocalFree(descriptor);
+    SYNC_REQUIRE(owned_by_user);
+  }
 }
 #endif

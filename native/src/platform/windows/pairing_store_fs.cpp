@@ -114,7 +114,10 @@ constexpr DWORD kMaximumSidBytes = 68;
 // this store creates, plus the buffers Win32's SECURITY_ATTRIBUTES /
 // SECURITY_DESCRIPTOR / ACL point into -- those are non-owning pointers, so
 // this struct's lifetime must dominate whatever CreateFileW/CreateDirectoryW
-// call it is passed to.
+// call it is passed to. The owner SID is not copied in either, so the
+// ScopedSid it came from must outlive this too -- every call site below
+// declares the ScopedSid first, which makes it outlive this by destruction
+// order.
 struct OwnerOnlySecurity {
   SECURITY_DESCRIPTOR descriptor{};
   std::array<unsigned char, sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes>
@@ -124,6 +127,20 @@ struct OwnerOnlySecurity {
 
 bool build_owner_only_security(PSID user_sid, OwnerOnlySecurity& out) noexcept {
   if (!::InitializeSecurityDescriptor(&out.descriptor, SECURITY_DESCRIPTOR_REVISION)) return false;
+  // The owner must be set explicitly rather than left to the token default.
+  // A security descriptor with no owner takes the creating token's *default
+  // owner* (TokenOwner), which is not always the token user (TokenUser):
+  // for a member of the Administrators group the default owner can be the
+  // BUILTIN\Administrators group instead, depending on the "System objects:
+  // Default owner for objects created by members of the Administrators
+  // group" security policy. Since verify_owner_only_security() below
+  // requires the owner to be exactly the token user, leaving it implicit
+  // made every object this store creates fail its own verification on such
+  // an account -- syncd on an administrator machine could not open its
+  // pairing store at all. Naming the owner here removes the dependency on
+  // that policy entirely: setting the owner to one's own TokenUser SID is
+  // always permitted and needs no privilege.
+  if (!::SetSecurityDescriptorOwner(&out.descriptor, user_sid, FALSE)) return false;
   auto* acl = reinterpret_cast<PACL>(out.acl_buffer.data());
   if (!::InitializeAcl(acl, static_cast<DWORD>(out.acl_buffer.size()), ACL_REVISION)) return false;
   if (!::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, user_sid)) return false;
