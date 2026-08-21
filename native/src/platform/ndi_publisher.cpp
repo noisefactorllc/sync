@@ -1,5 +1,7 @@
 #include <sync/platform/ndi_publisher.hpp>
 
+#include "../replacement_budget.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -7,11 +9,11 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -422,16 +424,8 @@ void add_candidate(std::array<std::string, kMaximumDiscoveryPaths>& paths, std::
 }
 
 // ---------------------------------------------------------------------------
-// Checked arithmetic (mirrors metal_frame_publisher.mm's helpers)
+// Checked arithmetic (mirrors metal_frame_publisher.mm's helper)
 // ---------------------------------------------------------------------------
-[[nodiscard]] auto checked_add(std::size_t left, std::size_t right, std::size_t& result) noexcept -> bool {
-  if (left > std::numeric_limits<std::size_t>::max() - right) {
-    return false;
-  }
-  result = left + right;
-  return true;
-}
-
 [[nodiscard]] auto checked_multiply(std::size_t left, std::size_t right, std::size_t& result) noexcept
     -> bool {
   if (right != 0 && left > std::numeric_limits<std::size_t>::max() / right) {
@@ -509,8 +503,8 @@ constexpr std::size_t kMaximumSenderNameBytes = 64;
 
 struct NdiFramePublisher::Impl {
   struct FrameBuffer {
-    std::vector<std::byte> storage;
-    std::size_t accounted_bytes = 0;
+    std::unique_ptr<std::byte[]> storage;
+    std::size_t capacity_bytes = 0;
   };
 
   struct SenderEntry {
@@ -618,22 +612,24 @@ struct NdiFramePublisher::Impl {
   // little peak memory for a much simpler, still budget-safe policy.
   [[nodiscard]] auto ensure_buffer_capacity(FrameBuffer& buffer, std::size_t required_bytes) noexcept
       -> bool {
-    if (buffer.storage.size() >= required_bytes) {
+    if (buffer.capacity_bytes >= required_bytes) {
       return true;
     }
-    const std::size_t growth = required_bytes - buffer.storage.size();
-    std::size_t projected_bytes = 0;
-    if (!checked_add(allocated_bytes, growth, projected_bytes) ||
-        projected_bytes > allocation_budget_bytes) {
+    const auto replacement_total = allocation::replacement_total_if_peak_fits(
+        allocated_bytes, buffer.capacity_bytes, required_bytes,
+        allocation_budget_bytes);
+    if (!replacement_total.has_value()) {
       return false;
     }
+    std::unique_ptr<std::byte[]> replacement;
     try {
-      buffer.storage.resize(required_bytes);
+      replacement = std::make_unique<std::byte[]>(required_bytes);
     } catch (const std::exception&) {
       return false;
     }
-    allocated_bytes = projected_bytes;
-    buffer.accounted_bytes += growth;
+    buffer.storage = std::move(replacement);
+    buffer.capacity_bytes = required_bytes;
+    allocated_bytes = *replacement_total;
     return true;
   }
 
@@ -656,7 +652,7 @@ struct NdiFramePublisher::Impl {
       }
     }
     for (FrameBuffer& buffer : entry.buffers) {
-      allocated_bytes -= buffer.accounted_bytes;
+      allocated_bytes -= buffer.capacity_bytes;
     }
     entry = SenderEntry{};
   }
@@ -786,7 +782,7 @@ auto NdiFramePublisher::publish(std::string_view sender_id, const protocol::Fram
     return PublishResult::Failed;
   }
 
-  std::byte* destination = buffer.storage.data();
+  std::byte* destination = buffer.storage.get();
   if (static_cast<std::size_t>(frame.row_stride) == packed_row_bytes) {
     std::memcpy(destination, frame.payload.data(), frame.payload.size());
   } else {

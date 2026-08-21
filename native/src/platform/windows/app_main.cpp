@@ -12,6 +12,8 @@
 #include "companion_process.hpp"
 #include "resource.h"
 
+#include "../../companion_management.hpp"
+
 #include <sync/companion_model.hpp>
 #include <sync/server.hpp>
 
@@ -31,6 +33,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdint>
@@ -161,7 +164,7 @@ struct AppState {
   std::unique_ptr<companion::CompanionModel> model;
   std::unique_ptr<companion::CompanionProcess> process;
   bool expected_exit = false;
-  bool quitting = false;
+  std::atomic_bool quitting{false};
 
   std::vector<std::string> pairings;
   std::string pairing_error;
@@ -190,7 +193,8 @@ void probe_then_start(AppState& app) {
   app.process->probe([self, generation](
                          std::optional<companion::HealthSnapshot> health,
                          std::string) {
-    if (self->quitting || self->model->recovery_generation() != generation) {
+    if (self->quitting.load(std::memory_order_acquire) ||
+        self->model->recovery_generation() != generation) {
       return;
     }
     if (health.has_value()) {
@@ -202,14 +206,21 @@ void probe_then_start(AppState& app) {
 }
 
 void start_helper(AppState& app) {
-  if (app.quitting || app.process->owned_pid().has_value()) return;
+  if (app.quitting.load(std::memory_order_acquire) ||
+      app.process->owned_pid().has_value()) {
+    return;
+  }
   app.model->begin_start();
   AppState* self = &app;
   std::string error;
   const bool started = app.process->start(
-      [self](std::string_view bytes) { self->model->append_stderr(bytes); },
+      [self](std::string_view bytes) {
+        if (self->quitting.load(std::memory_order_acquire)) return;
+        self->model->append_stderr(bytes);
+      },
       [self](int status) {
-        const bool expected = self->expected_exit || self->quitting;
+        if (self->quitting.load(std::memory_order_acquire)) return;
+        const bool expected = self->expected_exit;
         self->expected_exit = false;
         const auto recovery =
             self->model->helper_exited(status, expected, monotonic_milliseconds());
@@ -229,7 +240,8 @@ void start_helper(AppState& app) {
 }
 
 void schedule_recovery(AppState& app, companion::RecoverySchedule schedule) {
-  if (app.quitting || !app.model->recovery_active() ||
+  if (app.quitting.load(std::memory_order_acquire) ||
+      !app.model->recovery_active() ||
       app.model->recovery_generation() != schedule.generation) {
     return;
   }
@@ -247,12 +259,16 @@ void schedule_recovery(AppState& app, companion::RecoverySchedule schedule) {
 }
 
 void preflight_recovery(AppState& app, std::uint64_t generation) {
-  if (app.quitting || app.model->recovery_generation() != generation) return;
+  if (app.quitting.load(std::memory_order_acquire) ||
+      app.model->recovery_generation() != generation) {
+    return;
+  }
   AppState* self = &app;
   app.process->probe([self, generation](
                          std::optional<companion::HealthSnapshot> health,
                          std::string) {
-    if (self->quitting || self->model->recovery_generation() != generation) {
+    if (self->quitting.load(std::memory_order_acquire) ||
+        self->model->recovery_generation() != generation) {
       return;
     }
     if (health.has_value()) {
@@ -270,16 +286,21 @@ void preflight_recovery(AppState& app, std::uint64_t generation) {
 }
 
 void start_recovery_helper(AppState& app, std::uint64_t generation) {
-  if (app.quitting || app.model->recovery_generation() != generation ||
+  if (app.quitting.load(std::memory_order_acquire) ||
+      app.model->recovery_generation() != generation ||
       app.process->owned_pid().has_value()) {
     return;
   }
   AppState* self = &app;
   std::string error;
   const bool started = app.process->start(
-      [self](std::string_view bytes) { self->model->append_stderr(bytes); },
+      [self](std::string_view bytes) {
+        if (self->quitting.load(std::memory_order_acquire)) return;
+        self->model->append_stderr(bytes);
+      },
       [self](int status) {
-        const bool expected = self->expected_exit || self->quitting;
+        if (self->quitting.load(std::memory_order_acquire)) return;
+        const bool expected = self->expected_exit;
         self->expected_exit = false;
         const auto recovery =
             self->model->helper_exited(status, expected, monotonic_milliseconds());
@@ -303,7 +324,7 @@ void start_recovery_helper(AppState& app, std::uint64_t generation) {
 }
 
 void poll_status(AppState& app) {
-  if (app.quitting) return;
+  if (app.quitting.load(std::memory_order_acquire)) return;
   // While no replacement process exists, the generation-bound recovery
   // preflight is the sole owner of discovery -- this keeps the periodic
   // poll from consuming or cancelling the same attempt concurrently.
@@ -315,7 +336,8 @@ void poll_status(AppState& app) {
   app.process->probe([self, generation](
                          std::optional<companion::HealthSnapshot> health,
                          std::string) {
-    if (self->quitting || self->model->recovery_generation() != generation) {
+    if (self->quitting.load(std::memory_order_acquire) ||
+        self->model->recovery_generation() != generation) {
       return;
     }
     if (health.has_value()) {
@@ -336,11 +358,13 @@ void poll_status(AppState& app) {
 }
 
 void refresh_pairings(AppState& app) {
+  if (app.quitting.load(std::memory_order_acquire)) return;
   if (app.pairings_loading) return;
   app.pairings_loading = true;
   AppState* self = &app;
   app.process->list_pairings(
       [self](std::vector<std::string> origins, std::string error) {
+        if (self->quitting.load(std::memory_order_acquire)) return;
         self->pairings = std::move(origins);
         self->pairing_error = std::move(error);
         self->pairings_loading = false;
@@ -365,7 +389,7 @@ void restart_sync(AppState& app) {
     app.expected_exit = true;
     AppState* self = &app;
     app.process->terminate([self] {
-      if (self->quitting) return;
+      if (self->quitting.load(std::memory_order_acquire)) return;
       start_helper(*self);
     });
   } else {
@@ -456,7 +480,7 @@ void handle_command(AppState& app, UINT command) {
     app.pairings_fetched_ever = false;  // force refresh even if "fresh"
     refresh_pairings(app);
   } else if (command == kCommandQuit) {
-    app.quitting = true;
+    app.quitting.store(true, std::memory_order_release);
     app.model->cancel_recovery();
     ::KillTimer(app.hwnd, kPollTimerId);
     ::KillTimer(app.hwnd, kRecoveryTimerId);
@@ -482,12 +506,17 @@ void handle_command(AppState& app, UINT command) {
     AppState* self = &app;
     app.process->revoke_pairing(
         origin, [self](bool revoked, std::string error) {
-          if (!revoked) {
-            ::MessageBoxW(self->hwnd, to_wide(error).c_str(),
-                         L"Could not revoke pairing", MB_OK | MB_ICONERROR);
-          }
-          self->pairings_fetched_ever = false;
-          refresh_pairings(*self);
+          companion::complete_revocation(
+              self->quitting.load(std::memory_order_acquire), revoked, error,
+              [self](std::string_view message) {
+                ::MessageBoxW(self->hwnd, to_wide(message).c_str(),
+                              L"Could not revoke pairing",
+                              MB_OK | MB_ICONERROR);
+              },
+              [self] {
+                self->pairings_fetched_ever = false;
+                refresh_pairings(*self);
+              });
         });
   }
 }

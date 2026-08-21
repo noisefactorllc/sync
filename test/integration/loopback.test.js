@@ -982,6 +982,9 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
 
     daemon = await start("denied.store", "deny");
     assert.equal((await pairWithDaemon(daemon.ready, originA)).code, "pairing_denied");
+    assert.equal((await pairWithDaemon(daemon.ready, originB, "Different origin")).code,
+                 "pairing_cooldown",
+                 "one webpage cannot replace another prompt during the global cooldown");
     await stop(daemon);
 
     daemon = await start("native-timeout.store", "timeout");
@@ -1231,7 +1234,9 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal((await pairWithDaemon(daemon.ready, originA, "Retry")).code,
                  "pairing_cooldown");
+    await stop(daemon);
 
+    daemon = await start("duplicate.store", "hang");
     const duplicate = await upgrade({ port: daemon.ready.port, route: "/pair", origin: originD });
     assert.equal(duplicate.status, 101);
     activeClients.add(duplicate.client);
@@ -1245,7 +1250,9 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     ]));
     assert.equal((await finishPairingClient(duplicate.client, "duplicate pairing request")).code,
                  "duplicate_request");
+    await stop(daemon);
 
+    daemon = await start("pending.store", "hang");
     const pending = await upgrade({ port: daemon.ready.port, route: "/pair", origin: originB });
     assert.equal(pending.status, 101);
     activeClients.add(pending.client);

@@ -19,11 +19,12 @@ section 2). Sync's Windows installer therefore ships a pinned
 location (b) below. Source-only daemon builds may continue to supply another
 compatible DLL at runtime via `--spout-library`.
 
-**Pinned revision:** `TODO(release-engineer): record the exact SpoutLibrary
-release/commit this build's SpoutLibrary.dll was built from, and the
-SHA-256 of the shipped binary, before the first installer build. Mirror
-syphon.md's precedent of naming an exact upstream revision -- do not leave
-this as a floating "latest" dependency.`
+**Pinned source:** Spout `2.007.017`, revision
+`f49e2f469f8cb25f559a6eaa61a3f5b8173fc100`. The release harness builds
+`SpoutLibrary.dll` from that exact revision with MSVC; the same revision and
+version are carried in `packaging/windows/Third-Party-Notices.txt`. Release
+artifact checksums belong to the immutable CI release output because the DLL
+is built there rather than committed to this repository.
 
 ## Discovery boundary
 
@@ -96,7 +97,7 @@ Two things keep that assumption honest:
    may well be another in-image pointer. It reliably rejects a module that is
    not `SPOUTLIBRARY` at all; it does not reliably tell a 166-slot build from
    a 172-slot one. The pinned DLL is what actually carries that guarantee,
-   which is why the revision and hash above must be filled in before release.
+   which is why the exact source revision above is part of the release input.
 
 `--spout-library` is therefore a developer escape hatch pointed at a
 known-good build, not a general compatibility mechanism.

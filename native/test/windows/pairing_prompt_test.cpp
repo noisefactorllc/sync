@@ -6,6 +6,7 @@
 
 #include "../../src/platform/windows/pairing_prompt_internal.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -22,21 +24,20 @@ namespace pairing = noisefactor::sync::pairing;
 namespace prompt_test = noisefactor::sync::platform::pairing_prompt_testing;
 using namespace std::chrono_literals;
 
-// None of these tests ever show a real MessageBoxW: they go through the
-// same Adapter seam (native/src/platform/windows/pairing_prompt_internal.hpp)
-// that Win32MessageBoxAdapter implements in production, so nothing here
-// requires a human to click anything in CI.
+// Most tests use the same Adapter seam the production TaskDialog implements,
+// so they need no desktop. The final adapter-level test opens the real dialog
+// and closes it programmatically; no human click is required in CI.
 enum class AdapterMode {
   Approve,
   Deny,
   Fail,
   // Blocks in show() until force_close() is observed, then returns Denied --
-  // the same outcome a real MB_YESNO box gives when its window is closed via
-  // WM_CLOSE. Stands in for "the box is still open" in tests.
+  // the same outcome the real TaskDialog gives when its Deny button is
+  // selected programmatically. Stands in for "the dialog is open" in tests.
   BlockUntilClosed,
   // Blocks in show() BEFORE reporting a window, then reports it only once
-  // the test allows. Reproduces the real gap between entering MessageBoxW
-  // and the CBT hook delivering its HWND -- the window in which a cancel()
+  // the test allows. Reproduces the real gap between entering TaskDialog and
+  // receiving TDN_CREATED -- the window in which a cancel()
   // finds nothing to close.
   BlockBeforeReportingWindow,
   // Blocks in show() until the test explicitly releases it, then approves --
@@ -202,8 +203,7 @@ SYNC_TEST(windows_prompt_approval_copies_security_identity_into_message) {
                  "Security identity: https://example.com\n"
                  "Unverified app label: Nøise Deck\n\n"
                  "Allow this origin to publish video from this machine "
-                 "through Sync?\n\n"
-                 "Click Yes to allow, No to deny.");
+                 "through Sync?");
   }
   require_single_worker_thread(*record);
 }
@@ -342,7 +342,7 @@ SYNC_TEST(windows_prompt_destruction_with_an_outstanding_prompt_is_safe) {
 
 // Regression test for a liveness bug, not a correctness one.
 //
-// A real MessageBoxW only reveals its HWND once the CBT hook fires, slightly
+// A real TaskDialog only reveals its HWND once TDN_CREATED fires, slightly
 // after show() is entered. A cancel() or a destructor landing in that gap
 // used to read active_window == 0, close nothing, and -- because
 // cancel_active/stopping were already latched -- never look again. The dialog
@@ -377,6 +377,42 @@ SYNC_TEST(windows_prompt_destruction_is_bounded_when_cancel_beats_the_window_han
   SYNC_REQUIRE(elapsed < 3s);
   SYNC_REQUIRE(record->force_close_calls >= 1);
   require_single_worker_thread(*record);
+}
+
+SYNC_TEST(windows_native_prompt_force_close_is_bounded) {
+  auto adapter = prompt_test::Factory::create_native_adapter();
+  prompt_test::Presentation presentation;
+  constexpr std::string_view title = "Sync pairing request";
+  constexpr std::string_view message =
+      "Security identity: https://ci.example\nUnverified app label: CI\n\n"
+      "Allow this origin to publish video from this machine through Sync?";
+  std::copy(title.begin(), title.end(), presentation.title_bytes.begin());
+  presentation.title_length = title.size();
+  std::copy(message.begin(), message.end(), presentation.message_bytes.begin());
+  presentation.message_length = message.size();
+
+  std::atomic<std::uintptr_t> window{0};
+  std::atomic<bool> finished{false};
+  auto response = prompt_test::AdapterResponse::Failed;
+  const auto started = std::chrono::steady_clock::now();
+  std::thread worker([&] {
+    response = adapter->show(presentation, [&](std::uintptr_t reported) {
+      window.store(reported, std::memory_order_release);
+    });
+    finished.store(true, std::memory_order_release);
+  });
+
+  SYNC_REQUIRE(wait_until([&] {
+    return window.load(std::memory_order_acquire) != 0 ||
+           finished.load(std::memory_order_acquire);
+  }));
+  const auto reported = window.load(std::memory_order_acquire);
+  if (reported != 0) adapter->force_close(reported);
+  worker.join();
+
+  SYNC_REQUIRE(std::chrono::steady_clock::now() - started < 2s);
+  SYNC_REQUIRE(reported != 0);
+  SYNC_REQUIRE(response == prompt_test::AdapterResponse::Denied);
 }
 
 }  // namespace

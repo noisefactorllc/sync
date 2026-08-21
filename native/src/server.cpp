@@ -35,7 +35,6 @@ constexpr std::size_t kMaximumSenderOwners = kMaximumSenders;
 constexpr std::size_t kManagementConnectionHeadroom = 16;
 constexpr std::size_t kMaximumConnections =
     kMaximumSenders + kMaximumSenderOwners + kManagementConnectionHeadroom;
-constexpr std::size_t kMaximumPairingCooldowns = 64;
 constexpr std::size_t kMaximumControlMessageBytes = 16U * 1024U;
 constexpr std::size_t kMaximumDataMessageBytes = 64U * 1024U * 1024U + 64U;
 constexpr std::size_t kMaximumInboundDataPayloadBytes =
@@ -52,7 +51,15 @@ constexpr std::uint64_t kPairingPromptDeadlineMs =
 #else
 constexpr std::uint64_t kPairingPromptDeadlineMs = 30'000;
 #endif
-constexpr std::uint64_t kPairingCooldownMs = 1000;
+#if defined(SYNC_PAIRING_COOLDOWN_MS)
+static_assert(SYNC_PAIRING_COOLDOWN_MS > 0);
+constexpr std::uint64_t kPairingCooldownMs = SYNC_PAIRING_COOLDOWN_MS;
+#else
+// Pairing is allowed to interrupt the performer, so one completed prompt
+// suppresses every origin for a meaningful interval. Tests override this to
+// keep the integration suite fast.
+constexpr std::uint64_t kPairingCooldownMs = 30'000;
+#endif
 constexpr std::uint64_t kWebSocketCloseDeadlineMs = 750;
 constexpr std::uint64_t kDataMessageDeadlineMs = 2'000;
 constexpr std::uint64_t kDeadlineSweepIntervalMs = 50;
@@ -124,11 +131,6 @@ struct Sender {
   Connection *owner = nullptr;
   Connection *data = nullptr;
   NormalizedOrigin origin{};
-};
-
-struct PairingCooldown {
-  NormalizedOrigin origin{};
-  std::uint64_t until_ms = 0;
 };
 
 class ScopedStringCleanse {
@@ -1098,38 +1100,20 @@ class Server {
     }
   }
 
-  [[nodiscard]] bool pairing_cooling_down(const NormalizedOrigin &origin,
-                                          std::uint64_t now) const noexcept {
-    if (global_pairing_cooldown_until_ > now)
-      return true;
-    for (const PairingCooldown &cooldown : pairing_cooldowns_) {
-      if (cooldown.until_ms > now && cooldown.origin == origin)
-        return true;
-    }
-    return false;
+  [[nodiscard]] bool pairing_cooling_down(
+      std::uint64_t now) const noexcept {
+    return global_pairing_cooldown_until_ > now;
   }
 
   void apply_pairing_cooldown(const NormalizedOrigin &origin,
                               std::uint64_t now) noexcept {
     if (origin.empty())
       return;
-    PairingCooldown *available = nullptr;
-    for (PairingCooldown &cooldown : pairing_cooldowns_) {
-      if (cooldown.origin == origin) {
-        cooldown.until_ms = now + kPairingCooldownMs;
-        return;
-      }
-      if (available == nullptr &&
-          (cooldown.origin.empty() || cooldown.until_ms <= now)) {
-        available = &cooldown;
-      }
-    }
-    if (available == nullptr) {
-      global_pairing_cooldown_until_ = now + kPairingCooldownMs;
-      return;
-    }
-    available->origin = origin;
-    available->until_ms = now + kPairingCooldownMs;
+    const std::uint64_t until =
+        now > std::numeric_limits<std::uint64_t>::max() - kPairingCooldownMs
+            ? std::numeric_limits<std::uint64_t>::max()
+            : now + kPairingCooldownMs;
+    global_pairing_cooldown_until_ = until;
   }
 
   bool queue_write(Connection &connection, std::vector<std::byte> bytes,
@@ -1730,7 +1714,7 @@ class Server {
       return;
     }
     const std::uint64_t now = uv_now(&loop_);
-    if (pairing_cooling_down(connection.origin, now)) {
+    if (pairing_cooling_down(now)) {
       queue_pairing_error(connection, "pairing_cooldown",
                           "Pairing is cooling down");
       return;
@@ -1946,7 +1930,6 @@ class Server {
   std::uint64_t next_pairing_generation_ = 0;
   std::uint64_t active_pairing_generation_ = 0;
   std::uint64_t next_authority_generation_ = 0;
-  std::array<PairingCooldown, kMaximumPairingCooldowns> pairing_cooldowns_{};
   std::uint64_t global_pairing_cooldown_until_ = 0;
 };
 

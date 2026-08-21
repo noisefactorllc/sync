@@ -1,0 +1,4 @@
+// TaskDialogIndirect requires the version 6 common-controls activation
+// context. This resource is embedded in both production executables and the
+// native adapter test so CI exercises the same activation boundary.
+1 24 "@SYNC_COMMON_CONTROLS_MANIFEST@"

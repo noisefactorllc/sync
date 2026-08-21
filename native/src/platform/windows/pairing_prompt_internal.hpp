@@ -12,9 +12,8 @@
 
 // Test seam for WindowsPairingPrompt, mirroring
 // native/src/platform/macos/pairing_prompt_internal.hpp: production code goes
-// through a real Win32 adapter (Win32MessageBoxAdapter, defined in
-// pairing_prompt.cpp) while tests inject a fake Adapter so no MessageBoxW
-// ever has to appear -- and therefore be clicked by a human -- in CI.
+// through a real Win32 TaskDialog adapter (defined in pairing_prompt.cpp)
+// while most tests inject a fake Adapter.
 namespace noisefactor::sync::platform::pairing_prompt_testing {
 
 inline constexpr std::size_t kMaximumPromptTitleBytes = 64;
@@ -36,7 +35,7 @@ struct Presentation {
 
 enum class AdapterResponse { Approved, Denied, Failed };
 
-// Abstracts the modal Win32 MessageBoxW call.
+// Abstracts the modal Win32 TaskDialog call.
 //
 // show() runs on the calling (worker) thread and blocks until the user
 // responds, or until force_close() (called from another thread) makes the
@@ -46,9 +45,9 @@ enum class AdapterResponse { Approved, Denied, Failed };
 // concurrent cancel/deadline watcher can ask it to close.
 //
 // report_window may be invoked from a callback nested inside show() itself
-// (the real adapter uses a WH_CBT hook that fires synchronously on the same
-// thread), so it must be safe to call without re-entering any lock held by
-// the caller of show().
+// (the real adapter receives TaskDialog's TDN_CREATED callback synchronously
+// on the same thread), so it must be safe to call without re-entering a lock
+// held by the caller of show().
 class Adapter {
  public:
   virtual ~Adapter() = default;
@@ -73,6 +72,10 @@ class Factory {
   [[nodiscard]] static std::unique_ptr<WindowsPairingPrompt> create(
       std::unique_ptr<Adapter> adapter,
       std::chrono::milliseconds ui_deadline);
+
+  // Exercises the production Win32 adapter itself in Windows CI without
+  // routing through WindowsPairingPrompt's worker/watchdog state machine.
+  [[nodiscard]] static std::unique_ptr<Adapter> create_native_adapter();
 };
 
 }  // namespace noisefactor::sync::platform::pairing_prompt_testing

@@ -7,6 +7,15 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
+
+#if defined(_MSC_VER)
+// TaskDialogIndirect is available only under the version 6 common-controls
+// activation context. Carry the dependency from this object into every MSVC
+// executable that consumes the static library; MinGW gets the equivalent
+// manifest resource from CMake.
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -50,10 +59,7 @@ bool append(std::span<char> output, std::size_t& length,
 }
 
 // Wording matches MacPairingPrompt's build_presentation in tone and security
-// emphasis (exact identity, exact requested name, never truncated), adapted
-// for MessageBoxW's fixed Yes/No buttons -- there is no way to relabel them
-// to "Allow"/"Deny" without a TaskDialog, so the question text spells out
-// what each button means instead.
+// emphasis (exact identity, exact requested name, never truncated).
 bool build_presentation(const pairing::PromptRequest& request,
                         prompt_test::Presentation& output) noexcept {
   constexpr std::string_view title = "Sync pairing request";
@@ -61,7 +67,7 @@ bool build_presentation(const pairing::PromptRequest& request,
   constexpr std::string_view label = "\nUnverified app label: ";
   constexpr std::string_view question =
       "\n\nAllow this origin to publish video from this machine through "
-      "Sync?\n\nClick Yes to allow, No to deny.";
+      "Sync?";
   return append(output.title_bytes, output.title_length, title) &&
          append(output.message_bytes, output.message_length, identity) &&
          append(output.message_bytes, output.message_length,
@@ -83,72 +89,90 @@ std::wstring to_wide(std::string_view utf8) {
   return wide;
 }
 
-// Captures the HWND of the MessageBoxW created by this thread so a
-// concurrent cancel()/deadline watcher can ask it to close.
-//
-// WH_CBT is installed with an explicit thread id (GetCurrentThreadId()), so
-// it only ever observes windows created on the calling thread -- this Win32
-// message box's own window -- even if other WindowsPairingPrompt instances
-// are showing their own boxes on their own worker threads at the same time.
-// The hook proc itself cannot carry a `this` pointer (Win32 hook procs are
-// plain function pointers), so it reaches its target through a thread_local
-// slot that Win32MessageBoxAdapter::show sets up immediately before calling
-// MessageBoxW and clears immediately after -- safe because a given worker
-// thread only ever has one MessageBoxW call in flight at a time (begin()
-// refuses a second prompt while one is Active).
-thread_local const std::function<void(std::uintptr_t)>* g_report_window =
-    nullptr;
-
-LRESULT CALLBACK cbt_hook(int code, WPARAM wparam, LPARAM lparam) {
-  if (code == HCBT_ACTIVATE && g_report_window != nullptr) {
-    const auto window = reinterpret_cast<std::uintptr_t>(
-        reinterpret_cast<HWND>(wparam));
-    (*g_report_window)(window);
-  }
-  return ::CallNextHookEx(nullptr, code, wparam, lparam);
-}
-
-class Win32MessageBoxAdapter final : public prompt_test::Adapter {
+class Win32TaskDialogAdapter final : public prompt_test::Adapter {
  public:
   prompt_test::AdapterResponse show(
       const prompt_test::Presentation& presentation,
       const std::function<void(std::uintptr_t)>& report_window) override {
     const std::wstring wide_title = to_wide(presentation.title());
     const std::wstring wide_message = to_wide(presentation.message());
+    if ((!presentation.title().empty() && wide_title.empty()) ||
+        (!presentation.message().empty() && wide_message.empty())) {
+      return prompt_test::AdapterResponse::Failed;
+    }
 
-    g_report_window = &report_window;
-    const HHOOK hook = ::SetWindowsHookExW(WH_CBT, &cbt_hook, nullptr,
-                                          ::GetCurrentThreadId());
-    // MB_DEFBUTTON2 makes "No" the focused/default button, mirroring
-    // MacPairingPrompt's default-to-Deny button choice: an accidental Enter
-    // keypress denies rather than approves.
-    const int response = ::MessageBoxW(
-        nullptr, wide_message.c_str(), wide_title.c_str(),
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND |
-            MB_TOPMOST | MB_SYSTEMMODAL);
-    if (hook != nullptr) ::UnhookWindowsHookEx(hook);
-    g_report_window = nullptr;
+    const TASKDIALOG_BUTTON buttons[] = {
+        {.nButtonID = IDYES, .pszButtonText = L"&Allow"},
+        {.nButtonID = IDNO, .pszButtonText = L"&Deny"},
+    };
+    CallbackContext context{.adapter = this,
+                            .report_window = &report_window};
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof(config);
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    config.pszWindowTitle = wide_title.c_str();
+    config.pszMainIcon = TD_WARNING_ICON;
+    config.pszMainInstruction = L"Review this pairing request";
+    config.pszContent = wide_message.c_str();
+    config.cButtons = static_cast<UINT>(std::size(buttons));
+    config.pButtons = buttons;
+    config.nDefaultButton = IDNO;
+    config.pfCallback = &dialog_callback;
+    config.lpCallbackData = reinterpret_cast<LONG_PTR>(&context);
 
+    int response = 0;
+    const HRESULT result = ::TaskDialogIndirect(&config, &response, nullptr,
+                                                nullptr);
+    live_window_.store(0, std::memory_order_release);
+    if (FAILED(result)) return prompt_test::AdapterResponse::Failed;
     if (response == IDYES) return prompt_test::AdapterResponse::Approved;
-    if (response == IDNO) return prompt_test::AdapterResponse::Denied;
+    if (response == IDNO || response == IDCANCEL) {
+      return prompt_test::AdapterResponse::Denied;
+    }
     return prompt_test::AdapterResponse::Failed;
   }
 
   void force_close(std::uintptr_t window) override {
     if (window == 0) return;
-    // EndDialog cannot be used against a plain MessageBoxW (it has no
-    // dialog procedure we control). Posting WM_CLOSE to its window is the
-    // standard way to make MessageBoxW's internal modal loop return early;
-    // for an MB_YESNO box with no Cancel button this makes it return IDNO,
-    // which the run loop below only trusts once it has independently
-    // decided (via cancel_active / deadline_fired) that a close was
-    // actually requested. If `window` has already been destroyed and its
-    // handle value reused by an unrelated window (a narrow, well known
-    // Win32 race), this posts WM_CLOSE to that unrelated window instead;
-    // that is an accepted risk of this best-effort mechanism. It is not
-    // relied on for correctness -- see the comment on Adapter::force_close.
-    ::PostMessageW(reinterpret_cast<HWND>(window), WM_CLOSE, 0, 0);
+    // TDM_CLICK_BUTTON is handled by TaskDialog's own loop and makes the
+    // blocking call return IDNO. The live-window equality check, cleared by
+    // TDN_DESTROYED before the HWND can be reused, prevents a late watcher
+    // from posting even this private control message to an unrelated window.
+    if (live_window_.load(std::memory_order_acquire) != window) return;
+    ::PostMessageW(reinterpret_cast<HWND>(window), TDM_CLICK_BUTTON, IDNO, 0);
   }
+
+ private:
+  struct CallbackContext {
+    Win32TaskDialogAdapter* adapter = nullptr;
+    const std::function<void(std::uintptr_t)>* report_window = nullptr;
+  };
+
+  static HRESULT CALLBACK dialog_callback(HWND window, UINT notification,
+                                          WPARAM, LPARAM,
+                                          LONG_PTR callback_data) noexcept {
+    auto* context = reinterpret_cast<CallbackContext*>(callback_data);
+    if (context == nullptr || context->adapter == nullptr) return S_OK;
+    const auto packed = reinterpret_cast<std::uintptr_t>(window);
+    if (notification == TDN_CREATED) {
+      context->adapter->live_window_.store(packed,
+                                           std::memory_order_release);
+      if (context->report_window != nullptr) {
+        try {
+          (*context->report_window)(packed);
+        } catch (...) {
+          return E_FAIL;
+        }
+      }
+    } else if (notification == TDN_DESTROYED) {
+      std::uintptr_t expected = packed;
+      (void)context->adapter->live_window_.compare_exchange_strong(
+          expected, 0, std::memory_order_acq_rel);
+    }
+    return S_OK;
+  }
+
+  std::atomic<std::uintptr_t> live_window_{0};
 };
 
 }  // namespace
@@ -204,7 +228,7 @@ struct WindowsPairingPrompt::Impl {
     }
     // Best-effort and deliberately outside the lock: a Win32 call must never
     // run while this->mutex is held, and cancel() must never block waiting
-    // on the message box thread. The discard guarantee below does not
+    // on the dialog thread. The discard guarantee below does not
     // depend on this call succeeding.
     if (window_to_close != 0 && adapter != nullptr) {
       adapter->force_close(window_to_close);
@@ -267,8 +291,8 @@ struct WindowsPairingPrompt::Impl {
       bool deadline_fired = false;
 
       if (created) {
-        // MessageBoxW has no timeout parameter, so a watcher thread races
-        // the blocking show() call below: it is the only thing that can
+        // TaskDialogIndirect has no timeout parameter, so a watcher thread
+        // races the blocking show() call below: it is the only thing that can
         // turn ui_deadline into an actual forced close. It also reacts to
         // cancel()/shutdown() immediately rather than waiting for show() to
         // return on its own, the same way MacPairingPrompt's run loop polls
@@ -285,8 +309,8 @@ struct WindowsPairingPrompt::Impl {
           const bool timed_out = !cancel_active && !stopping;
           if (timed_out) deadline_fired = true;
 
-          // The window handle only becomes known when the CBT hook fires,
-          // which is slightly AFTER show() is entered. A cancel() or
+          // The window handle only becomes known when TaskDialog reports
+          // TDN_CREATED, which is slightly AFTER show() is entered. A cancel or
           // shutdown() landing in that gap reads active_window == 0, closes
           // nothing, and -- because cancel_active/stopping are already
           // latched -- never gets another wake-up. The dialog would then
@@ -334,7 +358,7 @@ struct WindowsPairingPrompt::Impl {
       {
         std::lock_guard lock(mutex);
         // A generation the caller cancelled (or a shutdown in progress)
-        // never surfaces a decision, however the message box actually
+        // never surfaces a decision, however the dialog actually
         // resolved -- this is the guarantee that holds independently of
         // whether force_close managed to close a real window.
         const bool suppressed = stopping || cancel_active;
@@ -372,7 +396,7 @@ struct WindowsPairingPrompt::Impl {
 
 WindowsPairingPrompt::WindowsPairingPrompt()
     : WindowsPairingPrompt(std::make_unique<Impl>(
-          std::make_unique<Win32MessageBoxAdapter>(),
+          std::make_unique<Win32TaskDialogAdapter>(),
           std::chrono::duration_cast<std::chrono::milliseconds>(
               kProductionUiDeadline))) {}
 
@@ -402,6 +426,10 @@ std::unique_ptr<WindowsPairingPrompt> Factory::create(
   return std::unique_ptr<WindowsPairingPrompt>(new WindowsPairingPrompt(
       std::make_unique<WindowsPairingPrompt::Impl>(std::move(adapter),
                                                     ui_deadline)));
+}
+
+std::unique_ptr<Adapter> Factory::create_native_adapter() {
+  return std::make_unique<Win32TaskDialogAdapter>();
 }
 
 }  // namespace pairing_prompt_testing

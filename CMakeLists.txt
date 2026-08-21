@@ -107,6 +107,7 @@ add_executable(sync_protocol_tests
   native/test/control_test.cpp
   native/test/frame_receiver_test.cpp
   native/test/publisher_hub_test.cpp
+  native/test/replacement_budget_test.cpp
   native/test/server_contract_test.cpp
   native/test/test_main.cpp
   native/test/protocol_test.cpp
@@ -158,6 +159,7 @@ add_executable(sync_pairing_test_server
 )
 target_compile_features(sync_pairing_test_server PRIVATE cxx_std_20)
 target_compile_definitions(sync_pairing_test_server PRIVATE
+  SYNC_PAIRING_COOLDOWN_MS=1000
   SYNC_PAIRING_PROMPT_DEADLINE_MS=525
 )
 target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
@@ -166,12 +168,14 @@ target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBU
 # backoff, and health reporting — shared by the macOS menu-bar app and the
 # Windows tray app, so it is built once for both.
 add_library(sync_companion_model
+  native/src/companion_management.cpp
   native/src/companion_model.cpp
 )
 target_compile_features(sync_companion_model PUBLIC cxx_std_20)
 target_include_directories(sync_companion_model PUBLIC native/include)
 
 add_executable(sync_companion_model_tests
+  native/test/companion_management_test.cpp
   native/test/companion_model_test.cpp
   native/test/test_main.cpp
 )
@@ -452,6 +456,21 @@ if(APPLE)
     ${FOUNDATION_FRAMEWORK} ${CORE_FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
   )
 elseif(WIN32)
+  # MSVC receives this through pairing_prompt.cpp's manifestdependency
+  # directive. Resource compilation is the equivalent for MinGW, which
+  # ignores that directive.
+  if(NOT MSVC)
+    set(SYNC_COMMON_CONTROLS_MANIFEST
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/common-controls.manifest)
+    configure_file(
+      packaging/windows/common-controls.rc.in
+      ${CMAKE_CURRENT_BINARY_DIR}/sync-common-controls.rc
+      @ONLY
+    )
+    set(SYNC_COMMON_CONTROLS_RESOURCE
+        ${CMAKE_CURRENT_BINARY_DIR}/sync-common-controls.rc)
+  endif()
+
   add_library(sync_spout_publisher
     native/src/platform/windows/spout_publisher.cpp
   )
@@ -473,11 +492,12 @@ elseif(WIN32)
   )
   target_compile_features(sync_pairing_prompt PUBLIC cxx_std_20)
   target_include_directories(sync_pairing_prompt PUBLIC native/include)
-  target_link_libraries(sync_pairing_prompt PUBLIC sync_protocol PRIVATE user32)
+  target_link_libraries(sync_pairing_prompt PUBLIC sync_protocol PRIVATE comctl32 user32)
 
   add_executable(sync_pairing_prompt_tests
     native/test/windows/pairing_prompt_test.cpp
     native/test/test_main.cpp
+    ${SYNC_COMMON_CONTROLS_RESOURCE}
   )
   target_compile_features(sync_pairing_prompt_tests PRIVATE cxx_std_20)
   target_include_directories(sync_pairing_prompt_tests PRIVATE native/test)
@@ -575,7 +595,10 @@ elseif(WIN32)
     sync_companion_process shell32 user32 advapi32
   )
 
-  target_sources(syncd PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc)
+  target_sources(syncd PRIVATE
+    ${SYNC_COMMON_CONTROLS_RESOURCE}
+    ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
+  )
   target_link_libraries(syncd PRIVATE
     sync_pairing_prompt sync_spout_publisher user32
   )

@@ -36,10 +36,10 @@ class MacPairingPrompt final : public pairing::PairingPrompt {
 #if defined(_WIN32)
 
 // Windows analogue of MacPairingPrompt: same non-blocking begin/poll/cancel
-// contract, backed by a MessageBoxW shown on a dedicated worker thread
-// instead of CFUserNotification. See native/src/platform/windows/
+// contract, backed by a cancellable TaskDialog shown on a dedicated worker
+// thread instead of CFUserNotification. See native/src/platform/windows/
 // pairing_prompt.cpp for the implementation and pairing_prompt_internal.hpp
-// for the test seam that lets tests avoid ever showing a real message box.
+// for the adapter test seam.
 class WindowsPairingPrompt final : public pairing::PairingPrompt {
  public:
   WindowsPairingPrompt();

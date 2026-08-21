@@ -1,5 +1,7 @@
 #include <sync/platform/spout_publisher.hpp>
 
+#include "../../replacement_budget.hpp"
+
 // This is the one file in the Spout provider allowed to see Win32 types --
 // the header deliberately does not, so every other translation unit that
 // merely wants to hold a SpoutFramePublisher stays windows.h-free. See
@@ -42,18 +44,10 @@ constexpr std::uint32_t kMaximumPayloadBytes = 64U * 1024U * 1024U;
 constexpr unsigned int kGlRgbaFormat = 0x1908U;
 
 // ---------------------------------------------------------------------------
-// Checked arithmetic (identical shape to metal_frame_publisher.mm's helpers;
+// Checked arithmetic (identical shape to metal_frame_publisher.mm's helper;
 // duplicated rather than shared because the two platforms do not share a
 // translation unit and this file must not pull in an Apple-only header).
 // ---------------------------------------------------------------------------
-
-auto checked_add(std::size_t left, std::size_t right, std::size_t& result) noexcept -> bool {
-  if (left > std::numeric_limits<std::size_t>::max() - right) {
-    return false;
-  }
-  result = left + right;
-  return true;
-}
 
 auto checked_multiply(std::size_t left, std::size_t right, std::size_t& result) noexcept -> bool {
   if (right != 0 && left > std::numeric_limits<std::size_t>::max() / right) {
@@ -583,19 +577,21 @@ struct SpoutFramePublisher::Impl {
     if (entry.repack_capacity_bytes >= needed_bytes) {
       return true;
     }
-    const std::size_t retained_bytes = allocated_bytes - entry.repack_capacity_bytes;
-    std::size_t replacement_total = 0;
-    if (!checked_add(retained_bytes, needed_bytes, replacement_total) ||
-        replacement_total > allocation_budget_bytes) {
+    const auto replacement_total = allocation::replacement_total_if_peak_fits(
+        allocated_bytes, entry.repack_capacity_bytes, needed_bytes,
+        allocation_budget_bytes);
+    if (!replacement_total.has_value()) {
       return false;
     }
+    std::unique_ptr<std::byte[]> replacement;
     try {
-      entry.repack_buffer = std::make_unique<std::byte[]>(needed_bytes);
+      replacement = std::make_unique<std::byte[]>(needed_bytes);
     } catch (const std::exception&) {
       return false;
     }
+    entry.repack_buffer = std::move(replacement);
     entry.repack_capacity_bytes = needed_bytes;
-    allocated_bytes = replacement_total;
+    allocated_bytes = *replacement_total;
     return true;
   }
 
