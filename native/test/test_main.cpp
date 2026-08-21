@@ -39,10 +39,19 @@ void report_failures_without_blocking() noexcept {
                  SEM_NOOPENFILEERRORBOX);
 #endif
 #if defined(_MSC_VER)
+#if defined(_DEBUG)
+  // Only the debug CRT reports through a dialog, and only the debug CRT
+  // defines these as anything. In a release CRT they expand to nothing, which
+  // leaves `report` initialised and unreferenced -- C4189, and an error under
+  // /WX. Guarding on _DEBUG says what is actually true: there is nothing here
+  // to turn off unless the debug CRT is the one running.
   for (const int report : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) {
     _CrtSetReportMode(report, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(report, _CRTDBG_FILE_STDERR);
   }
+#endif
+  // Not debug-only: abort() can end a release build too, and its dialog would
+  // hang a runner just the same.
   _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
 }
