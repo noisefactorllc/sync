@@ -3,7 +3,8 @@ Sync Windows Preview — Third-Party Notices
 
 Spout
 Source: https://github.com/leadedge/Spout2
-Pinned source revision: TODO-PIN-SPOUT-REVISION
+Pinned source revision: f49e2f469f8cb25f559a6eaa61a3f5b8173fc100
+Pinned source version: 2.007.017
 
 Sync does not link Spout at build time. The installer redistributes a pinned
 build of SpoutLibrary.dll, which the daemon discovers at run time through the

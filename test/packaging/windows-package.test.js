@@ -82,17 +82,22 @@ test("distributed Windows notices cover every bundled dependency", () => {
   assert.match(notices, /END OF TERMS AND CONDITIONS/);
 });
 
-// A pinned revision is what makes the shipped Spout auditable. The placeholder
-// is allowed to exist in the repository, but this test names it so it cannot be
-// forgotten: a release must replace it with the revision that was actually built.
-test("the bundled Spout revision is pinned or explicitly marked unpinned", () => {
+// A pinned revision is what makes the shipped Spout auditable. This test used
+// to accept a TODO placeholder, because nothing built a real Windows release
+// yet and CI packaged a stand-in DLL. A release harness now builds
+// SpoutLibrary.dll from this exact revision, so the placeholder is no longer a
+// legitimate state: what ships is a binary someone can reproduce, or it does
+// not ship.
+test("the bundled Spout revision is pinned to an auditable source", () => {
   const notices = source("packaging/windows/Third-Party-Notices.txt");
   const pinned = /Pinned source revision: ([0-9a-f]{40})/.exec(notices);
-  const placeholder = /Pinned source revision: TODO-PIN-SPOUT-REVISION/.test(notices);
-  assert.ok(
-    pinned !== null || placeholder,
-    "Spout notices must carry a 40-character revision or the explicit placeholder",
+  assert.ok(pinned !== null, "Spout notices must carry a 40-character revision");
+  assert.doesNotMatch(
+    notices,
+    /TODO-PIN-SPOUT-REVISION/,
+    "the placeholder must not survive into a release",
   );
+  assert.match(notices, /Pinned source version: 2\.\d+\.\d+/);
 });
 
 test("the installer requires every path to be passed in", () => {
