@@ -908,6 +908,21 @@ void CompanionProcess::Impl::run_management(
     std::function<void(int, std::string, bool)> completion) {
   begin_operation();
 
+  // Management commands get the same kill-on-close job the long-lived helper
+  // gets. They are short and bounded by a watchdog, so this looks redundant
+  // -- but the watchdog lives in this process, and if this process is killed
+  // outright the watchdog dies with it while the child keeps running. That
+  // child holds the pairing store's lock file, so an orphan does not merely
+  // linger: it makes the next syncd fail to open the store.
+  UniqueHandle job = create_kill_on_close_job();
+  if (!job) {
+    dispatch([this, completion = std::move(completion)]() mutable {
+      completion(-1, {}, false);
+      end_operation();
+    });
+    return;
+  }
+
   SECURITY_ATTRIBUTES inheritable_sa{sizeof(SECURITY_ATTRIBUTES), nullptr,
                                      TRUE};
   HANDLE stdout_read_raw = nullptr;
@@ -939,10 +954,13 @@ void CompanionProcess::Impl::run_management(
   startup.hStdError = nul.get();
 
   PROCESS_INFORMATION process_info{};
+  // CREATE_SUSPENDED so the child is confined to the job before it can run a
+  // single instruction; assigning afterwards would leave a window in which an
+  // unconfined child exists. Same reasoning as start().
   const BOOL created = ::CreateProcessW(
       options.helper_path.c_str(), command_line.data(), nullptr,
-      nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
-      &process_info);
+      nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr,
+      &startup, &process_info);
   // The parent must close its own copies of the pipe write end and the NUL
   // handle right after CreateProcess: the child has its own (inherited)
   // handles to them, and if the parent kept a copy of the write end open,
@@ -961,6 +979,21 @@ void CompanionProcess::Impl::run_management(
   UniqueHandle thread_handle(process_info.hThread);
 
   auto process = std::make_shared<UniqueHandle>(process_info.hProcess);
+  if (!::AssignProcessToJobObject(job.get(), process->get())) {
+    ::TerminateProcess(process->get(), 1);
+    ::ResumeThread(thread_handle.get());  // let it die rather than hang
+                                          // suspended forever
+    dispatch([this, completion = std::move(completion)]() mutable {
+      completion(-1, {}, false);
+      end_operation();
+    });
+    return;
+  }
+  ::ResumeThread(thread_handle.get());
+  // Held by the reader thread below, which outlives the child: the job must
+  // stay open until the child has exited, because closing it is what kills
+  // whatever is still inside.
+  auto job_holder = std::make_shared<UniqueHandle>(std::move(job));
   auto timed_out = std::make_shared<std::atomic_bool>(false);
   const std::uint32_t timeout_ms = options.management_timeout_ms;
   // Bounded, self-contained watchdog: it captures only shared_ptr/atomic
@@ -985,7 +1018,8 @@ void CompanionProcess::Impl::run_management(
   // created the lambda is destroyed and a moved-from completion would leave
   // the catch below with nothing to call.
   try {
-  std::thread([this, process, thread_handle = std::move(thread_handle),
+  std::thread([this, process, job_holder,
+              thread_handle = std::move(thread_handle),
               stdout_read = std::move(stdout_read), timed_out,
               completion]() mutable {
     std::string output;
@@ -1396,7 +1430,10 @@ void CompanionProcess::revoke_pairing(std::string origin,
                                       RevokeCallback completion) {
   const auto normalized = normalize_origin(origin);
   if (!normalized.ok() || normalized.origin.view() != origin) {
-    impl_->dispatch([completion = std::move(completion)] {
+    // Tracked, like every other completion: a bare dispatch can still be
+    // sitting in the owner's queue when ~CompanionProcess returns, and would
+    // then run against whatever the caller had already torn down.
+    impl_->dispatch_tracked([completion = std::move(completion)] {
       completion(false, "Pairing origin is invalid.");
     });
     return;

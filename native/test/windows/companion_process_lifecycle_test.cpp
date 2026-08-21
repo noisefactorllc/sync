@@ -18,6 +18,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -667,5 +668,303 @@ SYNC_TEST(windows_a_queueing_dispatcher_is_honoured_and_may_fall_back_inline) {
       completions.fetch_add(1);
     });
   }
+  SYNC_REQUIRE(completions.load() == 2);
+}
+
+// ---------------------------------------------------------------------
+// Management commands
+//
+// list_pairings() and revoke_pairing() run syncd a second time, briefly, to
+// read or change the pairing store. Until now nothing exercised them, and
+// they are the one path that launches a child the caller never gets a handle
+// to -- so the fixture reports its own pid and arguments through files the
+// test reads back.
+// ---------------------------------------------------------------------
+
+namespace {
+
+// A scratch file the fixture writes and the test reads. Removed on the way in
+// and out, so a stale file from an earlier test can never be mistaken for
+// evidence that this one launched anything.
+class ScratchFile {
+ public:
+  explicit ScratchFile(const wchar_t* variable) : variable_(variable) {
+    std::wstring directory(MAX_PATH, L'\0');
+    const DWORD written =
+        ::GetTempPathW(static_cast<DWORD>(directory.size()), directory.data());
+    directory.resize(written);
+    path_ = directory + L"sync-fixture-" + variable_ + L".txt";
+    ::DeleteFileW(path_.c_str());
+    ::SetEnvironmentVariableW(variable_.c_str(), path_.c_str());
+  }
+  ~ScratchFile() {
+    ::SetEnvironmentVariableW(variable_.c_str(), nullptr);
+    ::DeleteFileW(path_.c_str());
+  }
+  ScratchFile(const ScratchFile&) = delete;
+  ScratchFile& operator=(const ScratchFile&) = delete;
+
+  [[nodiscard]] bool exists() const {
+    return ::GetFileAttributesW(path_.c_str()) != INVALID_FILE_ATTRIBUTES;
+  }
+  [[nodiscard]] std::string read() const {
+    const HANDLE file =
+        ::CreateFileW(path_.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    std::string contents;
+    std::array<char, 1024> buffer{};
+    for (;;) {
+      DWORD read = 0;
+      if (::ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()),
+                     &read, nullptr) == 0 ||
+          read == 0) {
+        break;
+      }
+      contents.append(buffer.data(), read);
+    }
+    ::CloseHandle(file);
+    return contents;
+  }
+
+ private:
+  std::wstring variable_;
+  std::wstring path_;
+};
+
+constexpr std::string_view kTwoPairings =
+    R"({"type":"pairings","origins":["https://one.example","http://localhost:8080"]})";
+
+// Builds a "say:<exit>:<text>" mode for the fixture.
+std::wstring say(int status, std::string_view text) {
+  std::wstring mode = L"say:" + std::to_wstring(status) + L":";
+  mode.append(text.begin(), text.end());  // the payloads here are all ASCII
+  return mode;
+}
+
+}  // namespace
+
+SYNC_TEST(windows_list_pairings_passes_its_argument_and_parses_the_origins) {
+  ScratchFile arguments(L"SYNC_TEST_HELPER_ARGS_FILE");
+  set_helper_mode(say(0, kTwoPairings).c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  std::vector<std::string> origins;
+  std::string error;
+  companion.list_pairings([&](std::vector<std::string> found,
+                              std::string reason) {
+    origins = std::move(found);
+    error = std::move(reason);
+    done.store(true);
+  });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+
+  SYNC_REQUIRE(error.empty());
+  SYNC_REQUIRE(origins.size() == 2);
+  SYNC_REQUIRE(origins[0] == "https://one.example");
+  SYNC_REQUIRE(origins[1] == "http://localhost:8080");
+  // The helper is asked for pairings and nothing else. Asserting the argument
+  // is the only way to know the tray is not, say, silently starting a daemon.
+  SYNC_REQUIRE(arguments.read() == "--list-pairings\n");
+}
+
+SYNC_TEST(windows_list_pairings_reports_a_failing_helper_without_origins) {
+  set_helper_mode(say(1, kTwoPairings).c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  std::vector<std::string> origins;
+  std::string error;
+  companion.list_pairings([&](std::vector<std::string> found,
+                              std::string reason) {
+    origins = std::move(found);
+    error = std::move(reason);
+    done.store(true);
+  });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+
+  // Well-formed output must not be believed just because it parses: the exit
+  // status is what says whether the helper actually read the store.
+  SYNC_REQUIRE(!error.empty());
+  SYNC_REQUIRE(origins.empty());
+}
+
+SYNC_TEST(windows_list_pairings_rejects_output_that_is_not_a_pairings_record) {
+  set_helper_mode(say(0, "this is not json").c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  std::vector<std::string> origins;
+  std::string error;
+  companion.list_pairings([&](std::vector<std::string> found,
+                              std::string reason) {
+    origins = std::move(found);
+    error = std::move(reason);
+    done.store(true);
+  });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+  SYNC_REQUIRE(!error.empty());
+  SYNC_REQUIRE(origins.empty());
+}
+
+SYNC_TEST(windows_management_output_is_bounded_and_never_reported_as_pairings) {
+  // Twice the reader's ceiling. The reader truncates at exactly that ceiling,
+  // so the "output too large" branch in list_pairings is in fact unreachable
+  // -- the truncated bytes simply fail to parse. Either way the contract that
+  // matters holds: unbounded output from the helper cannot exhaust memory
+  // here, and cannot be reported as a list of pairings.
+  set_helper_mode(L"flood:131072");
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  std::vector<std::string> origins;
+  std::string error;
+  companion.list_pairings([&](std::vector<std::string> found,
+                              std::string reason) {
+    origins = std::move(found);
+    error = std::move(reason);
+    done.store(true);
+  });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+  SYNC_REQUIRE(!error.empty());
+  SYNC_REQUIRE(origins.empty());
+}
+
+SYNC_TEST(windows_a_wedged_management_helper_is_bounded_and_killed) {
+  ScratchFile pid_file(L"SYNC_TEST_HELPER_PID_FILE");
+  set_helper_mode(L"wedged");
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.management_timeout_ms = 1'200;
+
+  const auto requested = std::chrono::steady_clock::now();
+  std::atomic<bool> done{false};
+  std::string error;
+  {
+    CompanionProcess companion(std::move(options));
+    companion.list_pairings([&](std::vector<std::string>, std::string reason) {
+      error = std::move(reason);
+      done.store(true);
+    });
+    SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - requested;
+
+  SYNC_REQUIRE(!error.empty());
+  // Bracketed for the same reason as the helper hard-kill test: below the
+  // configured timeout would mean something other than the watchdog ended it.
+  SYNC_REQUIRE(elapsed >= std::chrono::milliseconds(800));
+  SYNC_REQUIRE(elapsed < std::chrono::seconds(8));
+
+  // And it is actually gone. A management child is launched without a handle
+  // the caller keeps, so nothing else here would notice it surviving -- which
+  // matters because a live one holds the pairing store's lock file and would
+  // make the next syncd fail to open the store.
+  SYNC_REQUIRE(pid_file.exists());
+  const DWORD pid = static_cast<DWORD>(std::stoul(pid_file.read()));
+  ScopedHandle child{::OpenProcess(SYNCHRONIZE, FALSE, pid)};
+  if (child.get() != nullptr) {
+    SYNC_REQUIRE(::WaitForSingleObject(child.get(), 5'000) == WAIT_OBJECT_0);
+  }
+}
+
+SYNC_TEST(windows_revoke_pairing_refuses_a_non_canonical_origin_unlaunched) {
+  ScratchFile arguments(L"SYNC_TEST_HELPER_ARGS_FILE");
+  set_helper_mode(say(0, R"({"type":"revocation"})").c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  bool revoked = true;
+  std::string error;
+  companion.revoke_pairing("HTTPS://ONE.EXAMPLE:443",
+                           [&](bool ok, std::string reason) {
+                             revoked = ok;
+                             error = std::move(reason);
+                             done.store(true);
+                           });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+
+  SYNC_REQUIRE(!revoked);
+  SYNC_REQUIRE(!error.empty());
+  // Rejected here, not by the helper. An origin that survived normalisation
+  // unchanged is the only thing that may reach the store, so a
+  // non-canonical one must never become a command line at all.
+  SYNC_REQUIRE(!arguments.exists());
+}
+
+SYNC_TEST(windows_revoke_pairing_passes_the_origin_and_accepts_a_durable_record) {
+  ScratchFile arguments(L"SYNC_TEST_HELPER_ARGS_FILE");
+  set_helper_mode(
+      say(0,
+          R"({"type":"revocation","origin":"https://one.example","status":"revoked"})")
+          .c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  bool revoked = false;
+  std::string error;
+  companion.revoke_pairing("https://one.example",
+                           [&](bool ok, std::string reason) {
+                             revoked = ok;
+                             error = std::move(reason);
+                             done.store(true);
+                           });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+
+  SYNC_REQUIRE(revoked);
+  SYNC_REQUIRE(error.empty());
+  SYNC_REQUIRE(arguments.read() == "--revoke-origin\nhttps://one.example\n");
+}
+
+SYNC_TEST(windows_revoke_pairing_refuses_to_call_an_uncertain_record_revoked) {
+  // syncd exits 3 when the revocation reached the store but could not be
+  // proven durable. Reporting that as success would tell someone a browser
+  // had been unpaired when a power cut could bring it back.
+  set_helper_mode(
+      say(3,
+          R"({"type":"revocation","origin":"https://one.example","status":"revoked_durability_uncertain"})")
+          .c_str());
+
+  CompanionProcess companion(fake_helper_options());
+  std::atomic<bool> done{false};
+  bool revoked = true;
+  std::string error;
+  companion.revoke_pairing("https://one.example",
+                           [&](bool ok, std::string reason) {
+                             revoked = ok;
+                             error = std::move(reason);
+                             done.store(true);
+                           });
+  SYNC_REQUIRE(wait_for([&] { return done.load(); }));
+
+  SYNC_REQUIRE(!revoked);
+  SYNC_REQUIRE(!error.empty());
+}
+
+SYNC_TEST(windows_the_destructor_waits_for_a_management_command_in_flight) {
+  // The management child is not the supervised helper and is not reached by
+  // the job the destructor closes; only its own watchdog ends it. So the
+  // destructor has to wait for that, and this is the test that says it does.
+  ScratchFile pid_file(L"SYNC_TEST_HELPER_PID_FILE");
+  set_helper_mode(L"wedged");
+
+  CompanionProcessOptions options = fake_helper_options();
+  options.management_timeout_ms = 1'000;
+
+  std::atomic<int> completions{0};
+  {
+    CompanionProcess companion(std::move(options));
+    companion.list_pairings(
+        [&completions](std::vector<std::string>, std::string) {
+          completions.fetch_add(1);
+        });
+    companion.revoke_pairing(
+        "https://one.example",
+        [&completions](bool, std::string) { completions.fetch_add(1); });
+  }  // ~CompanionProcess
+
+  // Both answered before the destructor returned, or they were running
+  // against freed state.
   SYNC_REQUIRE(completions.load() == 2);
 }
