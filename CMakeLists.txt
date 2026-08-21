@@ -546,6 +546,44 @@ elseif(WIN32)
   add_dependencies(sync_companion_process_tests sync_test_helper_process)
   add_test(NAME sync_companion_process_tests COMMAND sync_companion_process_tests)
 
+  # Certification probes for the Windows providers: independent receivers
+  # that discover what syncd published and check the pixels that arrived.
+  # They are manual acceptance tools, not tests -- they need a GPU, a real
+  # SpoutLibrary, and a real NDI runtime, none of which a CI runner has --
+  # so they are deliberately never registered with add_test.
+  #
+  # Both need third-party headers this repository does not carry. Spout is
+  # BSD-2 and the release harness builds it from a pinned revision rather
+  # than vendoring it; NDI's licence does not permit redistributing its SDK
+  # at all. So each builds only when told where its headers are, and a
+  # checkout with neither path set is unaffected.
+  #
+  # test/acceptance/windows-providers.mjs drives them.
+  set(SYNC_SPOUT_INCLUDE_DIR "" CACHE PATH
+      "Directory holding SpoutLibrary.h; enables the Spout certification probe")
+  set(SYNC_NDI_INCLUDE_DIR "" CACHE PATH
+      "Directory holding Processing.NDI.Lib.h; enables the NDI certification probe")
+
+  if(SYNC_SPOUT_INCLUDE_DIR)
+    add_executable(sync_spout_receiver_probe
+      native/test/windows/spout_receiver_probe.cpp)
+    target_compile_features(sync_spout_receiver_probe PRIVATE cxx_std_20)
+    target_include_directories(sync_spout_receiver_probe
+      PRIVATE ${SYNC_SPOUT_INCLUDE_DIR})
+    # d3d11 and dxgi to read the shared texture the sender published.
+    # opengl32 only because SpoutLibrary.h names GL types in signatures this
+    # probe never calls.
+    target_link_libraries(sync_spout_receiver_probe PRIVATE d3d11 dxgi opengl32)
+  endif()
+
+  if(SYNC_NDI_INCLUDE_DIR)
+    add_executable(sync_ndi_receiver_probe
+      native/test/windows/ndi_receiver_probe.cpp)
+    target_compile_features(sync_ndi_receiver_probe PRIVATE cxx_std_20)
+    target_include_directories(sync_ndi_receiver_probe
+      PRIVATE ${SYNC_NDI_INCLUDE_DIR})
+  endif()
+
   # The executable's icon is rasterised from the same artwork the macOS bundle
   # uses, so the two platforms cannot drift apart visually. ImageMagick is an
   # optional build dependency: without it the resource is simply omitted and
