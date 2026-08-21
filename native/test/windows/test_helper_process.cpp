@@ -10,11 +10,17 @@
 // happens to be running.
 //
 // The mode is read from the SYNC_TEST_HELPER_MODE environment variable
-// rather than from argv, because CompanionProcess::launch_arguments() is
-// fixed (`--publisher spout --publisher ndi`) and the point of these tests
-// is to exercise the real launch path, argument list included, rather than
-// a special one. CreateProcessW is called with a null environment block, so
-// the child inherits whatever the test set immediately before start().
+// rather than from argv, because the arguments are the thing under test:
+// CompanionProcess picks them itself (`--publisher spout --publisher ndi`
+// when supervising, `--list-pairings` or `--revoke-origin <origin>` when
+// managing), so the fixture must not need them to decide how to behave.
+// CreateProcessW is called with a null environment block, so the child
+// inherits whatever the test set immediately before the call.
+//
+// Argv is instead *reported*, to SYNC_TEST_HELPER_ARGS_FILE, so a test can
+// assert what was actually passed. SYNC_TEST_HELPER_PID_FILE reports this
+// process's id, which is the only way a test can check that a management
+// child -- launched with no handle the caller keeps -- really was killed.
 
 #include <windows.h>
 
@@ -22,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -65,39 +72,50 @@ void write_stderr(const char* text) {
   std::fflush(stderr);
 }
 
-}  // namespace
+// Written with the Win32 API rather than stdio: MSVC deprecates fopen under
+// /W4, and this file is Windows-only anyway, so reaching for CreateFile is
+// simpler than suppressing a warning that is telling the truth.
+//
+// Every failure here is silent on purpose. These files exist for the test to
+// read; a fixture that refused to run because it could not write one would
+// turn a diagnostic aid into a second thing that can fail.
+void write_file(const char* variable, std::string_view contents) {
+  char path[MAX_PATH] = {};
+  const DWORD length =
+      ::GetEnvironmentVariableA(variable, path, sizeof(path));
+  if (length == 0 || length >= sizeof(path)) return;
+  const HANDLE file = ::CreateFileA(path, GENERIC_WRITE, 0, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+  if (file == INVALID_HANDLE_VALUE) return;
+  DWORD written = 0;
+  ::WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()),
+              &written, nullptr);
+  ::CloseHandle(file);
+}
 
 // Management commands are launched with real arguments (--list-pairings,
 // --revoke-origin <origin>), and a test that cannot see them cannot prove
 // they were passed correctly. When SYNC_TEST_HELPER_ARGS_FILE is set, every
 // argument is written there one per line for the test to read back.
 void record_arguments(int argc, char** argv) {
-  char path[MAX_PATH] = {};
-  const DWORD length = ::GetEnvironmentVariableA("SYNC_TEST_HELPER_ARGS_FILE",
-                                                 path, sizeof(path));
-  if (length == 0 || length >= sizeof(path)) return;
-  std::FILE* file = std::fopen(path, "wb");
-  if (file == nullptr) return;
+  std::string joined;
   for (int index = 1; index < argc; ++index) {
-    std::fputs(argv[index], file);
-    std::fputc('\n', file);
+    joined += argv[index];
+    joined += '\n';
   }
-  std::fclose(file);
+  write_file("SYNC_TEST_HELPER_ARGS_FILE", joined);
 }
 
 // Management children are launched with no handle the caller can reach, so a
 // test cannot otherwise tell "the watchdog killed it" from "it happened to
 // stop". Writing the pid where the test can read it makes that observable.
 void record_pid() {
-  char path[MAX_PATH] = {};
-  const DWORD length = ::GetEnvironmentVariableA("SYNC_TEST_HELPER_PID_FILE",
-                                                 path, sizeof(path));
-  if (length == 0 || length >= sizeof(path)) return;
-  std::FILE* file = std::fopen(path, "wb");
-  if (file == nullptr) return;
-  std::fprintf(file, "%lu", static_cast<unsigned long>(::GetCurrentProcessId()));
-  std::fclose(file);
+  write_file("SYNC_TEST_HELPER_PID_FILE",
+             std::to_string(::GetCurrentProcessId()));
 }
+
+}  // namespace
 
 int main(int argc, char** argv) {
   record_arguments(argc, argv);
