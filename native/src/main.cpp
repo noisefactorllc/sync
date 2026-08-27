@@ -201,7 +201,12 @@ int run_with_providers(nfsync::ServerOptions &options,
   constexpr bool kSpoutImplemented = true;
   const bool spout_available = spout.available();
   nfsync::FramePublisher *const spout_publisher = &spout;
-  const char *const spout_reason = "the Spout runtime did not load";
+  // Hedged on purpose: SpoutFramePublisher::available() also covers a rejected
+  // library path and a GL context that would not initialize, and each of those
+  // has a different remedy. Naming only the load would send an operator to
+  // reinstall something that was never at fault.
+  const char *const spout_reason =
+      "the Spout runtime did not load, or failed to initialize";
 #else
   constexpr bool kSpoutImplemented = false;
   constexpr bool spout_available = false;

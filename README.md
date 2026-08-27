@@ -41,7 +41,10 @@ they support.
 
 No provider is ever linked at build time. Each is discovered at run time
 through its documented public entry point, and a provider whose runtime is
-absent simply reports itself unavailable rather than failing the daemon.
+absent simply reports itself unavailable rather than failing the daemon. A
+selected provider that ends up unavailable also prints one line to stderr
+naming why, so `available: false` is never the whole diagnosis; the `ready`
+record on stdout keeps its exact shape.
 
 ## Building the native daemon
 

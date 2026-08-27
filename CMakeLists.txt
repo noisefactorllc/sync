@@ -465,12 +465,33 @@ if(APPLE)
   target_compile_options(sync_syphon_stub_framework PRIVATE -fno-sanitize=all)
   target_link_options(sync_syphon_stub_framework PRIVATE -fno-sanitize=all)
 
+  add_library(sync_syphon_incompatible_framework SHARED
+    native/test/macos/fixtures/syphon_incompatible_framework.mm
+  )
+  target_compile_features(sync_syphon_incompatible_framework PRIVATE cxx_std_20)
+  set_target_properties(sync_syphon_incompatible_framework PROPERTIES
+    OBJCXX_STANDARD 20
+    OUTPUT_NAME Syphon
+    PREFIX ""
+    SUFFIX ""
+    LIBRARY_OUTPUT_DIRECTORY
+      ${CMAKE_CURRENT_BINARY_DIR}/syphon-incompatible/Syphon.framework
+  )
+  target_compile_options(sync_syphon_incompatible_framework PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc> -fno-sanitize=all
+  )
+  target_link_options(sync_syphon_incompatible_framework PRIVATE -fno-sanitize=all)
+  target_link_libraries(sync_syphon_incompatible_framework
+    PRIVATE ${FOUNDATION_FRAMEWORK}
+  )
+
   add_test(
     NAME sync_syphon_unavailable_reason
     COMMAND ${CMAKE_COMMAND}
       -DSYNC_SYPHON_PROBE=$<TARGET_FILE:sync_syphon_discovery_probe>
       -DSYNC_MISSING_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/missing/Syphon.framework
       -DSYNC_STUB_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/syphon-stub/Syphon.framework
+      -DSYNC_INCOMPATIBLE_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/syphon-incompatible/Syphon.framework
       -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/syphon_unavailable_reason_test.cmake
   )
 
