@@ -446,6 +446,34 @@ if(APPLE)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/syphon_missing_pool_test.cmake
   )
 
+  # A framework directory holding a loadable Mach-O with no Objective-C
+  # classes -- the shape the packaged app shipped, which loads cleanly and
+  # still yields no SyphonMetalServer.
+  add_library(sync_syphon_stub_framework SHARED
+    native/test/macos/fixtures/syphon_stub_framework.cpp
+  )
+  set_target_properties(sync_syphon_stub_framework PROPERTIES
+    OUTPUT_NAME Syphon
+    PREFIX ""
+    SUFFIX ""
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/syphon-stub/Syphon.framework
+  )
+  # The fixture exists to be dlopened at run time, long after the process has
+  # started. A sanitizer-instrumented dylib loaded that late aborts with
+  # "interceptors are not working", so this one target opts out of whatever
+  # CMAKE_CXX_FLAGS the sanitizer build passes in.
+  target_compile_options(sync_syphon_stub_framework PRIVATE -fno-sanitize=all)
+  target_link_options(sync_syphon_stub_framework PRIVATE -fno-sanitize=all)
+
+  add_test(
+    NAME sync_syphon_unavailable_reason
+    COMMAND ${CMAKE_COMMAND}
+      -DSYNC_SYPHON_PROBE=$<TARGET_FILE:sync_syphon_discovery_probe>
+      -DSYNC_MISSING_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/missing/Syphon.framework
+      -DSYNC_STUB_FRAMEWORK_PATH=${CMAKE_CURRENT_BINARY_DIR}/syphon-stub/Syphon.framework
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/syphon_unavailable_reason_test.cmake
+  )
+
   set_source_files_properties(native/src/main.cpp PROPERTIES LANGUAGE OBJCXX)
   set_target_properties(syncd PROPERTIES OBJCXX_STANDARD 20)
   target_compile_options(syncd PRIVATE

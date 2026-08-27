@@ -107,10 +107,22 @@ public:
   // Only an available provider reaches the hub, because PublisherHub opens a
   // sender across all of its providers as a unit — registering one that cannot
   // publish would fail every sender for the ones that can.
+  //
+  // `reason` explains an unavailable provider in one short, non-secret phrase.
+  // Reporting only `available:false` left an operator with nothing to pull on:
+  // the control protocol said no, the log said nothing, and every cause --
+  // absent runtime, unloadable runtime, runtime present but wrong -- looked
+  // the same from outside.
   void offer(std::string_view id, bool configured, bool available,
-             nfsync::FramePublisher *publisher) noexcept {
+             nfsync::FramePublisher *publisher, const char *reason) noexcept {
     if (!configured || capability_count_ >= nfsync::kMaximumProviderCapabilities) {
       return;
+    }
+    if (!available) {
+      // stderr, never stdout: the ready record on stdout is a machine-read
+      // protocol and must keep its exact shape.
+      std::cerr << "syncd: provider \"" << id << "\" is selected but unavailable: "
+                << (reason != nullptr ? reason : "no diagnosis was recorded") << '\n';
     }
     capabilities_[capability_count_++] = {
         .id = std::string(id),
@@ -173,27 +185,37 @@ int run_with_providers(nfsync::ServerOptions &options,
   constexpr bool kSyphonImplemented = true;
   const bool syphon_available = syphon.available() && metal.available();
   nfsync::FramePublisher *const syphon_publisher = &metal;
+  // Syphon rides on the Metal publisher, so an unavailable Syphon can be
+  // either half. Blaming the framework for a missing Metal device would send
+  // an operator to reinstall something that was never at fault.
+  const char *const syphon_reason =
+      syphon.available() ? "no usable Metal device was found"
+                         : nfsync::describe(syphon.unavailable_reason());
 #else
   constexpr bool kSyphonImplemented = false;
   constexpr bool syphon_available = false;
   nfsync::FramePublisher *const syphon_publisher = nullptr;
+  const char *const syphon_reason = "this build does not implement syphon on this platform";
 #endif
 #if defined(_WIN32)
   constexpr bool kSpoutImplemented = true;
   const bool spout_available = spout.available();
   nfsync::FramePublisher *const spout_publisher = &spout;
+  const char *const spout_reason = "the Spout runtime did not load";
 #else
   constexpr bool kSpoutImplemented = false;
   constexpr bool spout_available = false;
   nfsync::FramePublisher *const spout_publisher = nullptr;
+  const char *const spout_reason = "this build does not implement spout on this platform";
 #endif
 
   ProviderAssembly assembly;
   assembly.offer("syphon", configured(command, "syphon", kSyphonImplemented),
-                 syphon_available, syphon_publisher);
+                 syphon_available, syphon_publisher, syphon_reason);
   assembly.offer("spout", configured(command, "spout", kSpoutImplemented),
-                 spout_available, spout_publisher);
-  assembly.offer("ndi", configured(command, "ndi", true), ndi.available(), &ndi);
+                 spout_available, spout_publisher, spout_reason);
+  assembly.offer("ndi", configured(command, "ndi", true), ndi.available(), &ndi,
+                 "the NDI runtime did not load, or failed to initialize");
 
   assembly.apply(options);
 #if defined(__APPLE__)

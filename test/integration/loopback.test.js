@@ -605,18 +605,31 @@ function isolatedStoreEnvironment(directory) {
     : { ...process.env, HOME: directory };
 }
 
+// `expectedStderr` stays "" for every ordinary run, so unexpected noise is
+// still a failure everywhere. A caller that selects a provider it knows is
+// unavailable passes the diagnostic it requires instead: the daemon is
+// obliged to say why it degraded, and silence there is the bug this option
+// exists to catch.
 async function stopDaemon(child, stderr, stdout, ready, options) {
   const {
     shutdownTimeoutMs = TIMEOUT_MS,
     cleanupTimeoutMs = 1_000,
+    expectedStderr = "",
   } = options ?? {};
+  const assertStderr = () => {
+    if (expectedStderr instanceof RegExp) {
+      assert.match(stderr(), expectedStderr, "syncd explains the diagnostic it emitted");
+      return;
+    }
+    assert.equal(stderr(), expectedStderr, "syncd emits no diagnostics during a clean run");
+  };
   if (child.exitCode !== null || child.signalCode !== null) {
     if (GRACEFUL_SHUTDOWN_IS_OBSERVABLE) {
       assert.equal(child.signalCode, null, `syncd handles shutdown itself; stderr=${stderr()}`);
       assert.equal(child.exitCode, 0, `syncd exited cleanly; stderr=${stderr()}`);
     }
     assert.equal(stdout(), `${JSON.stringify(ready)}\n`, "syncd emits exactly one stdout record");
-    assert.equal(stderr(), "", "syncd emits no diagnostics during a clean run");
+    assertStderr();
     return;
   }
   const exitPromise = onceEvent(child, "exit", ["error"]);
@@ -642,7 +655,7 @@ async function stopDaemon(child, stderr, stdout, ready, options) {
     assert.ok(signal !== null || code !== null, "syncd stopped");
   }
   assert.equal(stdout(), `${JSON.stringify(ready)}\n`, "syncd emits exactly one stdout record");
-  assert.equal(stderr(), "", "syncd emits no diagnostics during a clean run");
+  assertStderr();
 }
 
 function fnv1a32(bytes) {
@@ -2073,6 +2086,10 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
   assert.equal(typeof discovery.available, "boolean");
 
   let daemon;
+  // The daemon's own verdict, not the probe's: the probe only inspects the
+  // Syphon half, and an unusable Metal device would sink the provider with a
+  // discoverable framework in place.
+  let daemonCanSend = true;
   const sockets = new Set();
   try {
     daemon = await spawnDaemon({
@@ -2086,6 +2103,7 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     const response = await health("127.0.0.1", daemon.ready.port, ORIGIN);
     assert.equal(response.status, 200);
     const healthBody = JSON.parse(response.body.toString("utf8"));
+    daemonCanSend = healthBody.capabilities.send;
     assert.equal(healthBody.version, EXPECTED_PRODUCT_VERSION);
     assert.equal(healthBody.capabilities.receive, false);
     assert.deepEqual(healthBody.capabilities.providers, [{
@@ -2129,7 +2147,13 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     sockets.delete(control.client);
   } finally {
     for (const client of sockets) client.destroy();
-    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+    if (daemon) {
+      await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
+        expectedStderr: daemonCanSend
+          ? ""
+          : /^syncd: provider "syphon" is selected but unavailable: \S.*\n$/,
+      });
+    }
   }
 });
 
@@ -2261,7 +2285,13 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
     }
   } finally {
     if (daemon) {
-      await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+      // Pointed at a framework that is not there, so the reason is not merely
+      // present but known. `available:false` with no explanation is the defect
+      // this asserts against.
+      await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
+        expectedStderr: 'syncd: provider "syphon" is selected but unavailable: '
+          + "no Syphon.framework was found in any searched location\n",
+      });
     }
     await rm(temporaryHome, { recursive: true, force: true });
   }

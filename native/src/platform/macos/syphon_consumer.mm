@@ -84,17 +84,56 @@ struct SyphonMetalConsumer::Impl {
   }
 
   std::string explicit_framework_path;
+  // Only meaningful when discovery failed. unavailable_reason() answers None
+  // whenever available() is true, so success never has to clear this and no
+  // path can leave the two disagreeing.
+  SyphonUnavailableReason reason = SyphonUnavailableReason::None;
   Class server_class = Nil;
   NSBundle* __strong loaded_bundle = nil;
   std::array<SenderEntry, SyphonMetalConsumer::kMaximumSenderEntries> senders{};
 
+  // Discovery keeps the most specific failure it reached, because that is the
+  // one an operator can act on: "a framework loaded but has no
+  // SyphonMetalServer" points at a bad framework, while "nothing was found"
+  // points at an install step that never ran. A later candidate that merely
+  // does not exist must not overwrite an earlier one that loaded and was
+  // wrong.
+  void note(SyphonUnavailableReason candidate) noexcept {
+    const auto rank = [](SyphonUnavailableReason value) noexcept -> int {
+      switch (value) {
+        case SyphonUnavailableReason::None:
+          return 0;
+        case SyphonUnavailableReason::FrameworkNotFound:
+          return 1;
+        case SyphonUnavailableReason::FrameworkLoadFailed:
+          return 2;
+        case SyphonUnavailableReason::ServerClassMissing:
+          return 3;
+        case SyphonUnavailableReason::ServerClassIncompatible:
+          return 4;
+        case SyphonUnavailableReason::DiscoveryFailed:
+          return 5;
+      }
+      return 0;
+    };
+    if (rank(candidate) > rank(reason)) {
+      reason = candidate;
+    }
+  }
+
   void discover() noexcept {
+    reason = SyphonUnavailableReason::FrameworkNotFound;
     @autoreleasepool {
       @try {
         Class registered = NSClassFromString(@"SyphonMetalServer");
         if (registered != Nil) {
           if (class_has_required_abi(registered)) {
             server_class = registered;
+          } else {
+            // Something already in this process answers to the name but not to
+            // the ABI -- a Syphon too old or too new for this daemon. Loading
+            // another copy cannot displace it, so discovery stops here.
+            reason = SyphonUnavailableReason::ServerClassIncompatible;
           }
           return;
         }
@@ -135,15 +174,28 @@ struct SyphonMetalConsumer::Impl {
         for (std::size_t index = 0; index < path_count; ++index) {
           NSBundle* candidate = [NSBundle bundleWithPath:paths[index]];
           if (candidate == nil) {
+            note(SyphonUnavailableReason::FrameworkNotFound);
             continue;
           }
           NSError* error = nil;
           if (![candidate loadAndReturnError:&error]) {
+            // The NSError is deliberately not carried out of here. It quotes
+            // absolute paths and loader detail, and this phrase is printed to
+            // stderr and pasted into bug reports.
+            (void)error;
+            note(SyphonUnavailableReason::FrameworkLoadFailed);
             continue;
           }
-          (void)error;
           Class discovered = NSClassFromString(@"SyphonMetalServer");
+          if (discovered == Nil) {
+            // A framework that loads cleanly and registers nothing. The
+            // placeholder shipped inside Sync.app 0.2.0 behaved exactly this
+            // way, and reported only `available:false`.
+            note(SyphonUnavailableReason::ServerClassMissing);
+            continue;
+          }
           if (!class_has_required_abi(discovered)) {
+            note(SyphonUnavailableReason::ServerClassIncompatible);
             continue;
           }
           loaded_bundle = candidate;
@@ -153,6 +205,7 @@ struct SyphonMetalConsumer::Impl {
       } @catch (NSException*) {
         server_class = Nil;
         loaded_bundle = nil;
+        reason = SyphonUnavailableReason::DiscoveryFailed;
       }
     }
   }
@@ -202,8 +255,33 @@ SyphonMetalConsumer::~SyphonMetalConsumer() {
   }
 }
 
+auto describe(SyphonUnavailableReason reason) noexcept -> const char* {
+  switch (reason) {
+    case SyphonUnavailableReason::None:
+      return "the Syphon runtime is available";
+    case SyphonUnavailableReason::FrameworkNotFound:
+      return "no Syphon.framework was found in any searched location";
+    case SyphonUnavailableReason::FrameworkLoadFailed:
+      return "a Syphon.framework was found but could not be loaded";
+    case SyphonUnavailableReason::ServerClassMissing:
+      return "the Syphon.framework that loaded does not provide SyphonMetalServer";
+    case SyphonUnavailableReason::ServerClassIncompatible:
+      return "the Syphon.framework that loaded provides an incompatible SyphonMetalServer";
+    case SyphonUnavailableReason::DiscoveryFailed:
+      return "Syphon discovery stopped on an unexpected error";
+  }
+  return "Syphon is unavailable for an unrecognized reason";
+}
+
 auto SyphonMetalConsumer::available() const noexcept -> bool {
   return impl_ != nullptr && impl_->server_class != Nil;
+}
+
+auto SyphonMetalConsumer::unavailable_reason() const noexcept -> SyphonUnavailableReason {
+  if (available()) {
+    return SyphonUnavailableReason::None;
+  }
+  return impl_ == nullptr ? SyphonUnavailableReason::DiscoveryFailed : impl_->reason;
 }
 
 auto SyphonMetalConsumer::open_sender(std::string_view sender_id,

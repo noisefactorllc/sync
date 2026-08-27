@@ -279,6 +279,37 @@ SYNC_TEST(syphon_discovers_an_already_loaded_class_with_the_exact_documented_sel
 
   SyphonMetalConsumer consumer;
   SYNC_REQUIRE(consumer.available());
+  SYNC_REQUIRE(consumer.unavailable_reason() == SyphonUnavailableReason::None);
+}
+
+// An available provider must not carry a leftover complaint, and every reason
+// must describe itself. A phrase that came back empty, null, or shared between
+// two distinct reasons would put the daemon back where it started: a log line
+// that says nothing usable.
+SYNC_TEST(syphon_reasons_are_distinct_non_empty_phrases_and_none_means_available) {
+  reset_fake();
+  SyphonMetalConsumer consumer;
+  SYNC_REQUIRE(consumer.available());
+  SYNC_REQUIRE(consumer.unavailable_reason() == SyphonUnavailableReason::None);
+  SYNC_REQUIRE(std::string_view(describe(SyphonUnavailableReason::None)) ==
+               "the Syphon runtime is available");
+
+  const std::array<SyphonUnavailableReason, 6> all{{
+      SyphonUnavailableReason::None,
+      SyphonUnavailableReason::FrameworkNotFound,
+      SyphonUnavailableReason::FrameworkLoadFailed,
+      SyphonUnavailableReason::ServerClassMissing,
+      SyphonUnavailableReason::ServerClassIncompatible,
+      SyphonUnavailableReason::DiscoveryFailed,
+  }};
+  for (std::size_t outer = 0; outer < all.size(); ++outer) {
+    const char* phrase = describe(all[outer]);
+    SYNC_REQUIRE(phrase != nullptr);
+    SYNC_REQUIRE(std::string_view(phrase).size() > 0);
+    for (std::size_t inner = outer + 1; inner < all.size(); ++inner) {
+      SYNC_REQUIRE(std::string_view(phrase) != std::string_view(describe(all[inner])));
+    }
+  }
 }
 
 SYNC_TEST(syphon_open_preserves_unicode_and_enforces_transactional_fixed_bounds) {
