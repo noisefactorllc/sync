@@ -88,11 +88,17 @@ expect_rejected("stub framework"
 # says the version is wrong.
 #
 # This leg needs no fall-through allowance, and that is the point. Objective-C
-# class registration is process-global and first-one-wins, so once a wrong
-# SyphonMetalServer is loaded no later candidate can displace it -- discovery
-# stays incompatible however many good frameworks follow. Asserting the exact
-# reason unconditionally is therefore correct on every machine, and would
-# catch a future change that pretended a later candidate could recover.
+# class registration is process-global: with the fixture and a real framework
+# both loaded the runtime warns that "one of the two will be used, which one
+# is undefined", and in practice it keeps the first registration -- verified
+# against a genuine Syphon.framework placed at the probe's private frameworks
+# path, where discovery stayed incompatible rather than recovering.
+#
+# So the exact reason is asserted unconditionally. If that runtime behavior
+# ever changed, this leg would start failing only on machines that have Syphon
+# installed, which is precisely the machine-dependent failure this file's
+# ambient check exists to avoid -- so treat a failure here as a real signal
+# about the runtime, not as flake.
 expect_probe("incompatible framework"
   "{\"available\":false,\"reason\":\"the Syphon.framework that loaded provides an incompatible SyphonMetalServer\"}\n"
   "${SYNC_INCOMPATIBLE_FRAMEWORK_PATH}")

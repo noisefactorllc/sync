@@ -605,18 +605,34 @@ function isolatedStoreEnvironment(directory) {
     : { ...process.env, HOME: directory };
 }
 
-// The order syncd offers providers in, which is the order it reports them.
-const PROVIDER_DIAGNOSTIC_ORDER = ["syphon", "spout", "ndi"];
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // Builds the exact stderr a daemon owes for the providers it just reported:
-// one line per unavailable provider, in offer order, each naming a non-empty
-// reason, and nothing else. Deriving this from /health rather than from
-// process.platform keeps it correct on a machine that has a runtime installed
-// and on one that does not, without a platform branch that would rot.
-function expectedProviderDiagnostics(providers) {
-  const lines = PROVIDER_DIAGNOSTIC_ORDER
-    .filter((id) => providers.some((provider) => provider.id === id && !provider.available))
-    .map((id) => `syncd: provider "${id}" is selected but unavailable: \\S.*\\n`);
+// one line per unavailable provider, in the order /health lists them, each
+// naming a reason, and nothing else.
+//
+// Both the set and the order come from /health rather than from a local
+// constant, so this also asserts that stderr and /health agree on which
+// providers failed and in what order -- an invariant nothing else checks,
+// since the health assertions sort before comparing. It stays correct on a
+// machine that has a runtime installed and on one that does not, with no
+// platform branch to rot.
+//
+// `reasons` pins the exact phrase for a provider whose failure the caller
+// fully determines. Without it any non-empty reason satisfies the line, which
+// is enough to prove the daemon spoke but not enough to prove it said the
+// right thing -- so a test that knows what it earned should say so.
+function expectedProviderDiagnostics(providers, reasons = {}) {
+  const lines = providers
+    .filter((provider) => !provider.available)
+    .map((provider) => `syncd: provider "${escapeForRegExp(provider.id)}" `
+      + "is selected but unavailable: "
+      + (reasons[provider.id] === undefined
+        ? "\\S.*"
+        : escapeForRegExp(reasons[provider.id]))
+      + "\\n");
   return new RegExp(`^${lines.join("")}$`);
 }
 
@@ -2235,6 +2251,11 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
       assert.equal(response.status, 200);
       const body = JSON.parse(response.body.toString("utf8"));
       const providers = body.capabilities.providers;
+      // Captured before the assertions below, not after: an exception here
+      // would otherwise leave this empty, and the finally would then demand
+      // silence from a daemon that correctly spoke -- burying the real
+      // failure under a bogus one.
+      reportedProviders = providers;
       assert.deepEqual(providers.map((provider) => provider.id).sort(),
                        [...DEFAULT_PROVIDER_IDS].sort());
       for (const provider of providers) {
@@ -2246,7 +2267,6 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
       }
       assert.equal(body.capabilities.send,
                    providers.some((provider) => provider.available));
-      reportedProviders = providers;
     }
     const unknownControl = await upgrade({
       port: 53979,
@@ -2264,8 +2284,13 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
     unknownControl.client.destroy();
   } finally {
     if (daemon) {
+      // Syphon's reason depends on what this machine has installed, so it is
+      // left open; NDI's is one literal on every platform, and pinning it
+      // covers a second provider's reason wiring.
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
-        expectedStderr: expectedProviderDiagnostics(reportedProviders),
+        expectedStderr: expectedProviderDiagnostics(reportedProviders, {
+          ndi: "the NDI runtime did not load, or failed to initialize",
+        }),
       });
     }
     if (ipv6Guard) await closeGuard(ipv6Guard);
@@ -2295,6 +2320,8 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
       const response = await health(host, port, ORIGIN);
       assert.equal(response.status, 200);
       const body = JSON.parse(response.body.toString("utf8"));
+      // Captured before the assertions, for the reason given above.
+      reportedProviders = body.capabilities.providers;
       assert.equal(body.capabilities.send, false);
       assert.deepEqual(body.capabilities.providers, [{
         id: "syphon",
@@ -2302,16 +2329,24 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
         available: false,
         selected: true,
       }]);
-      reportedProviders = body.capabilities.providers;
     }
   } finally {
     if (daemon) {
-      // Pointed at a framework that is not there, so a reason is owed. The
-      // wording differs by platform -- a Windows daemon does not implement
-      // syphon at all -- so this asserts the contract, not one platform's
-      // phrasing. `available:false` with no explanation is the defect.
+      // Pointed at a framework that is not there, so this test knows exactly
+      // which reason it earned and pins it. A shape-only assertion here would
+      // pass just as happily on a daemon that blamed the Metal device, which
+      // is the mis-diagnosis the reason wiring exists to prevent -- and the
+      // ternary that chooses between them has no other test.
+      //
+      // The two arms are the two platforms' answers to the same arguments,
+      // both fully determined: Windows implements no syphon at all, and
+      // elsewhere every candidate path is absent.
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
-        expectedStderr: expectedProviderDiagnostics(reportedProviders),
+        expectedStderr: expectedProviderDiagnostics(reportedProviders, {
+          syphon: process.platform === "win32"
+            ? "this build does not implement syphon on this platform"
+            : "no Syphon.framework was found in any searched location",
+        }),
       });
     }
     await rm(temporaryHome, { recursive: true, force: true });
