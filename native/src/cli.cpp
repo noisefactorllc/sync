@@ -11,8 +11,11 @@ namespace noisefactor::sync::cli {
 namespace {
 
 bool valid_test_origin(std::string_view value) noexcept {
-  if (value.empty() || value.size() > 2048 ||
-      !(value.starts_with("https://") || value.starts_with("http://"))) {
+  if (value.empty() || value.size() > 2048) {
+    return false;
+  }
+  if (value.starts_with("app://")) return normalize_origin(value).ok();
+  if (!(value.starts_with("https://") || value.starts_with("http://"))) {
     return false;
   }
   for (const unsigned char byte : value) {

@@ -52,12 +52,18 @@ SYNC_TEST(origin_accepts_only_trustworthy_http_loopback_forms) {
   require_rejected("http://localhost.example", OriginError::InsecureRemote);
 }
 
-SYNC_TEST(origin_accepts_only_the_exact_packaged_noisedeck_origin) {
+SYNC_TEST(origin_accepts_only_exact_packaged_product_origins) {
   require_normalized("app://noisedeck", "app://noisedeck");
+  require_normalized("app://polymorphic", "app://polymorphic");
   require_rejected("APP://noisedeck");
   require_rejected("app://Noisedeck");
   require_rejected("app://noisedeck:1");
   require_rejected("app://noisedeck/");
+  require_rejected("APP://polymorphic");
+  require_rejected("app://Polymorphic");
+  require_rejected("app://polymorphic:1");
+  require_rejected("app://polymorphic/");
+  require_rejected("app://other");
 }
 
 SYNC_TEST(origin_rejects_opaque_credentials_and_non_origin_components) {

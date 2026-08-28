@@ -217,6 +217,31 @@ SYNC_TEST(cli_static_test_mode_preserves_the_exact_legacy_shape) {
   }
 }
 
+SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
+  for (const std::string_view packaged_origin : {
+           "app://noisedeck",
+           "app://polymorphic",
+       }) {
+    const auto receiver = parse({"--port", "0", "--test-origin",
+                                 packaged_origin, "--test-token", "test-token",
+                                 "--test-receiver"});
+    SYNC_REQUIRE(receiver.ok());
+    SYNC_REQUIRE(receiver.options.mode == cli::Mode::StaticTest);
+    SYNC_REQUIRE(receiver.options.allowed_origin == packaged_origin);
+  }
+
+  for (const std::string_view rejected_origin : {
+           "app://other",
+           "APP://polymorphic",
+           "app://Polymorphic",
+           "app://polymorphic/",
+       }) {
+    SYNC_REQUIRE(!parse({"--port", "0", "--test-origin", rejected_origin,
+                         "--test-token", "test-token", "--test-receiver"})
+                      .ok());
+  }
+}
+
 SYNC_TEST(cli_management_modes_are_normalized_mutually_exclusive_and_argument_free) {
   const auto list = parse({"--list-pairings"});
   SYNC_REQUIRE(list.ok());

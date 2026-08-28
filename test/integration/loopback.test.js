@@ -25,6 +25,7 @@ const PAIRING_TEST_SERVER = path.join(path.dirname(SYNCD), "sync_pairing_test_se
 const SYPHON_PROBE = path.join(path.dirname(SYNCD), "sync_syphon_discovery_probe");
 const FIXTURE = path.join(ROOT, "test", "fixtures", "frame-v1.bin");
 const ORIGIN = "https://client.example";
+const POLYMORPHIC_ORIGIN = "app://polymorphic";
 const TOKEN = "test-token-123";
 const TIMEOUT_MS = 3_000;
 const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
@@ -109,6 +110,28 @@ async function health(host, port, origin) {
     socket.destroy();
     throw error;
   }
+}
+
+function healthFetchForOrigin(origin) {
+  return async (url, options) => {
+    const requestUrl = new URL(url);
+    assert.equal(requestUrl.protocol, "http:");
+    assert.equal(requestUrl.pathname, "/health");
+    assert.equal(options.method, "GET");
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.targetAddressSpace, "loopback");
+
+    const response = await health(
+      requestUrl.hostname,
+      Number(requestUrl.port),
+      origin,
+    );
+    assert.equal(response.headers.get("access-control-allow-origin"), origin);
+    return new Response(response.body, {
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+    });
+  };
 }
 
 async function status(host, port, origin) {
@@ -787,6 +810,37 @@ test("browser SDK performs a bounded health probe against the real loopback daem
     assert.equal(result.health.capabilities.providers.length, 1);
     bridge.close();
   } finally {
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("packaged Polymorphic origin reaches native health and authenticated control", async () => {
+  const daemon = await spawnDaemon({
+    arguments: [
+      "--port", "0",
+      "--test-origin", POLYMORPHIC_ORIGIN,
+      "--test-token", TOKEN,
+      "--test-receiver",
+    ],
+  });
+  const client = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: TOKEN,
+    fetch: healthFetchForOrigin(POLYMORPHIC_ORIGIN),
+    WebSocket: webSocketForOrigin(POLYMORPHIC_ORIGIN),
+    timeoutMs: TIMEOUT_MS,
+  });
+  try {
+    const probe = await client.probe();
+    assert.equal(probe.available, true, probe.message);
+    assert.equal(probe.health.product, "Sync");
+    assert.equal(probe.health.instanceId, daemon.ready.instanceId);
+
+    const welcome = await client.connect();
+    assert.equal(welcome.type, "welcome");
+    assert.equal(welcome.capabilities.send, true);
+  } finally {
+    client.close();
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
 });
