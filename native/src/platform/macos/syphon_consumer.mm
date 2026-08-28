@@ -188,9 +188,10 @@ struct SyphonMetalConsumer::Impl {
           }
           Class discovered = NSClassFromString(@"SyphonMetalServer");
           if (discovered == Nil) {
-            // A framework that loads cleanly and registers nothing. The
-            // placeholder shipped inside Sync.app 0.2.0 behaved exactly this
-            // way, and reported only `available:false`.
+            // A framework that loads cleanly and registers nothing. A
+            // locally packaged Sync.app carried one that behaved exactly this
+            // way, and reported only `available:false`. Releases build the
+            // framework from pinned source, so this is not a claim about one.
             note(SyphonUnavailableReason::ServerClassMissing);
             continue;
           }

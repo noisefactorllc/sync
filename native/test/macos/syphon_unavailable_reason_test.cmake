@@ -1,7 +1,7 @@
 # Every way Syphon discovery can end without a usable server class must name
 # itself. `available:false` on its own sent an operator hunting for an
-# afternoon in August 2026: the packaged app shipped a framework that loads
-# cleanly but defines no SyphonMetalServer, and nothing said so.
+# afternoon in August 2026: a locally packaged app carried a framework that
+# loads cleanly but defines no SyphonMetalServer, and nothing said so.
 foreach(required IN ITEMS
     SYNC_SYPHON_PROBE
     SYNC_MISSING_FRAMEWORK_PATH
