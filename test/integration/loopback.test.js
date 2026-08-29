@@ -26,6 +26,7 @@ const SYPHON_PROBE = path.join(path.dirname(SYNCD), "sync_syphon_discovery_probe
 const FIXTURE = path.join(ROOT, "test", "fixtures", "frame-v1.bin");
 const ORIGIN = "https://client.example";
 const POLYMORPHIC_ORIGIN = "app://polymorphic";
+const VISUALIZE_ORIGIN = "app://visualize";
 const TOKEN = "test-token-123";
 const TIMEOUT_MS = 3_000;
 const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
@@ -828,6 +829,37 @@ test("packaged Polymorphic origin reaches native health and authenticated contro
     token: TOKEN,
     fetch: healthFetchForOrigin(POLYMORPHIC_ORIGIN),
     WebSocket: webSocketForOrigin(POLYMORPHIC_ORIGIN),
+    timeoutMs: TIMEOUT_MS,
+  });
+  try {
+    const probe = await client.probe();
+    assert.equal(probe.available, true, probe.message);
+    assert.equal(probe.health.product, "Sync");
+    assert.equal(probe.health.instanceId, daemon.ready.instanceId);
+
+    const welcome = await client.connect();
+    assert.equal(welcome.type, "welcome");
+    assert.equal(welcome.capabilities.send, true);
+  } finally {
+    client.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("packaged Visualize origin reaches native health and authenticated control", async () => {
+  const daemon = await spawnDaemon({
+    arguments: [
+      "--port", "0",
+      "--test-origin", VISUALIZE_ORIGIN,
+      "--test-token", TOKEN,
+      "--test-receiver",
+    ],
+  });
+  const client = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: TOKEN,
+    fetch: healthFetchForOrigin(VISUALIZE_ORIGIN),
+    WebSocket: webSocketForOrigin(VISUALIZE_ORIGIN),
     timeoutMs: TIMEOUT_MS,
   });
   try {

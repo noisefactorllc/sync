@@ -221,6 +221,7 @@ SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
   for (const std::string_view packaged_origin : {
            "app://noisedeck",
            "app://polymorphic",
+           "app://visualize",
        }) {
     const auto receiver = parse({"--port", "0", "--test-origin",
                                  packaged_origin, "--test-token", "test-token",
@@ -235,6 +236,9 @@ SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
            "APP://polymorphic",
            "app://Polymorphic",
            "app://polymorphic/",
+           "APP://visualize",
+           "app://Visualize",
+           "app://visualize/",
        }) {
     SYNC_REQUIRE(!parse({"--port", "0", "--test-origin", rejected_origin,
                          "--test-token", "test-token", "--test-receiver"})

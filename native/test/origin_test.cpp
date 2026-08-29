@@ -55,6 +55,7 @@ SYNC_TEST(origin_accepts_only_trustworthy_http_loopback_forms) {
 SYNC_TEST(origin_accepts_only_exact_packaged_product_origins) {
   require_normalized("app://noisedeck", "app://noisedeck");
   require_normalized("app://polymorphic", "app://polymorphic");
+  require_normalized("app://visualize", "app://visualize");
   require_rejected("APP://noisedeck");
   require_rejected("app://Noisedeck");
   require_rejected("app://noisedeck:1");
@@ -63,6 +64,10 @@ SYNC_TEST(origin_accepts_only_exact_packaged_product_origins) {
   require_rejected("app://Polymorphic");
   require_rejected("app://polymorphic:1");
   require_rejected("app://polymorphic/");
+  require_rejected("APP://visualize");
+  require_rejected("app://Visualize");
+  require_rejected("app://visualize:1");
+  require_rejected("app://visualize/");
   require_rejected("app://other");
 }
 

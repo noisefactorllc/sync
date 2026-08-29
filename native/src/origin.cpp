@@ -211,7 +211,8 @@ NormalizeOriginResult normalize_origin(std::string_view input) noexcept {
   for (const unsigned char byte : input) {
     if (byte < 0x21U || byte > 0x7eU) return result;
   }
-  if (input == "app://noisedeck" || input == "app://polymorphic") {
+  if (input == "app://noisedeck" || input == "app://polymorphic" ||
+      input == "app://visualize") {
     append(input);
     result.error = OriginError::None;
     return result;
