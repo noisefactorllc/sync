@@ -23,6 +23,14 @@ for required in \
   fi
 done
 
+syphon_binary="$contents/Frameworks/Syphon.framework/Syphon"
+if ! nm -gU "$syphon_binary" 2>/dev/null |
+    awk '$NF == "_OBJC_CLASS_$_SyphonMetalServer" { found = 1 }
+         END { exit !found }'; then
+  echo "verify-macos-bundle: $syphon_binary does not export SyphonMetalServer" >&2
+  exit 1
+fi
+
 plutil -lint "$info" >/dev/null
 identifier="$(plutil -extract CFBundleIdentifier raw -o - "$info")"
 version="$(plutil -extract CFBundleShortVersionString raw -o - "$info")"

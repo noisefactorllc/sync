@@ -486,6 +486,17 @@ if(APPLE)
   )
 
   add_test(
+    NAME sync_macos_bundle_rejects_classless_syphon
+    COMMAND ${CMAKE_COMMAND}
+      -DSYNC_BUNDLE_VERIFIER=${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-macos-bundle.sh
+      -DSYNC_INFO_PLIST=${CMAKE_CURRENT_BINARY_DIR}/Sync-Info.plist
+      -DSYNC_STUB_FRAMEWORK_BINARY=$<TARGET_FILE:sync_syphon_stub_framework>
+      -DSYNC_TEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/syphon-bundle-verifier-test
+      -DSYNC_PRODUCT_VERSION=${SYNC_PRODUCT_VERSION}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/native/test/macos/syphon_bundle_verifier_test.cmake
+  )
+
+  add_test(
     NAME sync_syphon_unavailable_reason
     COMMAND ${CMAKE_COMMAND}
       -DSYNC_SYPHON_PROBE=$<TARGET_FILE:sync_syphon_discovery_probe>

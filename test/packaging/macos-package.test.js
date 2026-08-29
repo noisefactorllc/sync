@@ -99,6 +99,16 @@ test("macOS packaging enforces the advertised deployment target", () => {
   assert.match(verifier, /newer than the bundle minimum/);
 });
 
+test("packaged Syphon exports the Metal server class", stagedOnMacos, () => {
+  const frameworkBinary = path.join(
+    contents, "Frameworks/Syphon.framework/Syphon",
+  );
+  const symbols = execFileSync("/usr/bin/nm", ["-gU", frameworkBinary], {
+    encoding: "utf8",
+  });
+  assert.match(symbols, /(?:^|\s)_OBJC_CLASS_\$_SyphonMetalServer$/m);
+});
+
 test("macOS bundle verifier accepts Mach-O targets below the advertised minimum",
      stagedOnMacos, () => {
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-verify-test-"));
