@@ -1,3 +1,8 @@
+<!-- repo-hero -->
+<a href="https://sync.noisedeck.app/"><img src="docs/hero.jpg" alt="Sync Browser to native video bridge" width="100%"></a>
+
+<sub>Open source from <a href="https://noisefactor.io">Noise Factor</a> &middot; <a href="https://github.com/noisefactorllc">more projects</a></sub>
+
 # Sync
 
 Sync is Noise Factor's low-latency bridge between browser renderers and native
