@@ -453,6 +453,41 @@ if(APPLE)
   )
   add_test(NAME sync_camera_tests COMMAND sync_camera_tests)
 
+  find_library(COREMEDIAIO_FRAMEWORK CoreMediaIO REQUIRED)
+  find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  find_library(IOSURFACE_FRAMEWORK IOSurface REQUIRED)
+
+  add_library(sync_cmio_camera_sink
+    native/src/platform/macos/cmio_camera_sink.mm
+  )
+  target_compile_features(sync_cmio_camera_sink PUBLIC cxx_std_20)
+  set_target_properties(sync_cmio_camera_sink PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_cmio_camera_sink PUBLIC native/include)
+  target_compile_options(sync_cmio_camera_sink PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_cmio_camera_sink
+    PUBLIC sync_protocol
+    PRIVATE ${COREMEDIAIO_FRAMEWORK} ${COREMEDIA_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
+      ${CORE_FOUNDATION_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${IOSURFACE_FRAMEWORK}
+  )
+
+  add_executable(sync_cmio_camera_sink_tests
+    native/test/macos/cmio_camera_sink_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_cmio_camera_sink_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_cmio_camera_sink_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_cmio_camera_sink_tests PRIVATE native/test)
+  target_compile_options(sync_cmio_camera_sink_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_cmio_camera_sink_tests
+    PRIVATE sync_cmio_camera_sink ${FOUNDATION_FRAMEWORK}
+  )
+  add_test(NAME sync_cmio_camera_sink_tests COMMAND sync_cmio_camera_sink_tests)
+
   add_executable(sync_syphon_discovery_probe
     native/test/macos/syphon_discovery_probe.mm
   )
