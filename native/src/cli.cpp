@@ -70,7 +70,7 @@ bool Options::selects_publisher(std::string_view id) const noexcept {
 }
 
 bool is_known_publisher(std::string_view value) noexcept {
-  return value == "syphon" || value == "spout" || value == "ndi";
+  return value == "syphon" || value == "spout" || value == "ndi" || value == "camera";
 }
 
 ParseResult parse(std::span<const std::string_view> arguments) {
@@ -186,12 +186,12 @@ ParseResult parse(std::span<const std::string_view> arguments) {
 }
 void print_usage(std::ostream& error) {
   error << "usage: syncd [--port <1-65535>]"
-           " [--publisher <syphon|spout|ndi>]..."
+           " [--publisher <syphon|spout|ndi|camera>]..."
            " [--syphon-framework <path>] [--spout-library <path>]"
            " [--ndi-runtime <path>]\n"
            "       syncd --port <0-65535> --test-origin <origin>"
            " --test-token <token>"
-           " (--test-receiver | --publisher <syphon|spout|ndi>...)\n"
+           " (--test-receiver | --publisher <syphon|spout|ndi|camera>...)\n"
            "       syncd --list-pairings\n"
            "       syncd --revoke-origin <origin>\n"
            "\n"

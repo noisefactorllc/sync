@@ -383,3 +383,12 @@ SYNC_TEST(cli_management_not_committed_is_an_error_and_preserves_the_record) {
 }
 
 }  // namespace
+
+SYNC_TEST(cli_accepts_camera_as_a_publisher_on_every_platform) {
+  const auto parsed = parse({"--publisher", "syphon", "--publisher", "camera"});
+  SYNC_REQUIRE(parsed.ok());
+  SYNC_REQUIRE(parsed.options.publisher_count == 2);
+  SYNC_REQUIRE(parsed.options.selects_publisher("camera"));
+  SYNC_REQUIRE(cli::is_known_publisher("camera"));
+  SYNC_REQUIRE(!parse({"--publisher", "camera", "--publisher", "camera"}).ok());
+}
