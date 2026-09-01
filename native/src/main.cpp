@@ -9,6 +9,8 @@
 
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
+#include <sync/platform/camera_publisher.hpp>
+#include <sync/platform/cmio_camera_sink.hpp>
 #include <sync/platform/metal_frame_consumer.hpp>
 #include <sync/platform/metal_frame_publisher.hpp>
 #include <sync/platform/pairing_prompt.hpp>
@@ -166,6 +168,8 @@ int run_with_providers(nfsync::ServerOptions &options,
   });
   const std::array<nfsync::MetalFrameConsumer *, 1> consumers{{&syphon}};
   nfsync::MetalFramePublisher metal(consumers);
+  nfsync::camera::CmioCameraSink camera_sink;
+  nfsync::camera::CameraFramePublisher camera(camera_sink);
 #endif
 #if defined(_WIN32)
   nfsync::SpoutFramePublisher spout({
@@ -213,6 +217,17 @@ int run_with_providers(nfsync::ServerOptions &options,
   nfsync::FramePublisher *const spout_publisher = nullptr;
   const char *const spout_reason = "this build does not implement spout on this platform";
 #endif
+#if defined(__APPLE__)
+  constexpr bool kCameraImplemented = true;
+  const bool camera_available = camera.available();
+  nfsync::FramePublisher *const camera_publisher = &camera;
+  const char *const camera_reason = nfsync::camera::describe(camera.unavailable_reason());
+#else
+  constexpr bool kCameraImplemented = false;
+  constexpr bool camera_available = false;
+  nfsync::FramePublisher *const camera_publisher = nullptr;
+  const char *const camera_reason = "this build does not implement camera on this platform";
+#endif
 
   ProviderAssembly assembly;
   assembly.offer("syphon", configured(command, "syphon", kSyphonImplemented),
@@ -221,6 +236,8 @@ int run_with_providers(nfsync::ServerOptions &options,
                  spout_available, spout_publisher, spout_reason);
   assembly.offer("ndi", configured(command, "ndi", true), ndi.available(), &ndi,
                  "the NDI runtime did not load, or failed to initialize");
+  assembly.offer("camera", configured(command, "camera", kCameraImplemented),
+                 camera_available, camera_publisher, camera_reason);
 
   assembly.apply(options);
 #if defined(__APPLE__)

@@ -615,6 +615,7 @@ if(APPLE)
   )
   target_link_libraries(syncd PRIVATE
     sync_pairing_prompt sync_metal_publisher sync_syphon_consumer
+    sync_camera_publisher sync_cmio_camera_sink
     ${FOUNDATION_FRAMEWORK} ${CORE_FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
   )
 elseif(WIN32)
