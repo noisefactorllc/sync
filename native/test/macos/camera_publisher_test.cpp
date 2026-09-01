@@ -1,0 +1,171 @@
+#include "test_harness.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <vector>
+
+#include <sync/frame_receiver.hpp>
+#include <sync/platform/camera_identity.hpp>
+#include <sync/platform/camera_publisher.hpp>
+#include <sync/platform/camera_sink.hpp>
+
+namespace {
+
+using noisefactor::sync::PublishResult;
+using noisefactor::sync::camera::CameraFramePublisher;
+using noisefactor::sync::camera::CameraSink;
+using noisefactor::sync::camera::CameraSinkFrame;
+using noisefactor::sync::camera::CameraSinkSubmit;
+using noisefactor::sync::camera::CameraSinkUnavailableReason;
+using noisefactor::sync::camera::describe;
+using noisefactor::sync::camera::kCanvas;
+using noisefactor::sync::protocol::FrameView;
+
+struct FakeSink final : CameraSink {
+  bool is_available = true;
+  CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::None;
+  CameraSinkSubmit next_result = CameraSinkSubmit::Accepted;
+  std::size_t submitted = 0;
+  std::uint32_t last_width = 0;
+  std::uint32_t last_height = 0;
+  std::uint64_t last_presentation_time_us = 0;
+  std::array<std::uint8_t, 4> last_first_pixel{};
+  std::array<std::uint8_t, 4> last_center_pixel{};
+
+  auto available() const noexcept -> bool override { return is_available; }
+  auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason override {
+    return reason;
+  }
+  auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit override {
+    ++submitted;
+    last_width = frame.width;
+    last_height = frame.height;
+    last_presentation_time_us = frame.presentation_time_us;
+    for (std::size_t i = 0; i < 4; ++i) {
+      last_first_pixel[i] = static_cast<std::uint8_t>(frame.bgra[i]);
+    }
+    const std::size_t center = static_cast<std::size_t>(frame.height / 2) * frame.row_stride +
+                               static_cast<std::size_t>(frame.width / 2) * 4U;
+    for (std::size_t i = 0; i < 4; ++i) {
+      last_center_pixel[i] = static_cast<std::uint8_t>(frame.bgra[center + i]);
+    }
+    return next_result;
+  }
+};
+
+[[nodiscard]] auto make_frame(std::span<const std::byte> payload,
+                              std::uint64_t sequence = 1) noexcept -> FrameView {
+  return {
+      .version = 1,
+      .header_bytes = 64,
+      .flags = 1,
+      .pixel_format = 1,
+      .color_space = 1,
+      .alpha_mode = 1,
+      .width = 2,
+      .height = 2,
+      .row_stride = 8,
+      .payload_bytes = 16,
+      .sequence = sequence,
+      .presentation_time_us = 5'000,
+      .top_down = true,
+      .payload = payload,
+  };
+}
+
+const std::array<std::byte, 16> kRedPayload{
+    std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+    std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+    std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+    std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255}};
+
+}  // namespace
+
+SYNC_TEST(camera_publisher_reports_sink_availability_and_reason) {
+  FakeSink sink;
+  sink.is_available = false;
+  sink.reason = CameraSinkUnavailableReason::DeviceNotFound;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(!publisher.available());
+  SYNC_REQUIRE(publisher.unavailable_reason() == CameraSinkUnavailableReason::DeviceNotFound);
+  SYNC_REQUIRE(std::string(describe(publisher.unavailable_reason())).find("System Settings") !=
+               std::string::npos);
+}
+
+SYNC_TEST(camera_publisher_never_declines_a_sender_and_the_oldest_drives) {
+  FakeSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  SYNC_REQUIRE(publisher.open_sender("b", "second"));
+  SYNC_REQUIRE(publisher.driving_sender() == "a");
+  SYNC_REQUIRE(publisher.publish("b", make_frame(kRedPayload)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.submitted == 0);
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.submitted == 1);
+  publisher.close_sender("a");
+  SYNC_REQUIRE(publisher.driving_sender() == "b");
+  SYNC_REQUIRE(publisher.publish("b", make_frame(kRedPayload)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.submitted == 2);
+  publisher.close_sender("b");
+  SYNC_REQUIRE(publisher.driving_sender().empty());
+}
+
+SYNC_TEST(camera_publisher_fits_frames_to_the_canvas_before_submitting) {
+  FakeSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.last_width == kCanvas.width);
+  SYNC_REQUIRE(sink.last_height == kCanvas.height);
+  SYNC_REQUIRE(sink.last_presentation_time_us == 5'000);
+  // A square red frame into a 16:9 canvas: the first canvas pixel sits in
+  // the left pillarbox, the center pixel is the scaled red as BGRA.
+  SYNC_REQUIRE((sink.last_first_pixel == std::array<std::uint8_t, 4>{0, 0, 0, 255}));
+  SYNC_REQUIRE((sink.last_center_pixel == std::array<std::uint8_t, 4>{0, 0, 255, 255}));
+}
+
+SYNC_TEST(camera_publisher_maps_sink_results_and_rejects_bad_input) {
+  FakeSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  sink.next_result = CameraSinkSubmit::Backpressured;
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Backpressured);
+  sink.next_result = CameraSinkSubmit::Failed;
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Failed);
+  SYNC_REQUIRE(!publisher.poll_failure(0).has_value());
+
+  FrameView bad = make_frame(kRedPayload);
+  bad.pixel_format = 9;
+  sink.next_result = CameraSinkSubmit::Accepted;
+  SYNC_REQUIRE(publisher.publish("a", bad) == PublishResult::Failed);
+  SYNC_REQUIRE(publisher.publish("unknown", make_frame(kRedPayload)) == PublishResult::Failed);
+  SYNC_REQUIRE(!publisher.open_sender("", "x"));
+  SYNC_REQUIRE(!publisher.open_sender("a", "x"));
+  SYNC_REQUIRE(!publisher.open_sender("a", "again"));
+  SYNC_REQUIRE(!publisher.open_sender(std::string(200, 'i'), "x"));
+}
+
+SYNC_TEST(camera_publisher_publishes_nothing_while_unavailable) {
+  FakeSink sink;
+  sink.is_available = false;
+  sink.reason = CameraSinkUnavailableReason::ConnectionRefused;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Failed);
+  SYNC_REQUIRE(sink.submitted == 0);
+}
+
+SYNC_TEST(camera_publisher_is_bounded_in_senders) {
+  FakeSink sink;
+  CameraFramePublisher publisher(sink);
+  for (std::size_t i = 0; i < CameraFramePublisher::kMaximumSenderEntries; ++i) {
+    SYNC_REQUIRE(publisher.open_sender("s" + std::to_string(i), "n"));
+  }
+  SYNC_REQUIRE(!publisher.open_sender("overflow", "n"));
+  publisher.close_sender("s3");
+  SYNC_REQUIRE(publisher.open_sender("overflow", "n"));
+  SYNC_REQUIRE(publisher.driving_sender() == "s0");
+}

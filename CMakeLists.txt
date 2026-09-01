@@ -430,8 +430,16 @@ if(APPLE)
     PRIVATE ${ACCELERATE_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
   )
 
+  add_library(sync_camera_publisher
+    native/src/platform/macos/camera_publisher.cpp
+  )
+  target_compile_features(sync_camera_publisher PUBLIC cxx_std_20)
+  target_include_directories(sync_camera_publisher PUBLIC native/include)
+  target_link_libraries(sync_camera_publisher PUBLIC sync_protocol sync_camera_fitter)
+
   add_executable(sync_camera_tests
     native/test/macos/camera_frame_fitter_test.mm
+    native/test/macos/camera_publisher_test.cpp
     native/test/test_main.cpp
   )
   target_compile_features(sync_camera_tests PRIVATE cxx_std_20)
@@ -440,7 +448,9 @@ if(APPLE)
   target_compile_options(sync_camera_tests PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
-  target_link_libraries(sync_camera_tests PRIVATE sync_camera_fitter ${FOUNDATION_FRAMEWORK})
+  target_link_libraries(sync_camera_tests PRIVATE
+    sync_camera_publisher ${FOUNDATION_FRAMEWORK}
+  )
   add_test(NAME sync_camera_tests COMMAND sync_camera_tests)
 
   add_executable(sync_syphon_discovery_probe

@@ -24,6 +24,8 @@ enum class ProviderFailureKind : std::uint8_t {
   SpoutSendFailed,
   NdiInitializationFailed,
   NdiSendFailed,
+  CameraInitializationFailed,
+  CameraEnqueueFailed,
 };
 
 struct ProviderFailure {
@@ -47,6 +49,10 @@ struct ProviderFailure {
       return "ndi_initialization_failed";
     case ProviderFailureKind::NdiSendFailed:
       return "ndi_send_failed";
+    case ProviderFailureKind::CameraInitializationFailed:
+      return "camera_initialization_failed";
+    case ProviderFailureKind::CameraEnqueueFailed:
+      return "camera_enqueue_failed";
   }
   return "unknown_provider_failure";
 }
