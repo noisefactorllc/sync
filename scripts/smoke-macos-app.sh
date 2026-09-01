@@ -63,6 +63,21 @@ if [[ "$(jq -r '.product' <<<"$health")" != "Sync" ||
   exit 1
 fi
 
+# The camera provider must always be offered by an app-launched helper. On a
+# CI runner nobody can approve the extension, so `available` is expected to
+# be false there; on a machine where it has been approved once, set
+# SYNC_EXPECT_CAMERA=true to require it.
+camera_selected="$(jq -r '.capabilities.providers[] | select(.id == "camera") | .selected' <<<"$health")"
+if [[ "$camera_selected" != "true" ]]; then
+  echo "smoke-macos-app: camera provider is not offered: $health" >&2
+  exit 1
+fi
+camera_available="$(jq -r '.capabilities.providers[] | select(.id == "camera") | .available' <<<"$health")"
+if [[ "${SYNC_EXPECT_CAMERA:-false}" = true && "$camera_available" != "true" ]]; then
+  echo "smoke-macos-app: camera provider is not available on an approved machine: $health" >&2
+  exit 1
+fi
+
 helper_pid="$(pgrep -P "$app_pid" -f "$bundle/Contents/MacOS/syncd" | head -1 || true)"
 if [[ -z "$helper_pid" ]]; then
   echo "smoke-macos-app: managed helper was not found" >&2
