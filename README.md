@@ -38,6 +38,13 @@ they support.
 | Syphon | macOS | `Syphon.framework` | Yes — see [docs/dependencies/syphon.md](docs/dependencies/syphon.md) |
 | Spout | Windows | `SpoutLibrary.dll` | Yes — see [docs/dependencies/spout.md](docs/dependencies/spout.md) |
 | NDI | Windows, macOS | NDI Runtime | No — the SDK licence forbids redistribution; see [docs/dependencies/ndi.md](docs/dependencies/ndi.md) |
+| Camera | macOS | Sync Camera extension, bundled in Sync.app | Yes — activated by Sync.app on first launch, approved once in System Settings |
+
+The camera provider publishes a 1920×1080 BGRA stream as the "Sync Camera"
+device, so any app that picks a camera can use it. The extension ships inside
+Sync.app; macOS activates it only for an app under /Applications, and asks the
+user once. Sync.app restarts its helper when activation completes, which is
+when the camera first appears in Noisedeck's provider list.
 
 No provider is ever linked at build time. Each is discovered at run time
 through its documented public entry point, and a provider whose runtime is

@@ -290,9 +290,10 @@ if(APPLE)
       ${SYNC_SYPHON_FRAMEWORK_PATH}
       ${SYNC_DYLIB_SEARCH_PATH}
     DEPENDS
-      sync_menu syncd
+      sync_menu syncd sync_camera_extension
       LICENSE
       packaging/Sync.svg
+      packaging/macos/SyncCamera-Info.plist.in
       packaging/macos/Third-Party-Notices.txt
       scripts/package-macos.sh
       scripts/verify-macos-bundle.sh

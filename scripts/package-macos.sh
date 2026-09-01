@@ -70,6 +70,15 @@ ditto "$build_dir/Sync.app" "$bundle"
 mkdir -p "$bundle/Contents/Frameworks" "$bundle/Contents/Resources"
 cp "$build_dir/syncd" "$bundle/Contents/MacOS/syncd"
 chmod 0755 "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd"
+
+# The Sync Camera system extension rides inside the app bundle. macOS finds
+# it under Contents/Library/SystemExtensions when Sync.app asks to activate
+# it, so the directory name must be the extension's bundle identifier.
+extension="$bundle/Contents/Library/SystemExtensions/io.noisefactor.sync.camera.systemextension"
+mkdir -p "$extension/Contents/MacOS"
+cp "$build_dir/io.noisefactor.sync.camera" "$extension/Contents/MacOS/io.noisefactor.sync.camera"
+chmod 0755 "$extension/Contents/MacOS/io.noisefactor.sync.camera"
+cp "$build_dir/SyncCamera-Info.plist" "$extension/Contents/Info.plist"
 ditto "$syphon_framework" "$bundle/Contents/Frameworks/Syphon.framework"
 cp "$source_dir/LICENSE" "$bundle/Contents/Resources/LICENSE.txt"
 cp "$source_dir/packaging/macos/Third-Party-Notices.txt" \
@@ -89,7 +98,8 @@ done
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Sync.icns"
 rm -rf "$iconset"
 
-for executable in "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd"; do
+for executable in "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd" \
+    "$extension/Contents/MacOS/io.noisefactor.sync.camera"; do
   dylibbundler_arguments=(
     -b -cd -of -ns
     -x "$executable"

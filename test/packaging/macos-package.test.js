@@ -197,9 +197,14 @@ test("macOS dependency bundling is non-interactive and uses its pinned search pa
     for (const executable of [
       path.join(appExecutableDirectory, "Sync"),
       path.join(buildDirectory, "syncd"),
+      path.join(buildDirectory, "io.noisefactor.sync.camera"),
     ]) {
       writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     }
+    // The packager copies the configured extension plist out of the build
+    // directory; the fixture only needs it to exist.
+    writeFileSync(path.join(buildDirectory, "SyncCamera-Info.plist"),
+                  '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n');
     writeFileSync(path.join(fakeBin, "dylibbundler"), [
       "#!/bin/sh",
       "printf '%s\\n' \"$@\" > \"$FAKE_DYLIB_ARGS_FILE\"",
@@ -232,4 +237,39 @@ test("macOS dependency bundling is non-interactive and uses its pinned search pa
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
+});
+
+test("packaged Sync app carries the Sync Camera extension", stagedOnMacos, () => {
+  const extension = path.join(
+    contents, "Library/SystemExtensions/io.noisefactor.sync.camera.systemextension",
+  );
+  const executable = path.join(extension, "Contents/MacOS/io.noisefactor.sync.camera");
+  assert.equal(existsSync(executable), true, "missing camera extension executable");
+  assert.notEqual(statSync(executable).mode & 0o111, 0, "extension must be executable");
+  const extensionInfo = path.join(extension, "Contents/Info.plist");
+  const extPlist = (key) => execFileSync(
+    "/usr/bin/plutil", ["-extract", key, "raw", "-o", "-", extensionInfo], { encoding: "utf8" },
+  ).trim();
+  assert.equal(extPlist("CFBundleIdentifier"), "io.noisefactor.sync.camera");
+  assert.equal(extPlist("CFBundlePackageType"), "SYSX");
+  assert.equal(extPlist("CMIOExtension.CMIOExtensionMachServiceName"),
+               "TX27BNWUG9.io.noisefactor.sync.camera");
+  assert.equal(extPlist("CFBundleShortVersionString"), plist("CFBundleShortVersionString"));
+  assert.equal(extPlist("LSMinimumSystemVersion"), plist("LSMinimumSystemVersion"));
+  // The daemon feeds the camera as a CoreMediaIO client, which macOS may
+  // attribute to the app as a camera use. A missing usage string is a crash.
+  assert.match(plist("NSCameraUsageDescription"), /camera/i);
+  assert.match(plist("NSSystemExtensionUsageDescription"), /camera/i);
+});
+
+test("entitlements for the app and the camera extension are committed and valid", () => {
+  const entitlement = (name) => path.join(sourceDirectory, "packaging/macos", name);
+  for (const name of ["Sync.entitlements", "SyncCamera.entitlements"]) {
+    const result = spawnSync("/usr/bin/plutil", ["-lint", entitlement(name)], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.match(readFileSync(entitlement("Sync.entitlements"), "utf8"),
+               /com\.apple\.developer\.system-extension\.install/);
+  assert.match(readFileSync(entitlement("SyncCamera.entitlements"), "utf8"),
+               /com\.apple\.security\.app-sandbox/);
 });

@@ -14,6 +14,8 @@ for required in \
   "$contents/MacOS/Sync" \
   "$contents/MacOS/syncd" \
   "$contents/Frameworks/Syphon.framework" \
+  "$contents/Library/SystemExtensions/io.noisefactor.sync.camera.systemextension/Contents/MacOS/io.noisefactor.sync.camera" \
+  "$contents/Library/SystemExtensions/io.noisefactor.sync.camera.systemextension/Contents/Info.plist" \
   "$contents/Resources/Sync.icns" \
   "$contents/Resources/LICENSE.txt" \
   "$contents/Resources/Third-Party-Notices.txt"; do
@@ -94,8 +96,8 @@ while IFS= read -r -d '' candidate; do
   done < <(otool -L "$candidate" | tail -n +2)
 done < <(find "$contents" -type f -print0)
 
-if (( mach_count < 3 )); then
-  echo "verify-macos-bundle: expected app, helper, and framework Mach-O files" >&2
+if (( mach_count < 4 )); then
+  echo "verify-macos-bundle: expected app, helper, camera extension, and framework Mach-O files" >&2
   exit 1
 fi
 

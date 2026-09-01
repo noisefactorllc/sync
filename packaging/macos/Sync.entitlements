@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Lets Sync.app activate the bundled Sync Camera system extension.
+       Applied to the Sync executable and the app bundle at signing time by
+       the release harness; local unsigned builds do not use it. -->
+  <key>com.apple.developer.system-extension.install</key>
+  <true/>
+</dict>
+</plist>
