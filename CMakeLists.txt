@@ -440,6 +440,7 @@ if(APPLE)
   add_executable(sync_camera_tests
     native/test/macos/camera_frame_fitter_test.mm
     native/test/macos/camera_publisher_test.cpp
+    native/test/macos/camera_relay_policy_test.cpp
     native/test/test_main.cpp
   )
   target_compile_features(sync_camera_tests PRIVATE cxx_std_20)
@@ -449,7 +450,7 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_camera_tests PRIVATE
-    sync_camera_publisher ${FOUNDATION_FRAMEWORK}
+    sync_camera_publisher sync_camera_relay_policy ${FOUNDATION_FRAMEWORK}
   )
   add_test(NAME sync_camera_tests COMMAND sync_camera_tests)
 
@@ -487,6 +488,33 @@ if(APPLE)
     PRIVATE sync_cmio_camera_sink ${FOUNDATION_FRAMEWORK}
   )
   add_test(NAME sync_cmio_camera_sink_tests COMMAND sync_cmio_camera_sink_tests)
+
+  add_library(sync_camera_relay_policy
+    native/src/platform/macos/camera_extension/relay_policy.cpp
+  )
+  target_compile_features(sync_camera_relay_policy PUBLIC cxx_std_20)
+  target_include_directories(sync_camera_relay_policy PUBLIC native/include)
+
+  configure_file(
+    packaging/macos/SyncCamera-Info.plist.in
+    ${CMAKE_CURRENT_BINARY_DIR}/SyncCamera-Info.plist
+    @ONLY
+  )
+  add_executable(sync_camera_extension
+    native/src/platform/macos/camera_extension/main.mm
+  )
+  target_compile_features(sync_camera_extension PRIVATE cxx_std_20)
+  set_target_properties(sync_camera_extension PROPERTIES
+    OBJCXX_STANDARD 20
+    OUTPUT_NAME io.noisefactor.sync.camera
+  )
+  target_compile_options(sync_camera_extension PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_camera_extension PRIVATE
+    sync_camera_relay_policy ${COREMEDIAIO_FRAMEWORK} ${COREMEDIA_FRAMEWORK}
+    ${COREVIDEO_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${IOSURFACE_FRAMEWORK}
+  )
 
   add_executable(sync_syphon_discovery_probe
     native/test/macos/syphon_discovery_probe.mm

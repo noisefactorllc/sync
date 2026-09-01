@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Sync Camera</string>
+  <key>CFBundleExecutable</key>
+  <string>io.noisefactor.sync.camera</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.noisefactor.sync.camera</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Sync Camera</string>
+  <key>CFBundlePackageType</key>
+  <string>SYSX</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@SYNC_PRODUCT_VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@SYNC_PRODUCT_VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>CMIOExtension</key>
+  <dict>
+    <key>CMIOExtensionMachServiceName</key>
+    <string>TX27BNWUG9.io.noisefactor.sync.camera</string>
+  </dict>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Noise Factor LLC. MIT licensed.</string>
+</dict>
+</plist>
