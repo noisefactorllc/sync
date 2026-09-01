@@ -14,14 +14,21 @@ set(contents "${bundle}/Contents")
 set(framework_binary "${contents}/Frameworks/Syphon.framework/Syphon")
 
 file(REMOVE_RECURSE "${SYNC_TEST_DIRECTORY}")
+set(extension
+  "${contents}/Library/SystemExtensions/io.noisefactor.sync.camera.systemextension/Contents")
 file(MAKE_DIRECTORY
   "${contents}/MacOS"
   "${contents}/Frameworks/Syphon.framework"
   "${contents}/Resources"
+  "${extension}/MacOS"
 )
 file(COPY_FILE "${SYNC_INFO_PLIST}" "${contents}/Info.plist")
 file(COPY_FILE "${SYNC_STUB_FRAMEWORK_BINARY}" "${contents}/MacOS/Sync")
 file(COPY_FILE "${SYNC_STUB_FRAMEWORK_BINARY}" "${contents}/MacOS/syncd")
+# The verifier requires the camera extension to be present before it looks
+# at Syphon at all; a stand-in keeps this fixture focused on the Syphon check.
+file(COPY_FILE "${SYNC_STUB_FRAMEWORK_BINARY}" "${extension}/MacOS/io.noisefactor.sync.camera")
+file(COPY_FILE "${SYNC_INFO_PLIST}" "${extension}/Info.plist")
 file(COPY_FILE "${SYNC_STUB_FRAMEWORK_BINARY}" "${framework_binary}")
 file(WRITE "${contents}/Resources/Sync.icns" "")
 file(WRITE "${contents}/Resources/LICENSE.txt" "")
