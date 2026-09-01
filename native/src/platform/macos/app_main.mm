@@ -2,8 +2,11 @@
 
 #import <AppKit/AppKit.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <SystemExtensions/SystemExtensions.h>
 
+#include <sync/camera_activation.hpp>
 #include <sync/companion_model.hpp>
+#include <sync/platform/camera_identity.hpp>
 #include <sync/server.hpp>
 
 #include <memory>
@@ -14,6 +17,7 @@
 #include <vector>
 
 namespace companion = noisefactor::sync::companion;
+namespace camera = noisefactor::sync::camera;
 
 namespace {
 
@@ -52,7 +56,8 @@ std::uint64_t monotonic_milliseconds() noexcept {
 
 } // namespace
 
-@interface SyncAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
+@interface SyncAppDelegate
+    : NSObject <NSApplicationDelegate, NSMenuDelegate, OSSystemExtensionRequestDelegate>
 @end
 
 @implementation SyncAppDelegate {
@@ -68,6 +73,8 @@ std::uint64_t monotonic_milliseconds() noexcept {
   BOOL _pairingsLoading;
   BOOL _expectedExit;
   BOOL _quitting;
+  camera::CameraActivationState _cameraState;
+  std::string _cameraError;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -105,6 +112,64 @@ std::uint64_t monotonic_milliseconds() noexcept {
                                                repeats:YES];
   [self refreshPairings];
   [self showPreviewNoticeIfNeeded];
+  [self requestCameraExtension];
+}
+
+// The camera lives in a system extension inside this bundle. macOS only
+// activates it for an app in /Applications, and asks the user once. The
+// helper computes its capabilities at start, so a successful activation is
+// followed by a helper restart; until then Noisedeck sees no camera.
+- (void)requestCameraExtension {
+  NSString* bundlePath = NSBundle.mainBundle.bundlePath;
+  if (!camera::bundle_is_in_applications(bundlePath.UTF8String ?: "")) {
+    _cameraState = camera::CameraActivationState::NotInApplications;
+    return;
+  }
+  _cameraState = camera::CameraActivationState::Requesting;
+  OSSystemExtensionRequest* request = [OSSystemExtensionRequest
+      activationRequestForExtension:ns_string(camera::kExtensionBundleId)
+                              queue:dispatch_get_main_queue()];
+  request.delegate = self;
+  [OSSystemExtensionManager.sharedManager submitRequest:request];
+}
+
+- (OSSystemExtensionReplacementAction)request:(OSSystemExtensionRequest*)request
+                  actionForReplacingExtension:(OSSystemExtensionProperties*)existing
+                                withExtension:(OSSystemExtensionProperties*)ext {
+  (void)request;
+  (void)existing;
+  (void)ext;
+  return OSSystemExtensionReplacementActionReplace;
+}
+
+- (void)requestNeedsUserApproval:(OSSystemExtensionRequest*)request {
+  (void)request;
+  _cameraState = camera::CameraActivationState::NeedsApproval;
+}
+
+- (void)request:(OSSystemExtensionRequest*)request
+    didFinishWithResult:(OSSystemExtensionRequestResult)result {
+  (void)request;
+  if (result == OSSystemExtensionRequestWillCompleteAfterReboot) {
+    _cameraState = camera::CameraActivationState::ActiveAfterReboot;
+    return;
+  }
+  _cameraState = camera::CameraActivationState::Active;
+  [self restartSync:nil];
+}
+
+- (void)request:(OSSystemExtensionRequest*)request didFailWithError:(NSError*)error {
+  (void)request;
+  _cameraState = camera::CameraActivationState::Failed;
+  const char* description = error.localizedDescription.UTF8String;
+  _cameraError = description != nullptr ? description : "unknown error";
+  _model->append_stderr("camera extension: " + _cameraError + "\n");
+}
+
+- (void)openCameraSettings:(id)sender {
+  (void)sender;
+  [NSWorkspace.sharedWorkspace
+      openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.LoginItems-Settings.extension"]];
 }
 
 - (void)probeThenStart {
@@ -313,6 +378,13 @@ std::uint64_t monotonic_milliseconds() noexcept {
                           : @"Unavailable";
   [_menu addItem:disabled_item(
                      [NSString stringWithFormat:@"Active senders: %@", senders])];
+  NSMenuItem* cameraItem =
+      [[NSMenuItem alloc] initWithTitle:ns_string(camera::camera_activation_title(_cameraState))
+                                 action:@selector(openCameraSettings:)
+                          keyEquivalent:@""];
+  cameraItem.target = self;
+  cameraItem.enabled = camera::camera_activation_opens_settings(_cameraState);
+  [_menu addItem:cameraItem];
   [_menu addItem:NSMenuItem.separatorItem];
 
   NSMenuItem* restart = [[NSMenuItem alloc] initWithTitle:@"Restart Sync"

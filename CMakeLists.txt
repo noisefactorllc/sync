@@ -167,6 +167,12 @@ target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBU
 # The companion model is platform-neutral policy — supervision, recovery
 # backoff, and health reporting — shared by the macOS menu-bar app and the
 # Windows tray app, so it is built once for both.
+add_library(sync_camera_activation
+  native/src/camera_activation.cpp
+)
+target_compile_features(sync_camera_activation PUBLIC cxx_std_20)
+target_include_directories(sync_camera_activation PUBLIC native/include)
+
 add_library(sync_companion_model
   native/src/companion_management.cpp
   native/src/companion_model.cpp
@@ -175,13 +181,14 @@ target_compile_features(sync_companion_model PUBLIC cxx_std_20)
 target_include_directories(sync_companion_model PUBLIC native/include)
 
 add_executable(sync_companion_model_tests
+  native/test/camera_activation_test.cpp
   native/test/companion_management_test.cpp
   native/test/companion_model_test.cpp
   native/test/test_main.cpp
 )
 target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)
 target_include_directories(sync_companion_model_tests PRIVATE native/test)
-target_link_libraries(sync_companion_model_tests PRIVATE sync_companion_model)
+target_link_libraries(sync_companion_model_tests PRIVATE sync_companion_model sync_camera_activation)
 add_test(NAME sync_companion_model_tests COMMAND sync_companion_model_tests)
 
 # NDI is the one provider that is not platform-specific: its send path takes a
@@ -263,9 +270,11 @@ if(APPLE)
   target_compile_options(sync_menu PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
+  find_library(SYSTEM_EXTENSIONS_FRAMEWORK SystemExtensions REQUIRED)
   target_link_libraries(sync_menu PRIVATE
-    sync_companion_process ${APPKIT_FRAMEWORK}
+    sync_companion_process sync_camera_activation ${APPKIT_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK} ${SERVICE_MANAGEMENT_FRAMEWORK}
+    ${SYSTEM_EXTENSIONS_FRAMEWORK}
   )
 
   set(SYNC_PACKAGE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/package)

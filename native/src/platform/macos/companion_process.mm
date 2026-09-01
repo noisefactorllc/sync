@@ -437,7 +437,7 @@ CompanionProcess::~CompanionProcess() {
 }
 
 std::vector<std::string> CompanionProcess::launch_arguments() const {
-  return {"--publisher", "syphon", "--syphon-framework",
+  return {"--publisher", "syphon", "--publisher", "camera", "--syphon-framework",
           impl_->options.framework_path};
 }
 
