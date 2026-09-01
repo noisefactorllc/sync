@@ -414,6 +414,35 @@ if(APPLE)
   )
   add_test(NAME sync_syphon_consumer_tests COMMAND sync_syphon_consumer_tests)
 
+  find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+
+  add_library(sync_camera_fitter
+    native/src/platform/macos/camera_frame_fitter.mm
+  )
+  target_compile_features(sync_camera_fitter PUBLIC cxx_std_20)
+  set_target_properties(sync_camera_fitter PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_camera_fitter PUBLIC native/include)
+  target_compile_options(sync_camera_fitter PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_camera_fitter
+    PUBLIC sync_protocol
+    PRIVATE ${ACCELERATE_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
+  )
+
+  add_executable(sync_camera_tests
+    native/test/macos/camera_frame_fitter_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_camera_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_camera_tests PRIVATE native/test)
+  target_compile_options(sync_camera_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_camera_tests PRIVATE sync_camera_fitter ${FOUNDATION_FRAMEWORK})
+  add_test(NAME sync_camera_tests COMMAND sync_camera_tests)
+
   add_executable(sync_syphon_discovery_probe
     native/test/macos/syphon_discovery_probe.mm
   )
