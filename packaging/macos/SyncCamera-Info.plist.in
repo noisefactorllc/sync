@@ -29,5 +29,10 @@
   </dict>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Noise Factor LLC. MIT licensed.</string>
+  <!-- sysextd rejects a CMIO extension without this key on the extension
+       itself ("extension failed category property check"). The copy of it
+       on the app is not enough. -->
+  <key>NSSystemExtensionUsageDescription</key>
+  <string>Sync Camera lets other apps pick Noisedeck's output as a camera.</string>
 </dict>
 </plist>

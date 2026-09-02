@@ -256,6 +256,9 @@ test("packaged Sync app carries the Sync Camera extension", stagedOnMacos, () =>
                "TX27BNWUG9.io.noisefactor.sync.camera");
   assert.equal(extPlist("CFBundleShortVersionString"), plist("CFBundleShortVersionString"));
   assert.equal(extPlist("LSMinimumSystemVersion"), plist("LSMinimumSystemVersion"));
+  // sysextd's category check for CMIO extensions requires this on the
+  // extension's own plist; without it activation fails with error 9.
+  assert.match(extPlist("NSSystemExtensionUsageDescription"), /camera/i);
   // The daemon feeds the camera as a CoreMediaIO client, which macOS may
   // attribute to the app as a camera use. A missing usage string is a crash.
   assert.match(plist("NSCameraUsageDescription"), /camera/i);

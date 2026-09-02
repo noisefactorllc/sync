@@ -101,6 +101,10 @@ std::uint64_t monotonic_milliseconds() noexcept {
   _statusItem.button.image = image;
   _statusItem.button.toolTip = @"Sync Preview";
   _menu = [[NSMenu alloc] initWithTitle:@"Sync"];
+  // Items carry their own enabled flag (status lines, the camera line, and
+  // Restart while an external instance runs). With auto-enabling on, AppKit
+  // ignores that flag for any item that has an action.
+  _menu.autoenablesItems = NO;
   _menu.delegate = self;
   _statusItem.menu = _menu;
 
@@ -161,15 +165,31 @@ std::uint64_t monotonic_milliseconds() noexcept {
 - (void)request:(OSSystemExtensionRequest*)request didFailWithError:(NSError*)error {
   (void)request;
   _cameraState = camera::CameraActivationState::Failed;
-  const char* description = error.localizedDescription.UTF8String;
+  // The localized description of a system-extension error is one generic
+  // sentence. The reason lives in userInfo and in the underlying error, so
+  // diagnostics carry the whole description chain.
+  NSMutableString* detail = [NSMutableString stringWithString:error.description ?: @""];
+  NSError* underlying = error.userInfo[NSUnderlyingErrorKey];
+  for (int depth = 0; underlying != nil && depth < 4; ++depth) {
+    [detail appendFormat:@" <- %@", underlying.description];
+    underlying = underlying.userInfo[NSUnderlyingErrorKey];
+  }
+  const char* description = detail.UTF8String;
   _cameraError = description != nullptr ? description : "unknown error";
   _model->append_stderr("camera extension: " + _cameraError + "\n");
 }
 
 - (void)openCameraSettings:(id)sender {
   (void)sender;
-  [NSWorkspace.sharedWorkspace
-      openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.LoginItems-Settings.extension"]];
+  if (!camera::camera_activation_opens_settings(_cameraState)) return;
+  // macOS 15 approves extensions under General > Login Items & Extensions;
+  // 13 and 14 under Privacy & Security. An unknown pane id silently opens
+  // an unrelated pane, so the id is chosen by OS version.
+  const NSOperatingSystemVersion version = NSProcessInfo.processInfo.operatingSystemVersion;
+  NSString* pane = version.majorVersion >= 15
+      ? @"x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+      : @"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension";
+  [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:pane]];
 }
 
 - (void)probeThenStart {
