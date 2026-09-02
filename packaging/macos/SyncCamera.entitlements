@@ -6,5 +6,13 @@
        extension executable and its bundle at signing time. -->
   <key>com.apple.security.app-sandbox</key>
   <true/>
+  <!-- The CMIO validator requires CMIOExtensionMachServiceName to be
+       prefixed by one of these groups; a bare Team ID prefix is rejected
+       with "invalid mach service name or is not signed". Team-ID-prefixed
+       groups need no provisioning profile on macOS. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>TX27BNWUG9.io.noisefactor.sync</string>
+  </array>
 </dict>
 </plist>

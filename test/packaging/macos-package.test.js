@@ -279,4 +279,16 @@ test("entitlements for the app and the camera extension are committed and valid"
                /com\.apple\.developer\.system-extension\.install/);
   assert.match(readFileSync(entitlement("SyncCamera.entitlements"), "utf8"),
                /com\.apple\.security\.app-sandbox/);
+  // sysextd's CMIO validator requires the Mach service name to start with
+  // an app group from the extension's entitlements.
+  const cameraEntitlements = readFileSync(entitlement("SyncCamera.entitlements"), "utf8");
+  const group = cameraEntitlements.match(
+    /com\.apple\.security\.application-groups<\/key>\s*<array>\s*<string>([^<]+)<\/string>/,
+  );
+  assert.ok(group, "camera extension must declare an app group");
+  const template = readFileSync(path.join(sourceDirectory, "packaging/macos/SyncCamera-Info.plist.in"), "utf8");
+  const service = template.match(/CMIOExtensionMachServiceName<\/key>\s*<string>([^<]+)<\/string>/);
+  assert.ok(service, "extension plist must name its Mach service");
+  assert.ok(service[1].startsWith(group[1] + "."),
+            `Mach service ${service[1]} must be prefixed by app group ${group[1]}`);
 });
