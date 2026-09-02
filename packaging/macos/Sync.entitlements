@@ -7,5 +7,12 @@
        the release harness; local unsigned builds do not use it. -->
   <key>com.apple.developer.system-extension.install</key>
   <true/>
+  <!-- macOS matches a restricted entitlement against the embedded
+       provisioning profile by application and team identifier. Xcode adds
+       these two automatically; codesign does not. -->
+  <key>com.apple.application-identifier</key>
+  <string>TX27BNWUG9.io.noisefactor.sync</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>TX27BNWUG9</string>
 </dict>
 </plist>
