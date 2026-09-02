@@ -264,9 +264,13 @@ test("packaged Sync app carries the Sync Camera extension", stagedOnMacos, () =>
 
 test("entitlements for the app and the camera extension are committed and valid", () => {
   const entitlement = (name) => path.join(sourceDirectory, "packaging/macos", name);
-  for (const name of ["Sync.entitlements", "SyncCamera.entitlements"]) {
-    const result = spawnSync("/usr/bin/plutil", ["-lint", entitlement(name)], { encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
+  // plutil exists only on macOS; the content checks below run everywhere
+  // this suite does, Windows included.
+  if (process.platform === "darwin") {
+    for (const name of ["Sync.entitlements", "SyncCamera.entitlements"]) {
+      const result = spawnSync("/usr/bin/plutil", ["-lint", entitlement(name)], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    }
   }
   assert.match(readFileSync(entitlement("Sync.entitlements"), "utf8"),
                /com\.apple\.developer\.system-extension\.install/);
