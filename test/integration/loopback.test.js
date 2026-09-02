@@ -33,9 +33,12 @@ const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
 // The providers a daemon configures when no --publisher is named. NDI is on
 // both platforms because its send path takes a CPU frame and needs no
 // platform-specific GPU layer; Syphon and Spout are each platform-bound.
+// Naming no publisher selects every provider the platform implements. macOS
+// adds the camera, which rides in a system extension and is unavailable on
+// any machine that has not approved it, CI included.
 const DEFAULT_PROVIDER_IDS = process.platform === "win32"
   ? ["spout", "ndi"]
-  : ["syphon", "ndi"];
+  : ["syphon", "ndi", "camera"];
 
 function withTimeout(promise, description, timeoutMs = TIMEOUT_MS) {
   let timer;
@@ -2317,7 +2320,8 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
   let ipv6Guard;
   let daemon;
   // Naming no publisher configures every platform provider, so a machine with
-  // no Syphon and no NDI runtime earns two diagnostics here -- not silence.
+  // no Syphon, no NDI runtime, and no approved camera extension earns one
+  // diagnostic per missing provider here -- not silence.
   let reportedProviders = [];
   try {
     ipv4Guard = await listenGuard("127.0.0.1", 53979);
