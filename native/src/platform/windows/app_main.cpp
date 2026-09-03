@@ -9,12 +9,15 @@
 // user32, shell32, and advapi32; the #pragma comment(lib, ...) directives
 // below duplicate that for MSVC so the file also builds standalone.
 
+#include "camera_source/source_guids.hpp"
 #include "companion_process.hpp"
 #include "resource.h"
 
 #include "../../companion_management.hpp"
 #include "../../owner_dispatch_queue.hpp"
 
+#include <sync/camera_activation.hpp>
+#include <sync/platform/mf_camera_sink.hpp>
 #include <sync/companion_model.hpp>
 #include <sync/server.hpp>
 
@@ -47,6 +50,7 @@
 #include <string_view>
 #include <vector>
 
+namespace camera = noisefactor::sync::camera;
 namespace companion = noisefactor::sync::companion;
 
 namespace {
@@ -64,6 +68,7 @@ constexpr UINT kTrayIconId = 1;
 constexpr UINT kCommandRestart = 1001;
 constexpr UINT kCommandCopyDiagnostics = 1002;
 constexpr UINT kCommandQuit = 1003;
+constexpr UINT kCommandEnableCamera = 1005;
 constexpr UINT kCommandPairingsRefresh = 1004;
 // Dynamic pairing-revoke items get ids in [kCommandPairingsBase,
 // kCommandPairingsBase + kMaximumPairingMenuEntries), one per cached
@@ -161,6 +166,9 @@ void copy_to_clipboard(HWND owner, const std::wstring& text) {
 
 struct AppState {
   HWND hwnd = nullptr;
+  // Where the camera stands, recomputed at startup and after every attempt to
+  // enable it.
+  camera::CameraActivationState camera_state = camera::CameraActivationState::Unknown;
   HICON icon = nullptr;
   std::unique_ptr<companion::CompanionModel> model;
   std::unique_ptr<companion::CompanionProcess> process;
@@ -413,6 +421,70 @@ void restart_sync(AppState& app) {
   }
 }
 
+// The camera is registered exactly when its CLSID resolves under HKLM, which
+// is the one thing the elevated step changes. Cheaper and more honest than
+// asking the daemon, which reports the same fact one restart later.
+[[nodiscard]] camera::CameraActivationState probe_camera_state() {
+  if (!camera::windows_supports_virtual_cameras()) {
+    return camera::CameraActivationState::NotSupported;
+  }
+  const std::wstring path = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") +
+                            kSyncCameraSourceClsidString + L"\\InprocServer32";
+  HKEY key = nullptr;
+  if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ, &key) == ERROR_SUCCESS) {
+    ::RegCloseKey(key);
+    return camera::CameraActivationState::Active;
+  }
+  return camera::CameraActivationState::NeedsElevation;
+}
+
+// Runs syncd --register-camera elevated. ShellExecuteExW with "runas" is what
+// raises the UAC prompt; a declined prompt comes back as ERROR_CANCELLED and
+// leaves the line offering another try rather than reporting a failure the
+// user did not have.
+void enable_camera(AppState& app) {
+  app.camera_state = camera::CameraActivationState::Registering;
+
+  std::wstring helper(MAX_PATH, L'\0');
+  const DWORD written =
+      ::GetModuleFileNameW(nullptr, helper.data(), static_cast<DWORD>(helper.size()));
+  if (written == 0 || written >= helper.size()) {
+    app.camera_state = camera::CameraActivationState::Failed;
+    return;
+  }
+  helper.resize(written);
+  const std::size_t separator = helper.find_last_of(L'\\');
+  if (separator == std::wstring::npos) {
+    app.camera_state = camera::CameraActivationState::Failed;
+    return;
+  }
+  helper.replace(separator + 1, std::wstring::npos, L"syncd.exe");
+
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+  info.lpVerb = L"runas";
+  info.lpFile = helper.c_str();
+  info.lpParameters = L"--register-camera";
+  info.nShow = SW_HIDE;
+  if (::ShellExecuteExW(&info) == FALSE) {
+    // A declined prompt is a choice, not a fault.
+    app.camera_state = ::GetLastError() == ERROR_CANCELLED
+                           ? camera::CameraActivationState::NeedsElevation
+                           : camera::CameraActivationState::Failed;
+    return;
+  }
+
+  DWORD exit_code = 1;
+  if (info.hProcess != nullptr) {
+    ::WaitForSingleObject(info.hProcess, INFINITE);
+    ::GetExitCodeProcess(info.hProcess, &exit_code);
+    ::CloseHandle(info.hProcess);
+  }
+  app.camera_state = exit_code == 0 ? probe_camera_state()
+                                    : camera::CameraActivationState::Failed;
+}
+
 HMENU build_pairings_submenu(AppState& app) {
   HMENU menu = ::CreatePopupMenu();
   if (app.pairings_loading && !app.pairings_fetched_ever) {
@@ -468,6 +540,13 @@ void show_context_menu(AppState& app) {
   }
   ::AppendMenuW(menu, restart_flags, kCommandRestart, L"Restart Sync");
 
+  UINT camera_flags = MF_STRING;
+  if (!camera::camera_activation_is_actionable(app.camera_state)) {
+    camera_flags |= MF_GRAYED;
+  }
+  ::AppendMenuW(menu, camera_flags, kCommandEnableCamera,
+               to_wide(camera::camera_activation_title(app.camera_state)).c_str());
+
   HMENU pairings_menu = build_pairings_submenu(app);
   ::AppendMenuW(menu, MF_POPUP,
                reinterpret_cast<UINT_PTR>(pairings_menu), L"Pairings");
@@ -490,6 +569,12 @@ void show_context_menu(AppState& app) {
 void handle_command(AppState& app, UINT command) {
   if (command == kCommandRestart) {
     restart_sync(app);
+  } else if (command == kCommandEnableCamera) {
+    enable_camera(app);
+    // syncd discovers the camera once, at startup, so it has to be restarted
+    // before the provider it already reported as unregistered becomes
+    // available.
+    if (app.camera_state == camera::CameraActivationState::Active) restart_sync(app);
   } else if (command == kCommandCopyDiagnostics) {
     copy_to_clipboard(app.hwnd, to_wide(app.model->diagnostics()));
   } else if (command == kCommandPairingsRefresh) {
@@ -649,6 +734,7 @@ int run_tray_application() {
   }
 
   AppState app;
+  app.camera_state = probe_camera_state();
   app.hwnd = hwnd;
   ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
 

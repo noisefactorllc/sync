@@ -7,6 +7,7 @@
 namespace {
 
 using noisefactor::sync::camera::bundle_is_in_applications;
+using noisefactor::sync::camera::camera_activation_is_actionable;
 using noisefactor::sync::camera::camera_activation_opens_settings;
 using noisefactor::sync::camera::camera_activation_title;
 using noisefactor::sync::camera::CameraActivationState;
@@ -44,4 +45,31 @@ SYNC_TEST(camera_activation_marks_which_states_open_system_settings) {
   SYNC_REQUIRE(!camera_activation_opens_settings(CameraActivationState::Active));
   SYNC_REQUIRE(!camera_activation_opens_settings(CameraActivationState::NotInApplications));
   SYNC_REQUIRE(!camera_activation_opens_settings(CameraActivationState::Failed));
+}
+
+SYNC_TEST(camera_activation_offers_the_windows_enable_line) {
+  SYNC_REQUIRE(std::string(camera_activation_title(CameraActivationState::NeedsElevation)) ==
+               "Enable Sync Camera…");
+  SYNC_REQUIRE(std::string(camera_activation_title(CameraActivationState::NotSupported)) ==
+               "Camera: needs Windows 11");
+}
+
+SYNC_TEST(camera_activation_lines_are_live_only_when_clicking_would_help) {
+  SYNC_REQUIRE(camera_activation_is_actionable(CameraActivationState::NeedsElevation));
+  SYNC_REQUIRE(camera_activation_is_actionable(CameraActivationState::NeedsApproval));
+  // Worth another try: the usual cause is a declined prompt.
+  SYNC_REQUIRE(camera_activation_is_actionable(CameraActivationState::Failed));
+
+  SYNC_REQUIRE(!camera_activation_is_actionable(CameraActivationState::Active));
+  SYNC_REQUIRE(!camera_activation_is_actionable(CameraActivationState::Registering));
+  SYNC_REQUIRE(!camera_activation_is_actionable(CameraActivationState::Requesting));
+  // Nothing a click can do about an OS that lacks the API.
+  SYNC_REQUIRE(!camera_activation_is_actionable(CameraActivationState::NotSupported));
+}
+
+SYNC_TEST(camera_activation_keeps_the_settings_deep_link_to_macos_approval) {
+  // The macOS menu item opens System Settings; the Windows one must not, or a
+  // UAC-shaped problem would send the user to a pane that cannot fix it.
+  SYNC_REQUIRE(camera_activation_opens_settings(CameraActivationState::NeedsApproval));
+  SYNC_REQUIRE(!camera_activation_opens_settings(CameraActivationState::NeedsElevation));
 }

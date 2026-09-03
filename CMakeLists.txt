@@ -1019,7 +1019,8 @@ elseif(WIN32)
   set_target_properties(sync_menu PROPERTIES OUTPUT_NAME Sync)
   target_include_directories(sync_menu PRIVATE native/src/platform/windows)
   target_link_libraries(sync_menu PRIVATE
-    sync_companion_process shell32 user32 advapi32
+    sync_companion_process sync_camera_activation sync_mf_camera_sink
+    shell32 user32 advapi32
   )
 
   target_sources(syncd PRIVATE
