@@ -869,8 +869,12 @@ export class SyncBridgeClient {
     }
     return runWithTimeout((async () => {
       let response;
+      // Call the implementation without a receiver: a browser's global fetch
+      // rejects with "Illegal invocation" when invoked as a method of anything
+      // but its global, and the SDK's default is exactly that global function.
+      const fetchImplementation = this._fetch;
       try {
-        response = await this._fetch(`${this._endpoint.httpOrigin}/health`, {
+        response = await fetchImplementation(`${this._endpoint.httpOrigin}/health`, {
           method: 'GET',
           credentials: 'omit',
           cache: 'no-store',

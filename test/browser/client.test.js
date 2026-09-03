@@ -1849,3 +1849,31 @@ test('the browser entry point exposes the client, sink, and protocol surface tog
   assert.equal(entry.SyncPairingDurabilityError, SyncPairingDurabilityError);
   assert.equal(entry.SyncPairingOriginLimitError, SyncPairingOriginLimitError);
 });
+
+// Browsers implement fetch as a Window operation: called with any receiver other
+// than the global (or none), it rejects with "Illegal invocation". The SDK used
+// to invoke its stored default as a method of the client, so every real browser
+// and Electron reported "Sync daemon did not answer" without sending a request.
+function browserLikeFetch(...args) {
+  if (this !== undefined && this !== globalThis) {
+    return Promise.reject(new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation"));
+  }
+  return browserLikeFetch.implementation(...args);
+}
+browserLikeFetch.implementation = async () => response(HEALTH);
+
+test('health requests invoke fetch without the client as receiver, like a browser global', async () => {
+  const explicit = client({ fetch: browserLikeFetch });
+  const explicitResult = await explicit.probe();
+  assert.equal(explicitResult.available, true, explicitResult.message);
+
+  const previous = globalThis.fetch;
+  globalThis.fetch = browserLikeFetch;
+  try {
+    const defaulted = new SyncBridgeClient({ WebSocket: FakeWebSocket, timeoutMs: 50 });
+    const defaultedResult = await defaulted.probe();
+    assert.equal(defaultedResult.available, true, defaultedResult.message);
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
