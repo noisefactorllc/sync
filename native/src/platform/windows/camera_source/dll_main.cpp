@@ -65,15 +65,19 @@ class SourceFactory final : public IClassFactory {
     *object = nullptr;
     if (outer != nullptr) return CLASS_E_NOAGGREGATION;
 
-    auto* source = new (std::nothrow) noisefactor::sync::camera::SyncCameraSource();
-    if (source == nullptr) return E_OUTOFMEMORY;
-    const HRESULT hr = source->Initialize();
+    // The activator, not the media source. The frame server creates this
+    // CLSID, asks for IMFActivate and calls ActivateObject to reach the
+    // source; handing back the source directly fails at
+    // IMFVirtualCamera::Start with E_NOINTERFACE.
+    auto* activator = new (std::nothrow) noisefactor::sync::camera::SyncCameraActivator();
+    if (activator == nullptr) return E_OUTOFMEMORY;
+    const HRESULT hr = activator->Initialize();
     if (FAILED(hr)) {
-      source->Release();
+      activator->Release();
       return hr;
     }
-    const HRESULT queried = source->QueryInterface(riid, object);
-    source->Release();
+    const HRESULT queried = activator->QueryInterface(riid, object);
+    activator->Release();
     return queried;
   }
 

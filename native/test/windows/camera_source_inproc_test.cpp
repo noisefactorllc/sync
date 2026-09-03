@@ -44,9 +44,11 @@ struct Environment {
   return instance;
 }
 
-// Instantiates the media source straight out of the DLL. This is the whole
-// point of the in-process test: no frame server, no registration, no
-// elevation, so it runs on any Windows runner.
+// Instantiates the media source straight out of the DLL, along the same route
+// the frame server takes: the class object is an activator, and the source
+// comes from ActivateObject. This is the whole point of the in-process test --
+// no frame server, no registration, no elevation, so it runs on any Windows
+// runner.
 [[nodiscard]] auto CreateSource() -> ComPtr<IMFMediaSource> {
   Environment& env = environment();
   SYNC_REQUIRE(env.module != nullptr);
@@ -55,9 +57,29 @@ struct Environment {
   SYNC_REQUIRE(entry != nullptr);
   ComPtr<IClassFactory> factory;
   SYNC_REQUIRE(SUCCEEDED(entry(kSyncCameraSourceClsid, IID_PPV_ARGS(&factory))));
+  ComPtr<IMFActivate> activator;
+  SYNC_REQUIRE(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&activator))));
   ComPtr<IMFMediaSource> source;
-  SYNC_REQUIRE(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&source))));
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&source))));
   return source;
+}
+
+// The registered class object has to be an activator, not the source. Handing
+// back the source directly is what made IMFVirtualCamera::Start fail with
+// E_NOINTERFACE, and nothing else in the suite would notice the regression.
+SYNC_TEST(the_class_object_is_an_activator_not_the_source) {
+  Environment& env = environment();
+  SYNC_REQUIRE(env.module != nullptr);
+  auto entry =
+      reinterpret_cast<DllGetClassObjectFn>(::GetProcAddress(env.module, "DllGetClassObject"));
+  SYNC_REQUIRE(entry != nullptr);
+  ComPtr<IClassFactory> factory;
+  SYNC_REQUIRE(SUCCEEDED(entry(kSyncCameraSourceClsid, IID_PPV_ARGS(&factory))));
+
+  ComPtr<IMFActivate> activator;
+  SYNC_REQUIRE(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&activator))));
+  ComPtr<IMFMediaSource> direct;
+  SYNC_REQUIRE(factory->CreateInstance(nullptr, IID_PPV_ARGS(&direct)) == E_NOINTERFACE);
 }
 
 [[nodiscard]] auto StreamDescriptorOf(const ComPtr<IMFMediaSource>& source)
@@ -109,6 +131,28 @@ SYNC_TEST(the_source_reports_a_sixty_fps_frame_rate) {
   SYNC_REQUIRE(
       SUCCEEDED(::MFGetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, &numerator, &denominator)));
   SYNC_REQUIRE(denominator != 0 && numerator / denominator == 60);
+}
+
+SYNC_TEST(the_source_implements_every_interface_the_frame_server_requires) {
+  auto source = CreateSource();
+  // Each of these is mandatory for a frame server custom media source. A
+  // missing one is not a soft failure: the pipeline refuses the camera at
+  // IMFVirtualCamera::Start, far from here.
+  ComPtr<IMFMediaSourceEx> source_ex;
+  SYNC_REQUIRE(SUCCEEDED(source.As(&source_ex)));
+  ComPtr<IMFGetService> get_service;
+  SYNC_REQUIRE(SUCCEEDED(source.As(&get_service)));
+  ComPtr<IMFAttributes> attributes;
+  SYNC_REQUIRE(SUCCEEDED(source.As(&attributes)));
+  ComPtr<IMFSampleAllocatorControl> allocator;
+  SYNC_REQUIRE(SUCCEEDED(source.As(&allocator)));
+
+  // And the stream the source exposes carries its own required set.
+  ComPtr<IMFAttributes> stream_attributes;
+  SYNC_REQUIRE(SUCCEEDED(source_ex->GetStreamAttributes(0, &stream_attributes)));
+  UINT32 shared = 0;
+  SYNC_REQUIRE(SUCCEEDED(stream_attributes->GetUINT32(MF_DEVICESTREAM_FRAMESERVER_SHARED, &shared)));
+  SYNC_REQUIRE(shared == 1);
 }
 
 SYNC_TEST(the_source_is_live) {

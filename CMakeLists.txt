@@ -761,7 +761,7 @@ elseif(WIN32)
   target_include_directories(sync_camera_source PRIVATE native/include)
   target_link_libraries(sync_camera_source PRIVATE
     sync_camera_frame_ring sync_camera_nv12 sync_camera_idle_card sync_camera_relay_policy
-    mfplat mfuuid mf advapi32 ole32)
+    mfplat mfsensorgroup mfuuid mf advapi32 ole32)
 
   add_executable(sync_camera_source_tests
     native/test/windows/camera_source_inproc_test.cpp
@@ -799,6 +799,16 @@ elseif(WIN32)
   target_include_directories(sync_camera_registration PRIVATE native/src/platform/windows)
   target_link_libraries(sync_camera_registration PRIVATE mfplat mfsensorgroup mfuuid ole32)
 
+  # Reports capability rather than asserting it, so it is deliberately not an
+  # add_test: a runner image that cannot host a virtual camera is a fact to
+  # record, not a test failure.
+  add_executable(sync_camera_capability_probe
+    native/test/windows/camera_capability_probe.cpp
+  )
+  target_compile_features(sync_camera_capability_probe PRIVATE cxx_std_20)
+  target_link_libraries(sync_camera_capability_probe PRIVATE
+    mfplat mfsensorgroup mfuuid ole32 strmiids)
+
   add_library(sync_mf_camera_sink
     native/src/platform/windows/mf_camera_sink.cpp
   )
@@ -815,6 +825,21 @@ elseif(WIN32)
   target_include_directories(sync_mf_camera_sink_tests PRIVATE native/test)
   target_link_libraries(sync_mf_camera_sink_tests PRIVATE sync_mf_camera_sink)
   add_test(NAME sync_mf_camera_sink_tests COMMAND sync_mf_camera_sink_tests)
+
+  # Tier 2: the only test that proves the whole path. It needs a Windows 11
+  # build (22000+) and the media source registered under HKLM, so it is not
+  # part of the default ctest run -- see the sync_camera_e2e label and the
+  # camera job in .github/workflows/ci.yml.
+  add_executable(sync_virtual_camera_e2e_tests
+    native/test/windows/virtual_camera_e2e_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_virtual_camera_e2e_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_virtual_camera_e2e_tests PRIVATE native/test)
+  target_link_libraries(sync_virtual_camera_e2e_tests PRIVATE
+    sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32)
+  add_test(NAME sync_virtual_camera_e2e_tests COMMAND sync_virtual_camera_e2e_tests)
+  set_tests_properties(sync_virtual_camera_e2e_tests PROPERTIES LABELS sync_camera_e2e)
 
   # The waiting card. Drawn through WIC and Direct2D onto a plain memory
   # bitmap: no window, no device, so it renders the same inside the frame
