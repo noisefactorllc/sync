@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <span>
 #include <string>
 
@@ -20,6 +21,24 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
   // The queue was obtained, but CMIODeviceStartStream refused to start the
   // sink stream.
   StreamNotStarted,
+
+  // Windows. The camera is a Media Foundation virtual camera there, so it
+  // fails in entirely different ways than a CoreMediaIO extension does.
+  //
+  // The running Windows build is older than 22000, where
+  // MFCreateVirtualCamera does not exist.
+  NotSupported,
+  // SyncCamera.dll's CLSID is not under HKLM, so the frame server cannot load
+  // it. The tray's Enable Sync Camera line is what fixes this.
+  SourceNotRegistered,
+  // MFCreateVirtualCamera itself refused, most often because camera privacy
+  // settings deny access.
+  VirtualCameraRefused,
+  // Registered, but no consumer has activated the source yet, so it has not
+  // created the shared section for syncd to write into.
+  SectionMissing,
+  // The section exists but its DACL refused this account.
+  SectionAccessDenied,
 };
 
 [[nodiscard]] constexpr auto describe(CameraSinkUnavailableReason reason) noexcept -> const char* {
@@ -34,20 +53,38 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
       return "the Sync Camera extension did not provide its sink queue";
     case CameraSinkUnavailableReason::StreamNotStarted:
       return "the Sync Camera extension did not start its sink stream";
+    case CameraSinkUnavailableReason::NotSupported:
+      return "the camera needs Windows 11 (build 22000) or later";
+    case CameraSinkUnavailableReason::SourceNotRegistered:
+      return "the Sync Camera source is not registered; choose Enable Sync Camera from the Sync tray menu";
+    case CameraSinkUnavailableReason::VirtualCameraRefused:
+      return "Windows refused to create the Sync camera; camera privacy settings may be denying access";
+    case CameraSinkUnavailableReason::SectionMissing:
+      return "the Sync Camera source has not been started by a camera app yet";
+    case CameraSinkUnavailableReason::SectionAccessDenied:
+      return "the Sync Camera source refused this account access to its frame buffer";
   }
   return "unknown camera problem";
 }
 
-// The phrase above plus the CoreMediaIO status that produced it, when there is
-// one. A bare phrase told a user what to do but told nobody why macOS said no;
-// the OSStatus is what a bug report needs.
+// The phrase above plus the status that produced it, when there is one. A bare
+// phrase told a user what to do but told nobody why the system said no, and
+// that status is what a bug report needs. The two platforms number their
+// failures differently, so each is named for what it is: an OSStatus is a
+// small signed integer, an HRESULT is read as hex.
 [[nodiscard]] inline auto describe_unavailability(CameraSinkUnavailableReason reason,
                                                   std::int32_t status) -> std::string {
   std::string text = describe(reason);
   if (status != 0) {
+#if defined(_WIN32)
+    char buffer[16]{};
+    std::snprintf(buffer, sizeof(buffer), " (HRESULT 0x%08X)", static_cast<unsigned>(status));
+    text += buffer;
+#else
     text += " (OSStatus ";
     text += std::to_string(status);
     text += ')';
+#endif
   }
   return text;
 }
@@ -67,16 +104,18 @@ enum class CameraSinkSubmit : std::uint8_t {
   Failed,
 };
 
-// Where fitted frames go. The production sink is the CoreMediaIO client in
-// cmio_camera_sink.hpp; tests inject a fake.
+// Where fitted frames go. The production sinks are the CoreMediaIO client in
+// cmio_camera_sink.hpp and the shared-ring writer in mf_camera_sink.hpp; tests
+// inject a fake.
 class CameraSink {
  public:
   virtual ~CameraSink() = default;
   [[nodiscard]] virtual auto available() const noexcept -> bool = 0;
   [[nodiscard]] virtual auto unavailable_reason() const noexcept
       -> CameraSinkUnavailableReason = 0;
-  // The CoreMediaIO OSStatus behind unavailable_reason(), or 0 when the reason
-  // carries no status (not found, not installed, or available).
+  // The platform status behind unavailable_reason() -- a CoreMediaIO OSStatus
+  // on macOS, an HRESULT on Windows -- or 0 when the reason carries no status
+  // (not found, not installed, or available).
   [[nodiscard]] virtual auto unavailable_status() const noexcept -> std::int32_t { return 0; }
   // Whether submit() would accept a frame right now. Fitting a frame to the
   // canvas is the expensive step, so the provider asks first and reports

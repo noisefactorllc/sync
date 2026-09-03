@@ -791,6 +791,22 @@ elseif(WIN32)
       $<TARGET_FILE:sync_camera_source> $<TARGET_FILE_DIR:sync_camera_registration_tests>)
   add_test(NAME sync_camera_registration_tests COMMAND sync_camera_registration_tests)
 
+  add_library(sync_mf_camera_sink
+    native/src/platform/windows/mf_camera_sink.cpp
+  )
+  target_compile_features(sync_mf_camera_sink PUBLIC cxx_std_20)
+  target_include_directories(sync_mf_camera_sink PUBLIC native/include)
+  target_link_libraries(sync_mf_camera_sink PUBLIC sync_camera_frame_ring PRIVATE advapi32)
+
+  add_executable(sync_mf_camera_sink_tests
+    native/test/windows/mf_camera_sink_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_mf_camera_sink_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_mf_camera_sink_tests PRIVATE native/test)
+  target_link_libraries(sync_mf_camera_sink_tests PRIVATE sync_mf_camera_sink)
+  add_test(NAME sync_mf_camera_sink_tests COMMAND sync_mf_camera_sink_tests)
+
   # The waiting card. Drawn through WIC and Direct2D onto a plain memory
   # bitmap: no window, no device, so it renders the same inside the frame
   # server as it does under ctest.
