@@ -86,6 +86,9 @@ enum class DeadlineKind {
   PairingPrompt,
   DataMessage,
   WebSocketClose,
+  // A write after which the transport closes (an HTTP response): bounds how
+  // long a peer that stops reading can keep the slot.
+  FinalWrite,
 };
 
 enum class AuthorityState {
@@ -875,7 +878,8 @@ class Server {
       const DeadlineKind expired = connection->deadline_kind;
       clear_deadline(*connection);
       if (expired == DeadlineKind::HttpHeader ||
-          expired == DeadlineKind::WebSocketClose) {
+          expired == DeadlineKind::WebSocketClose ||
+          expired == DeadlineKind::FinalWrite) {
         close_connection(*connection);
       } else if (expired == DeadlineKind::DataMessage) {
         connection->decoder.reset();
@@ -1162,7 +1166,12 @@ class Server {
     }
     if (close_after) {
       connection.transport_close_pending = true;
-      clear_deadline(connection);
+      // libuv has no write timeout. A peer that stops reading keeps this
+      // final write, and with it the connection slot, pending for as long as
+      // it likes; the sweep force-closes the transport when the deadline
+      // passes, exactly as it does for an unanswered close handshake.
+      set_deadline(connection, DeadlineKind::FinalWrite,
+                   kWebSocketCloseDeadlineMs);
       uv_read_stop(reinterpret_cast<uv_stream_t *>(&connection.handle));
     }
     return true;

@@ -199,3 +199,51 @@ SYNC_TEST(camera_publisher_is_bounded_in_senders) {
   SYNC_REQUIRE(publisher.open_sender("overflow", "n"));
   SYNC_REQUIRE(publisher.driving_sender() == "s0");
 }
+
+// Fitting a frame is the most expensive thing the camera provider does. When
+// the sink already holds its full queue, the provider must report
+// backpressure before converting, not after.
+SYNC_TEST(camera_publisher_skips_fitting_when_the_sink_has_no_capacity) {
+  struct FullSink final : CameraSink {
+    std::size_t submitted = 0;
+    std::size_t capacity_polls = 0;
+    bool capacity = false;
+    auto available() const noexcept -> bool override { return true; }
+    auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason override {
+      return CameraSinkUnavailableReason::None;
+    }
+    auto has_capacity() const noexcept -> bool override {
+      ++const_cast<FullSink*>(this)->capacity_polls;
+      return capacity;
+    }
+    auto submit(const CameraSinkFrame&) noexcept -> CameraSinkSubmit override {
+      ++submitted;
+      return CameraSinkSubmit::Accepted;
+    }
+  };
+  FullSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Backpressured);
+  SYNC_REQUIRE(sink.submitted == 0);
+  SYNC_REQUIRE(sink.capacity_polls == 1);
+  sink.capacity = true;
+  SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload, 2)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.submitted == 1);
+}
+
+// The scratch the fitter uses lives with the provider, so a long run of frames
+// does not allocate per frame. Observable through the sink: many frames, one
+// conversion buffer, the same result every time.
+SYNC_TEST(camera_publisher_fits_many_frames_with_stable_output) {
+  FakeSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  for (std::uint64_t sequence = 1; sequence <= 32; ++sequence) {
+    SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload, sequence)) ==
+                 PublishResult::Accepted);
+    SYNC_REQUIRE((sink.last_first_pixel == std::array<std::uint8_t, 4>{0, 0, 0, 255}));
+    SYNC_REQUIRE((sink.last_center_pixel == std::array<std::uint8_t, 4>{0, 0, 255, 255}));
+  }
+  SYNC_REQUIRE(sink.submitted == 32);
+}

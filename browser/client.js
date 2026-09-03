@@ -591,13 +591,14 @@ class SyncSenderSink {
     this._completion = deferred();
     this.closed = this._completion.promise;
     this._dataSocket = dataSocket;
+    this._finalStats = null;
     this._dataEnded = (event) => this._remoteEnd(event);
     dataSocket.addEventListener('error', this._dataEnded);
     dataSocket.addEventListener('close', this._dataEnded);
   }
 
   get stats() {
-    return this._frameSink.stats;
+    return this._frameSink === null ? this._finalStats : this._frameSink.stats;
   }
 
   configure(descriptor) {
@@ -635,9 +636,20 @@ class SyncSenderSink {
   }
 
   _closeLocal(options) {
-    this._dataSocket.removeEventListener('error', this._dataEnded);
-    this._dataSocket.removeEventListener('close', this._dataEnded);
-    this._frameSink.close(options);
+    // Drop the transport and sink once closed. A host that keeps this object
+    // around (last sender, error cause, UI state) must not keep the export
+    // queue's GPU staging and two sockets alive with it.
+    const dataSocket = this._dataSocket;
+    const frameSink = this._frameSink;
+    this._dataSocket = null;
+    this._frameSink = null;
+    // Keep the sink's own counter object: a host that read `stats` before
+    // close still holds the live object, and a late completion the sink
+    // counts after close is still visible.
+    this._finalStats = frameSink.stats;
+    dataSocket.removeEventListener('error', this._dataEnded);
+    dataSocket.removeEventListener('close', this._dataEnded);
+    frameSink.close(options);
   }
 
   _remoteEnd(event) {

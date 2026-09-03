@@ -78,6 +78,11 @@ class CameraSink {
   // The CoreMediaIO OSStatus behind unavailable_reason(), or 0 when the reason
   // carries no status (not found, not installed, or available).
   [[nodiscard]] virtual auto unavailable_status() const noexcept -> std::int32_t { return 0; }
+  // Whether submit() would accept a frame right now. Fitting a frame to the
+  // canvas is the expensive step, so the provider asks first and reports
+  // backpressure without converting when the answer is no. A sink with no
+  // notion of capacity answers yes and lets submit() decide.
+  [[nodiscard]] virtual auto has_capacity() const noexcept -> bool { return true; }
   // The frame is a borrowed view valid only for this call.
   virtual auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit = 0;
 };

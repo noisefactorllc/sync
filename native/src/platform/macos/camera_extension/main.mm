@@ -20,6 +20,7 @@
 
 #include <mach/mach_time.h>
 
+#include <cstring>
 #include <string_view>
 
 #include <sync/platform/camera_identity.hpp>
@@ -80,6 +81,10 @@ NSUUID* sink_stream_uuid() {
 @property(nonatomic, strong) CMIOExtensionStreamFormat* format;
 @property(nonatomic, strong) CMIOExtensionClient* client;
 @property(nonatomic, assign) BOOL streaming;
+// Identifies the one polling chain allowed to run. Start and stop each move
+// it on, so a chain left over from an earlier start recognizes itself as
+// stale and ends instead of polling beside the new one forever.
+@property(nonatomic, assign) uint64_t consumeGeneration;
 - (instancetype)initWithDevice:(SyncCameraDeviceSource*)device
                    description:(CMVideoFormatDescriptionRef)description;
 @end
@@ -102,6 +107,10 @@ NSUUID* sink_stream_uuid() {
   camera::CameraRelayPolicy _policy;
   CVPixelBufferPoolRef _pool;
   CMVideoFormatDescriptionRef _formatDescription;
+  // The idle frame never changes, so it is painted once and every idle tick
+  // sends the same buffer: no pool draw and no full-canvas fill thirty times
+  // a second while a consumer is open and no sender is feeding the camera.
+  CVPixelBufferRef _blackPixels;
 }
 
 - (instancetype)init {
@@ -152,6 +161,7 @@ NSUUID* sink_stream_uuid() {
 
 - (void)dealloc {
   if (_timer != nil) dispatch_source_cancel(_timer);
+  if (_blackPixels != nullptr) CVPixelBufferRelease(_blackPixels);
   if (_pool != nullptr) CVPixelBufferPoolRelease(_pool);
   if (_formatDescription != nullptr) CFRelease(_formatDescription);
 }
@@ -193,6 +203,12 @@ NSUUID* sink_stream_uuid() {
 - (void)sourceStopped {
   dispatch_async(_queue, ^{
     self->_policy.source_stopped();
+    // No viewer left: nothing to keep alive, so stop waking up thirty times
+    // a second. The next viewer's start rebuilds the timer.
+    if (!self->_policy.source_active() && self->_timer != nil) {
+      dispatch_source_cancel(self->_timer);
+      self->_timer = nil;
+    }
   });
 }
 
@@ -212,26 +228,36 @@ NSUUID* sink_stream_uuid() {
   dispatch_resume(_timer);
 }
 
-- (void)sendBlackFrame {
+- (CVPixelBufferRef)blackPixels {
+  if (_blackPixels != nullptr) return _blackPixels;
   CVPixelBufferRef pixels = nullptr;
   if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &pixels) !=
           kCVReturnSuccess ||
       pixels == nullptr) {
-    return;
+    return nullptr;
   }
   CVPixelBufferLockBaseAddress(pixels, 0);
   uint8_t* base = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(pixels));
   const size_t stride = CVPixelBufferGetBytesPerRow(pixels);
-  for (uint32_t row = 0; row < camera::kCanvas.height; ++row) {
-    uint8_t* line = base + static_cast<size_t>(row) * stride;
-    for (uint32_t x = 0; x < camera::kCanvas.width; ++x) {
-      line[static_cast<size_t>(x) * 4 + 0] = 0;
-      line[static_cast<size_t>(x) * 4 + 1] = 0;
-      line[static_cast<size_t>(x) * 4 + 2] = 0;
-      line[static_cast<size_t>(x) * 4 + 3] = 255;
-    }
+  const size_t row_bytes = static_cast<size_t>(camera::kCanvas.width) * 4;
+  // Paint one row of opaque black, then copy it down the buffer.
+  for (uint32_t x = 0; x < camera::kCanvas.width; ++x) {
+    base[static_cast<size_t>(x) * 4 + 0] = 0;
+    base[static_cast<size_t>(x) * 4 + 1] = 0;
+    base[static_cast<size_t>(x) * 4 + 2] = 0;
+    base[static_cast<size_t>(x) * 4 + 3] = 255;
+  }
+  for (uint32_t row = 1; row < camera::kCanvas.height; ++row) {
+    std::memcpy(base + static_cast<size_t>(row) * stride, base, row_bytes);
   }
   CVPixelBufferUnlockBaseAddress(pixels, 0);
+  _blackPixels = pixels;
+  return _blackPixels;
+}
+
+- (void)sendBlackFrame {
+  CVPixelBufferRef pixels = [self blackPixels];
+  if (pixels == nullptr) return;
   const uint64_t now = host_time_ns();
   CMSampleTimingInfo timing{
       .duration = CMTimeMake(1, 30),
@@ -247,7 +273,6 @@ NSUUID* sink_stream_uuid() {
                hostTimeInNanoseconds:now];
     CFRelease(sample);
   }
-  CVPixelBufferRelease(pixels);
 }
 
 - (void)relaySampleBuffer:(CMSampleBufferRef)buffer {
@@ -401,18 +426,21 @@ NSUUID* sink_stream_uuid() {
 - (BOOL)startStreamAndReturnError:(NSError**)outError {
   (void)outError;
   _streaming = YES;
-  [self consume];
+  [self consumeWithGeneration:++_consumeGeneration];
   return YES;
 }
 
 - (BOOL)stopStreamAndReturnError:(NSError**)outError {
   (void)outError;
   _streaming = NO;
+  ++_consumeGeneration;
+  // The next daemon authorizes afresh; do not hold the old one's client.
+  _client = nil;
   return YES;
 }
 
-- (void)consume {
-  if (!_streaming || _client == nil) return;
+- (void)consumeWithGeneration:(uint64_t)generation {
+  if (generation != _consumeGeneration || !_streaming || _client == nil) return;
   __weak SyncCameraSinkStream* weakSelf = self;
   [_stream consumeSampleBufferFromClient:_client
                        completionHandler:^(CMSampleBufferRef sampleBuffer, uint64_t sequence,
@@ -431,15 +459,17 @@ NSUUID* sink_stream_uuid() {
                          if (error != nil) {
                            NSLog(@"sync camera: sink consume error: %@", error);
                          }
+                         if (generation != self.consumeGeneration) return;
                          if (hasMore) {
-                           [self consume];
+                           [self consumeWithGeneration:generation];
                          } else if (self.streaming) {
                            // Nothing queued yet: poll again shortly rather
                            // than spin. Four milliseconds is well under one
                            // frame at 60 fps.
                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_MSEC),
                                           dispatch_get_main_queue(), ^{
-                                            [self consume];
+                                            SyncCameraSinkStream* later = weakSelf;
+                                            if (later != nil) [later consumeWithGeneration:generation];
                                           });
                          }
                        }];

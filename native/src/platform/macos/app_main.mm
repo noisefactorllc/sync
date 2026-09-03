@@ -125,7 +125,8 @@ std::uint64_t monotonic_milliseconds() noexcept {
 // followed by a helper restart; until then Noisedeck sees no camera.
 - (void)requestCameraExtension {
   NSString* bundlePath = NSBundle.mainBundle.bundlePath;
-  if (!camera::bundle_is_in_applications(bundlePath.UTF8String ?: "")) {
+  const char* bundlePathUtf8 = bundlePath.UTF8String;
+  if (!camera::bundle_is_in_applications(bundlePathUtf8 != nullptr ? bundlePathUtf8 : "")) {
     _cameraState = camera::CameraActivationState::NotInApplications;
     return;
   }
@@ -175,7 +176,9 @@ std::uint64_t monotonic_milliseconds() noexcept {
   // The localized description of a system-extension error is one generic
   // sentence. The reason lives in userInfo and in the underlying error, so
   // diagnostics carry the whole description chain.
-  NSMutableString* detail = [NSMutableString stringWithString:error.description ?: @""];
+  NSString* errorDescription = error.description;
+  NSMutableString* detail =
+      [NSMutableString stringWithString:errorDescription != nil ? errorDescription : @""];
   NSError* underlying = error.userInfo[NSUnderlyingErrorKey];
   for (int depth = 0; underlying != nil && depth < 4; ++depth) {
     [detail appendFormat:@" <- %@", underlying.description];

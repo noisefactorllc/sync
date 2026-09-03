@@ -114,6 +114,11 @@ export class SyncFrameSink {
     this._timeOrigin = clock.timeOrigin;
     this._descriptor = null;
     this._encodedFrameBytes = null;
+    // One staging buffer for every frame of a configuration. It grows to the
+    // largest encoded frame seen (a padded row stride can exceed the
+    // descriptor's estimate) and is replaced on reconfigure and dropped on
+    // close, so a stream that runs for hours never allocates per frame.
+    this._staging = null;
     this._sequence = 0;
     this._closed = false;
     this._onFrame = (frame, timestamp, sequence) => {
@@ -135,11 +140,16 @@ export class SyncFrameSink {
     this._encodedFrameBytes = Number.isSafeInteger(payloadBytes)
       ? HEADER_BYTES + payloadBytes
       : Number.MAX_SAFE_INTEGER;
+    this._staging = null;
     this._exportQueue.configure(descriptor);
   }
 
   submit(textureId, timestamp) {
     const sequence = ++this._sequence;
+    if (this._closed) {
+      this.stats.failed += 1;
+      return false;
+    }
     try {
       this._exportQueue.poll();
     } catch {
@@ -147,7 +157,7 @@ export class SyncFrameSink {
       return false;
     }
 
-    if (this._closed || this._socket.readyState !== SOCKET_OPEN) {
+    if (this._socket.readyState !== SOCKET_OPEN) {
       this.stats.failed += 1;
       return false;
     }
@@ -178,6 +188,7 @@ export class SyncFrameSink {
   close(options) {
     if (this._closed) return;
     this._closed = true;
+    this._staging = null;
     let firstError;
     try {
       this._exportQueue.close(options);
@@ -194,11 +205,11 @@ export class SyncFrameSink {
 
   _complete(frame, timestamp, sequence) {
     try {
-      if (!validFrame(frame, this._descriptor)) {
+      if (this._closed || !validFrame(frame, this._descriptor)) {
         this.stats.failed += 1;
         return;
       }
-      if (this._closed || this._socket.readyState !== SOCKET_OPEN) {
+      if (this._socket.readyState !== SOCKET_OPEN) {
         this.stats.failed += 1;
         return;
       }
@@ -206,6 +217,9 @@ export class SyncFrameSink {
       if (this._wouldExceedBufferedBudget(encodedFrameBytes)) {
         this.stats.droppedBackpressure += 1;
         return;
+      }
+      if (this._staging === null || this._staging.byteLength < encodedFrameBytes) {
+        this._staging = new ArrayBuffer(encodedFrameBytes);
       }
 
       const message = encodeFrameV1({
@@ -217,7 +231,7 @@ export class SyncFrameSink {
         pixelFormat: PIXEL_FORMAT.RGBA8_UNORM,
         colorSpace: COLOR_SPACE_ENUM[this._descriptor.colorSpace],
         alphaMode: ALPHA_MODE_ENUM[this._descriptor.alphaMode],
-      }, frame.data);
+      }, frame.data, this._staging);
 
       if (this._closed || this._socket.readyState !== SOCKET_OPEN) {
         this.stats.failed += 1;

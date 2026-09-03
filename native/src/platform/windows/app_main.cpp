@@ -13,6 +13,7 @@
 #include "resource.h"
 
 #include "../../companion_management.hpp"
+#include "../../owner_dispatch_queue.hpp"
 
 #include <sync/companion_model.hpp>
 #include <sync/server.hpp>
@@ -165,6 +166,17 @@ struct AppState {
   std::unique_ptr<companion::CompanionProcess> process;
   bool expected_exit = false;
   std::atomic_bool quitting{false};
+  // One status probe at a time. The poll fires every second and a probe
+  // against a hung helper can take longer than that, so without this the
+  // probes stack up and an older, slower result can overwrite a newer one.
+  bool probe_in_flight = false;
+
+  // Callbacks bound for the owner thread. They live here rather than in the
+  // message itself so that a callback posted just before the window is
+  // destroyed is still run instead of being lost with the message, which
+  // would leave CompanionProcess's destructor waiting on an operation that
+  // can never complete. See owner_dispatch_queue.hpp and its tests.
+  companion::OwnerDispatchQueue dispatches;
 
   std::vector<std::string> pairings;
   std::string pairing_error;
@@ -181,6 +193,7 @@ struct AppState {
 
 void probe_then_start(AppState& app);
 void start_helper(AppState& app);
+
 void schedule_recovery(AppState& app, companion::RecoverySchedule schedule);
 void preflight_recovery(AppState& app, std::uint64_t generation);
 void start_recovery_helper(AppState& app, std::uint64_t generation);
@@ -331,11 +344,14 @@ void poll_status(AppState& app) {
   if (app.model->recovery_active() && !app.process->owned_pid().has_value()) {
     return;
   }
+  if (app.probe_in_flight) return;
+  app.probe_in_flight = true;
   const std::uint64_t generation = app.model->recovery_generation();
   AppState* self = &app;
   app.process->probe([self, generation](
                          std::optional<companion::HealthSnapshot> health,
                          std::string) {
+    self->probe_in_flight = false;
     if (self->quitting.load(std::memory_order_acquire) ||
         self->model->recovery_generation() != generation) {
       return;
@@ -539,19 +555,12 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM wparam,
       reinterpret_cast<AppState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
   switch (message) {
-  case kMessageDispatch: {
-    // CompanionProcess::CompanionProcessOptions::dispatch_to_owner target:
-    // a heap-allocated std::function<void()> posted from a background
-    // thread, executed here on the thread that owns this window, then
-    // freed. See the comment on that option for the correctness argument
-    // this depends on.
-    auto* callback = reinterpret_cast<std::function<void()>*>(lparam);
-    if (callback != nullptr) {
-      (*callback)();
-      delete callback;
-    }
+  case kMessageDispatch:
+    // CompanionProcess::CompanionProcessOptions::dispatch_to_owner wake-up:
+    // the callbacks themselves wait in AppState::dispatches. See the comment
+    // on that option for the correctness argument this depends on.
+    if (app != nullptr) app->dispatches.drain();
     return 0;
-  }
   case kMessageTrayIcon:
     if (app != nullptr &&
         (lparam == WM_RBUTTONUP || lparam == WM_LBUTTONUP ||
@@ -658,18 +667,16 @@ int run_tray_application() {
   companion::CompanionProcessOptions options;
   options.helper_path = wide_helper_path;
   options.spout_library_path = spout_library_path;
-  options.dispatch_to_owner = [hwnd](std::function<void()> callback) {
-    auto* heap_callback = new std::function<void()>(std::move(callback));
-    if (::PostMessageW(hwnd, kMessageDispatch, 0,
-                       reinterpret_cast<LPARAM>(heap_callback)) == 0) {
-      // The window is already gone (e.g. this fires during/after
-      // teardown): run inline rather than silently dropping the callback.
-      // CompanionProcess's destructor waits for every dispatch() to
-      // eventually execute (see its drain_operations()), and this is what
-      // makes that wait bounded instead of a potential hang.
-      (*heap_callback)();
-      delete heap_callback;
-    }
+  // When the window is already gone (e.g. this fires during/after teardown)
+  // the queue runs the callback inline rather than silently dropping it.
+  // CompanionProcess's destructor waits for every dispatch() to eventually
+  // execute (see its drain_operations()), and this is what makes that wait
+  // bounded instead of a potential hang.
+  AppState* const owner = &app;
+  options.dispatch_to_owner = [owner, hwnd](std::function<void()> callback) {
+    owner->dispatches.dispatch(std::move(callback), [hwnd] {
+      return ::PostMessageW(hwnd, kMessageDispatch, 0, 0) != 0;
+    });
   };
   app.process = std::make_unique<companion::CompanionProcess>(options);
 
@@ -701,11 +708,13 @@ int run_tray_application() {
     ::DispatchMessageW(&message);
   }
 
-  // The window (and therefore any further dispatch_to_owner posting) is
-  // already gone by the time we get here, so CompanionProcess's destructor
-  // below -- which may still be waiting on background work via
-  // drain_operations() -- resolves through that dispatcher's inline
-  // fallback rather than through this (now-defunct) message loop.
+  // The window is gone by the time we get here. Callbacks queued before it
+  // went, whose wake-up messages died with it, still run here on the owner
+  // thread; anything dispatched from now on runs inline on its own thread.
+  // That is what lets CompanionProcess's destructor below -- which may still
+  // be waiting on background work via drain_operations() -- finish.
+  app.dispatches.mark_owner_gone();
+  app.dispatches.drain();
   app.process.reset();
   app.model.reset();
   if (single_instance != nullptr) ::CloseHandle(single_instance);

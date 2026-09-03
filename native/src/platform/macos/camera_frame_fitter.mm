@@ -22,17 +22,82 @@ constexpr std::uint16_t kAlphaStraight = 2;
   return frame.payload.size() >= needed;
 }
 
-void fill_black_opaque(std::span<std::byte> canvas_bytes, std::size_t canvas_stride,
-                       CameraCanvas canvas) noexcept {
-  for (std::uint32_t row = 0; row < canvas.height; ++row) {
-    std::byte* line = canvas_bytes.data() + static_cast<std::size_t>(row) * canvas_stride;
-    for (std::uint32_t x = 0; x < canvas.width; ++x) {
-      line[static_cast<std::size_t>(x) * 4U + 0] = std::byte{0};
-      line[static_cast<std::size_t>(x) * 4U + 1] = std::byte{0};
-      line[static_cast<std::size_t>(x) * 4U + 2] = std::byte{0};
-      line[static_cast<std::size_t>(x) * 4U + 3] = std::byte{255};
+// Opaque black in the 32BGRA byte order the canvas uses.
+constexpr Pixel_8888 kBlackOpaqueBgra = {0, 0, 0, 255};
+// vImage's channel mask for the last of four channels: alpha in BGRA.
+constexpr uint8_t kAlphaChannelMask = 0x1;
+
+[[nodiscard]] auto region(std::span<std::byte> canvas_bytes, std::size_t canvas_stride,
+                          std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                          std::uint32_t height) noexcept -> vImage_Buffer {
+  return {
+      .data = canvas_bytes.data() + static_cast<std::size_t>(y) * canvas_stride +
+              static_cast<std::size_t>(x) * kBytesPerPixel,
+      .height = height,
+      .width = width,
+      .rowBytes = canvas_stride,
+  };
+}
+
+// Paints only the bars around the placement. The placement itself is written
+// in full by the caller, so touching it here would be a second pass over the
+// largest part of the canvas on every frame.
+[[nodiscard]] auto fill_bars_black(std::span<std::byte> canvas_bytes, std::size_t canvas_stride,
+                                   CameraCanvas canvas,
+                                   const CameraPlacement& placement) noexcept -> bool {
+  const auto fill = [&](std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                        std::uint32_t height) noexcept -> bool {
+    if (width == 0 || height == 0) return true;
+    vImage_Buffer bar = region(canvas_bytes, canvas_stride, x, y, width, height);
+    return vImageBufferFill_ARGB8888(&bar, kBlackOpaqueBgra, kvImageNoFlags) == kvImageNoError;
+  };
+  const std::uint32_t bottom = placement.y + placement.height;
+  const std::uint32_t right = placement.x + placement.width;
+  return fill(0, 0, canvas.width, placement.y) &&
+         fill(0, bottom, canvas.width, canvas.height - bottom) &&
+         fill(0, placement.y, placement.x, placement.height) &&
+         fill(right, placement.y, canvas.width - right, placement.height);
+}
+
+// RGBA -> BGRA permute into `destination`, then straight alpha premultiplied
+// over black in place, then alpha forced opaque in place. The source is never
+// written.
+[[nodiscard]] auto convert_into(const protocol::FrameView& frame,
+                                vImage_Buffer& destination) noexcept -> bool {
+  vImage_Buffer source{
+      .data = const_cast<std::byte*>(frame.payload.data()),
+      .height = frame.height,
+      .width = frame.width,
+      .rowBytes = frame.row_stride,
+  };
+  const uint8_t permute[4] = {2, 1, 0, 3};
+  if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) !=
+      kvImageNoError) {
+    return false;
+  }
+  if (frame.alpha_mode == kAlphaStraight) {
+    // The RGBA8888 premultiply treats the last channel as alpha regardless
+    // of the order of the first three, so it is correct for BGRA too.
+    if (vImagePremultiplyData_RGBA8888(&destination, &destination, kvImageNoFlags) !=
+        kvImageNoError) {
+      return false;
     }
   }
+  // A camera has no alpha to offer: force opaque after any premultiply.
+  return vImageOverwriteChannelsWithScalar_ARGB8888(255, &destination, &destination,
+                                                    kAlphaChannelMask, kvImageNoFlags) ==
+         kvImageNoError;
+}
+
+[[nodiscard]] auto ensure_capacity(std::vector<std::byte>& buffer, std::size_t bytes) noexcept
+    -> bool {
+  if (buffer.size() >= bytes) return true;
+  try {
+    buffer.resize(bytes);
+  } catch (...) {
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -62,76 +127,48 @@ auto compute_camera_placement(std::uint32_t source_width, std::uint32_t source_h
 }
 
 auto fit_camera_frame(const protocol::FrameView& frame, std::span<std::byte> canvas_bytes,
-                      std::size_t canvas_stride, CameraCanvas canvas) noexcept -> bool {
+                      std::size_t canvas_stride, CameraCanvas canvas,
+                      CameraFitScratch& scratch) noexcept -> bool {
   if (!frame_is_fittable(frame)) return false;
   if (canvas_stride < static_cast<std::size_t>(canvas.width) * kBytesPerPixel) return false;
   if (canvas_bytes.size() < canvas_stride * canvas.height) return false;
   const auto placement = compute_camera_placement(frame.width, frame.height, canvas);
   if (!placement.has_value()) return false;
+  if (!fill_bars_black(canvas_bytes, canvas_stride, canvas, *placement)) return false;
 
-  fill_black_opaque(canvas_bytes, canvas_stride, canvas);
-
-  // RGBA -> BGRA is a channel permutation. The alpha handling that follows
-  // works on the permuted copy, so the source is never written.
-  std::vector<std::byte> swapped;
-  try {
-    swapped.resize(static_cast<std::size_t>(frame.width) * frame.height * kBytesPerPixel);
-  } catch (...) {
-    return false;
+  vImage_Buffer destination = region(canvas_bytes, canvas_stride, placement->x, placement->y,
+                                     placement->width, placement->height);
+  if (placement->width == frame.width && placement->height == frame.height) {
+    // The common case, a frame already at canvas size: convert straight into
+    // the canvas with no intermediate at all.
+    return convert_into(frame, destination);
   }
-  vImage_Buffer source{
-      .data = const_cast<std::byte*>(frame.payload.data()),
-      .height = frame.height,
-      .width = frame.width,
-      .rowBytes = frame.row_stride,
-  };
-  vImage_Buffer swapped_buffer{
-      .data = swapped.data(),
+
+  const std::size_t swapped_bytes =
+      static_cast<std::size_t>(frame.width) * frame.height * kBytesPerPixel;
+  if (!ensure_capacity(scratch.swapped, swapped_bytes)) return false;
+  vImage_Buffer swapped{
+      .data = scratch.swapped.data(),
       .height = frame.height,
       .width = frame.width,
       .rowBytes = static_cast<std::size_t>(frame.width) * kBytesPerPixel,
   };
-  const uint8_t permute[4] = {2, 1, 0, 3};
-  if (vImagePermuteChannels_ARGB8888(&source, &swapped_buffer, permute, kvImageNoFlags) !=
-      kvImageNoError) {
-    return false;
-  }
-  if (frame.alpha_mode == kAlphaStraight) {
-    // The RGBA8888 premultiply treats the last channel as alpha regardless
-    // of the order of the first three, so it is correct for BGRA too.
-    if (vImagePremultiplyData_RGBA8888(&swapped_buffer, &swapped_buffer, kvImageNoFlags) !=
-        kvImageNoError) {
-      return false;
-    }
-  }
-  // A camera has no alpha to offer: force opaque after any premultiply.
-  for (std::uint32_t row = 0; row < frame.height; ++row) {
-    std::byte* line = swapped.data() + static_cast<std::size_t>(row) * swapped_buffer.rowBytes;
-    for (std::uint32_t x = 0; x < frame.width; ++x) {
-      line[static_cast<std::size_t>(x) * 4U + 3] = std::byte{255};
-    }
-  }
+  if (!convert_into(frame, swapped)) return false;
 
-  std::byte* destination_origin = canvas_bytes.data() +
-                                  static_cast<std::size_t>(placement->y) * canvas_stride +
-                                  static_cast<std::size_t>(placement->x) * kBytesPerPixel;
-  if (placement->width == frame.width && placement->height == frame.height) {
-    const std::size_t row_bytes = static_cast<std::size_t>(frame.width) * kBytesPerPixel;
-    for (std::uint32_t row = 0; row < frame.height; ++row) {
-      std::memcpy(destination_origin + static_cast<std::size_t>(row) * canvas_stride,
-                  swapped.data() + static_cast<std::size_t>(row) * swapped_buffer.rowBytes,
-                  row_bytes);
-    }
-    return true;
-  }
-  vImage_Buffer destination{
-      .data = destination_origin,
-      .height = placement->height,
-      .width = placement->width,
-      .rowBytes = canvas_stride,
-  };
-  return vImageScale_ARGB8888(&swapped_buffer, &destination, nullptr, kvImageNoFlags) ==
-         kvImageNoError;
+  // vImage sizes its own temporary for this exact source/destination pair;
+  // handing it a caller-owned one keeps the scale from allocating per frame.
+  const vImage_Error temp_bytes =
+      vImageScale_ARGB8888(&swapped, &destination, nullptr, kvImageGetTempBufferSize);
+  if (temp_bytes < 0) return false;
+  if (!ensure_capacity(scratch.scale_temp, static_cast<std::size_t>(temp_bytes))) return false;
+  return vImageScale_ARGB8888(&swapped, &destination, scratch.scale_temp.data(),
+                              kvImageNoFlags) == kvImageNoError;
+}
+
+auto fit_camera_frame(const protocol::FrameView& frame, std::span<std::byte> canvas_bytes,
+                      std::size_t canvas_stride, CameraCanvas canvas) noexcept -> bool {
+  CameraFitScratch scratch;
+  return fit_camera_frame(frame, canvas_bytes, canvas_stride, canvas, scratch);
 }
 
 }  // namespace noisefactor::sync::camera

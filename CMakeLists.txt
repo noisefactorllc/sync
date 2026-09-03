@@ -184,6 +184,7 @@ add_executable(sync_companion_model_tests
   native/test/camera_activation_test.cpp
   native/test/companion_management_test.cpp
   native/test/companion_model_test.cpp
+  native/test/owner_dispatch_queue_test.cpp
   native/test/test_main.cpp
 )
 target_compile_features(sync_companion_model_tests PRIVATE cxx_std_20)

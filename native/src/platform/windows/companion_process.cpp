@@ -1222,7 +1222,7 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   // A helper with no stderr reader is degraded but still supervised, so a
   // failure here is not fatal to the launch; a helper with no exit waiter is
   // a different matter and is handled below.
-  (void)impl->spawn_tracked([impl, state, stderr_read_handle] {
+  const bool reading_stderr = impl->spawn_tracked([impl, state, stderr_read_handle] {
     std::array<char, 4096> buffer{};
     for (;;) {
       DWORD read = 0;
@@ -1240,6 +1240,12 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
     // dispatch() the way user-visible callbacks do.
     impl->end_operation();
   });
+  if (!reading_stderr) {
+    // With the read end open but unread, the helper's first few kilobytes of
+    // stderr fill the pipe and its next write blocks its event loop. Closing
+    // our end turns that write into a broken pipe the CRT discards instead.
+    state->stderr_read.reset();
+  }
   const bool watching_exit = impl->spawn_tracked([impl, state,
                                                   process_handle] {
     ::WaitForSingleObject(process_handle, INFINITE);

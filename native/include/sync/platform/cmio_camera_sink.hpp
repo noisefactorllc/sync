@@ -41,6 +41,7 @@ class CmioCameraSink final : public CameraSink {
   [[nodiscard]] auto unavailable_reason() const noexcept
       -> CameraSinkUnavailableReason override;
   [[nodiscard]] auto unavailable_status() const noexcept -> std::int32_t override;
+  [[nodiscard]] auto has_capacity() const noexcept -> bool override;
   auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit override;
 
  private:

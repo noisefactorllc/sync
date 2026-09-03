@@ -91,6 +91,7 @@ class MemorySocket {
     this.readyState = 1;
     this.bufferedAmount = 0;
     this.sent = [];
+    this.sentBuffers = [];
     this.closeCalls = 0;
     this.closeError = null;
     this.sendError = null;
@@ -98,7 +99,16 @@ class MemorySocket {
 
   send(message) {
     if (this.sendError) throw this.sendError;
-    this.sent.push(message);
+    // A real WebSocket copies the bytes out synchronously, so the caller is
+    // free to reuse its buffer. Snapshot here for the same reason, and keep
+    // the backing buffer's identity so tests can see reuse.
+    if (message instanceof ArrayBuffer) {
+      this.sent.push(message.slice(0));
+      this.sentBuffers.push(message);
+    } else {
+      this.sent.push(message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength));
+      this.sentBuffers.push(message.buffer);
+    }
   }
 
   close() {
@@ -420,7 +430,8 @@ test('close is idempotent, closes both dependencies once, and rejects later subm
   assert.equal(socket.closeCalls, 1);
   assert.equal(sink.stats, stats);
   assert.equal(sink.submit('later', 1), false);
-  assert.equal(exportQueue.polls, 1);
+  // A closed sink leaves its closed queue alone.
+  assert.equal(exportQueue.polls, 0);
   assert.equal(sink.stats.failed, 1);
 });
 
@@ -474,3 +485,63 @@ test('both close failures preserve queue-first error ordering after both attempt
   assert.equal(exportQueue.closeCalls, 1);
   assert.equal(socket.closeCalls, 1);
 });
+
+test('frames are encoded into one staging buffer that is reused across frames', () => {
+  const { sink, socket, exportQueue } = configuredSink();
+
+  assert.equal(sink.submit('a', 1), true);
+  exportQueue.complete(FRAME);
+  assert.equal(sink.submit('b', 2), true);
+  exportQueue.complete({ ...FRAME, data: new Uint8Array(FRAME.data).reverse() });
+
+  assert.equal(socket.sent.length, 2);
+  assert.ok(ArrayBuffer.isView(socket.sentBuffers[0]) === false);
+  assert.equal(socket.sentBuffers[0], socket.sentBuffers[1]);
+  assert.deepEqual([...new Uint8Array(socket.sent[0], 64)], [...FRAME.data]);
+  assert.deepEqual([...new Uint8Array(socket.sent[1], 64)], [...FRAME.data].reverse());
+  assert.equal(decodeFrameHeaderV1(socket.sent[0]).sequence, 1);
+  assert.equal(decodeFrameHeaderV1(socket.sent[1]).sequence, 2);
+});
+
+test('the staging buffer grows to a padded stride and is replaced on reconfigure', () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('a', 1), true);
+  exportQueue.complete(FRAME);
+  const first = socket.sentBuffers[0];
+
+  // Same descriptor, wider stride: the payload is larger than width*height*4.
+  const padded = new Uint8Array(24);
+  padded.set(FRAME.data.subarray(0, 8), 0);
+  padded.set(FRAME.data.subarray(8, 16), 12);
+  assert.equal(sink.submit('b', 2), true);
+  exportQueue.complete({ ...FRAME, rowStride: 12, data: padded });
+  assert.notEqual(socket.sentBuffers[1], first);
+  assert.equal(decodeFrameHeaderV1(socket.sent[1]).rowStride, 12);
+  assert.deepEqual([...new Uint8Array(socket.sent[1], 64)], [...padded]);
+
+  // The larger buffer now serves the smaller frame too.
+  assert.equal(sink.submit('c', 3), true);
+  exportQueue.complete(FRAME);
+  assert.equal(socket.sentBuffers[2], socket.sentBuffers[1]);
+  assert.equal(socket.sent[2].byteLength, 80);
+
+  sink.configure({ ...DESCRIPTOR, width: 3 });
+  assert.equal(sink.submit('d', 4), true);
+  exportQueue.complete({ width: 3, height: 2, rowStride: 12, data: padded });
+  assert.notEqual(socket.sentBuffers[3], socket.sentBuffers[2]);
+});
+
+test('a closed sink touches neither the export queue nor the socket', () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('a', 1), true);
+  sink.close();
+  const polls = exportQueue.polls;
+  assert.equal(sink.submit('b', 2), false);
+  assert.equal(exportQueue.polls, polls);
+  assert.equal(socket.sent.length, 0);
+  // A late completion from the queue after close is dropped, not sent.
+  assert.doesNotThrow(() => sink._onFrame(FRAME, 1, 1));
+  assert.equal(socket.sent.length, 0);
+  assert.equal(sink.stats.failed, 2);
+});
+

@@ -552,15 +552,16 @@ DecodeError ClientFrameDecoder::finish_frame(std::vector<Message>& output) {
   // RFC 6455 section 5.6: a text message carries UTF-8. Validating the
   // assembled message keeps fragmented and unfragmented text on one rule; the
   // message limit already bounds how much is held before the check runs.
+  // push_back grows the output geometrically; reserving one more slot per
+  // message made a read full of tiny control frames reallocate and move the
+  // whole vector for every frame in it.
   if (control_) {
-    output.reserve(output.size() + 1);
     output.push_back({.opcode = opcode_, .payload = std::move(payload_)});
   } else if (opcode_ == Opcode::Continuation) {
     if (final_) {
       if (fragmented_opcode_ == Opcode::Text && !valid_utf8(fragment_payload_)) {
         return fail(DecodeError::InvalidTextPayload);
       }
-      output.reserve(output.size() + 1);
       output.push_back({.opcode = fragmented_opcode_, .payload = std::move(fragment_payload_)});
       fragment_payload_.clear();
       fragment_open_ = false;
@@ -570,7 +571,6 @@ DecodeError ClientFrameDecoder::finish_frame(std::vector<Message>& output) {
     if (opcode_ == Opcode::Text && !valid_utf8(payload_)) {
       return fail(DecodeError::InvalidTextPayload);
     }
-    output.reserve(output.size() + 1);
     output.push_back({.opcode = opcode_, .payload = std::move(payload_)});
   } else {
     fragment_open_ = true;

@@ -133,3 +133,74 @@ SYNC_TEST(camera_fitter_rejects_malformed_frames_and_small_canvases) {
   bottom_up.top_down = false;
   SYNC_REQUIRE(!fit_camera_frame(bottom_up, out, 8, canvas));
 }
+
+// The daemon fits one frame per received frame, sixty times a second, for the
+// length of a show. The conversion must not allocate per frame: a caller-owned
+// scratch grows once to the working set and is reused from then on.
+SYNC_TEST(camera_fitter_reuses_caller_scratch_across_frames) {
+  using noisefactor::sync::camera::CameraFitScratch;
+  const CameraCanvas canvas{.width = 4, .height = 2};
+  std::vector<std::byte> payload(64, std::byte{255});  // 4x4 white, needs scaling
+  std::vector<std::byte> out(32, std::byte{7});
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame_of(4, 4, payload, 1), out, 16, canvas, scratch));
+  const std::size_t capacity_after_first = scratch.swapped.capacity();
+  const std::byte* const data_after_first = scratch.swapped.data();
+  SYNC_REQUIRE(capacity_after_first >= 64);
+  for (int repeat = 0; repeat < 8; ++repeat) {
+    SYNC_REQUIRE(fit_camera_frame(frame_of(4, 4, payload, 1), out, 16, canvas, scratch));
+  }
+  SYNC_REQUIRE(scratch.swapped.capacity() == capacity_after_first);
+  SYNC_REQUIRE(scratch.swapped.data() == data_after_first);
+  SYNC_REQUIRE((pixel(out, 16, 0, 0) == std::array<std::uint8_t, 4>{0, 0, 0, 255}));
+  SYNC_REQUIRE((pixel(out, 16, 2, 1) == std::array<std::uint8_t, 4>{255, 255, 255, 255}));
+}
+
+// An exact-size frame covers the whole canvas, so there are no bars to paint
+// and no intermediate to stage; every canvas byte is still overwritten.
+SYNC_TEST(camera_fitter_overwrites_the_whole_canvas_for_an_exact_size_frame) {
+  using noisefactor::sync::camera::CameraFitScratch;
+  const CameraCanvas canvas{.width = 3, .height = 2};
+  std::vector<std::byte> payload(24);
+  for (std::size_t i = 0; i < payload.size(); ++i) {
+    payload[i] = static_cast<std::byte>(i * 10 + 1);
+  }
+  std::vector<std::byte> out(24, std::byte{7});
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame_of(3, 2, payload, 1), out, 12, canvas, scratch));
+  SYNC_REQUIRE(scratch.swapped.capacity() == 0);
+  for (std::uint32_t y = 0; y < 2; ++y) {
+    for (std::uint32_t x = 0; x < 3; ++x) {
+      const std::size_t source = (static_cast<std::size_t>(y) * 3 + x) * 4;
+      const auto expected = std::array<std::uint8_t, 4>{
+          static_cast<std::uint8_t>(payload[source + 2]),
+          static_cast<std::uint8_t>(payload[source + 1]),
+          static_cast<std::uint8_t>(payload[source + 0]), 255};
+      SYNC_REQUIRE(pixel(out, 12, x, y) == expected);
+    }
+  }
+}
+
+// Straight alpha is premultiplied over black in the exact-size path too, and
+// the result is opaque, matching the scaled path pixel for pixel.
+SYNC_TEST(camera_fitter_exact_size_straight_alpha_matches_scaled_path) {
+  using noisefactor::sync::camera::CameraFitScratch;
+  const CameraCanvas canvas{.width = 2, .height = 2};
+  const std::array<std::byte, 16> payload{
+      std::byte{200}, std::byte{100}, std::byte{50}, std::byte{128},
+      std::byte{200}, std::byte{100}, std::byte{50}, std::byte{128},
+      std::byte{200}, std::byte{100}, std::byte{50}, std::byte{128},
+      std::byte{200}, std::byte{100}, std::byte{50}, std::byte{128}};
+  std::vector<std::byte> out(16, std::byte{7});
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame_of(2, 2, payload, 2), out, 8, canvas, scratch));
+  for (std::uint32_t y = 0; y < 2; ++y) {
+    for (std::uint32_t x = 0; x < 2; ++x) {
+      const auto p = pixel(out, 8, x, y);
+      SYNC_REQUIRE(p[0] >= 24 && p[0] <= 26);
+      SYNC_REQUIRE(p[1] >= 49 && p[1] <= 51);
+      SYNC_REQUIRE(p[2] >= 99 && p[2] <= 101);
+      SYNC_REQUIRE(p[3] == 255);
+    }
+  }
+}

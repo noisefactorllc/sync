@@ -30,6 +30,7 @@ struct CameraFramePublisher::Impl {
   std::uint64_t open_counter = 0;
   std::size_t canvas_stride;
   std::vector<std::byte> canvas;
+  CameraFitScratch scratch;
   std::array<SenderEntry, kMaximumSenderEntries> senders{};
 
   [[nodiscard]] auto find(std::string_view id) noexcept -> SenderEntry* {
@@ -92,6 +93,10 @@ void CameraFramePublisher::close_sender(std::string_view sender_id) noexcept {
   Impl::SenderEntry* entry = impl_->find(sender_id);
   if (entry == nullptr) return;
   *entry = Impl::SenderEntry{};
+  // The scratch is sized to the largest frame the driving sender ever sent.
+  // With no sender left there is nothing to size it for, so give it back
+  // rather than pin one peak-size buffer for the rest of the process.
+  if (impl_->driving() == nullptr) impl_->scratch = CameraFitScratch{};
 }
 
 auto CameraFramePublisher::publish(std::string_view sender_id,
@@ -102,7 +107,10 @@ auto CameraFramePublisher::publish(std::string_view sender_id,
   // Only the oldest sender drives the camera; the rest are accepted and
   // dropped so their Syphon and NDI publication is unaffected.
   if (entry != impl_->driving()) return PublishResult::Accepted;
-  if (!fit_camera_frame(frame, impl_->canvas, impl_->canvas_stride, kCanvas)) {
+  // Ask before converting: the fit is the expensive step, and a sink whose
+  // queue is full would only throw the result away.
+  if (!impl_->sink.has_capacity()) return PublishResult::Backpressured;
+  if (!fit_camera_frame(frame, impl_->canvas, impl_->canvas_stride, kCanvas, impl_->scratch)) {
     return PublishResult::Failed;
   }
   const CameraSinkFrame fitted{

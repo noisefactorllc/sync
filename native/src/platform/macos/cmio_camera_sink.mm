@@ -84,7 +84,15 @@ struct CmioCameraSink::Impl {
 
   ~Impl() {
     if (started) CMIODeviceStopStream(device, stream);
-    if (queue != nullptr) CFRelease(queue);
+    if (queue != nullptr) {
+      // The queue does not own its elements. Each was enqueued at +1 for the
+      // extension to release after consuming; whatever it never consumed is
+      // ours to release, or its pixel buffer stays pinned.
+      while (const void* element = CMSimpleQueueDequeue(queue)) {
+        CFRelease(element);
+      }
+      CFRelease(queue);
+    }
     if (format != nullptr) CFRelease(format);
     if (pool != nullptr) CVPixelBufferPoolRelease(pool);
   }
@@ -179,6 +187,11 @@ auto CmioCameraSink::unavailable_reason() const noexcept -> CameraSinkUnavailabl
 
 auto CmioCameraSink::unavailable_status() const noexcept -> std::int32_t {
   return impl_->status;
+}
+
+auto CmioCameraSink::has_capacity() const noexcept -> bool {
+  return available() &&
+         static_cast<std::size_t>(CMSimpleQueueGetCount(impl_->queue)) < impl_->depth;
 }
 
 auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {

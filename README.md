@@ -224,6 +224,14 @@ SYNC_DAEMON_PATH=build/syncd npm run test:integration
 ctest --test-dir build --output-on-failure
 ```
 
+The memory soak streams 1080p frames through a test-receiver daemon while
+cycling senders and probing health, and fails on footprint growth. Run it
+against a Release build; a Debug daemon is too slow to be representative:
+
+```bash
+SYNC_DAEMON_PATH=build-release/syncd SYNC_SOAK_SECONDS=60 npm run test:soak
+```
+
 ## Security
 
 Unknown origins cannot silently publish. Pairing requires a browser-initiated

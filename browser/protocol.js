@@ -30,8 +30,12 @@ function bytesFrom(value, name) {
   throw new TypeError(`${name} must be an ArrayBuffer or typed array`);
 }
 
+const PIXEL_FORMAT_VALUES = new Set(Object.values(PIXEL_FORMAT));
+const COLOR_SPACE_VALUES = new Set(Object.values(COLOR_SPACE));
+const ALPHA_MODE_VALUES = new Set(Object.values(ALPHA_MODE));
+
 function validateEnum(value, allowed, name) {
-  if (!Object.values(allowed).includes(value)) {
+  if (!allowed.has(value)) {
     throw new RangeError(`Unsupported ${name}`);
   }
 }
@@ -61,16 +65,23 @@ function expectedPayloadBytes(width, height, rowStride) {
 }
 
 function validateFrameFields({ width, height, rowStride, pixelFormat, colorSpace, alphaMode }) {
-  validateEnum(pixelFormat, PIXEL_FORMAT, 'pixel format');
-  validateEnum(colorSpace, COLOR_SPACE, 'color space');
-  validateEnum(alphaMode, ALPHA_MODE, 'alpha mode');
+  validateEnum(pixelFormat, PIXEL_FORMAT_VALUES, 'pixel format');
+  validateEnum(colorSpace, COLOR_SPACE_VALUES, 'color space');
+  validateEnum(alphaMode, ALPHA_MODE_VALUES, 'alpha mode');
   validateUint32(width, 'width', { positive: true });
   validateUint32(height, 'height', { positive: true });
   validateUint32(rowStride, 'row stride', { positive: true });
   return expectedPayloadBytes(width, height, rowStride);
 }
 
-export function encodeFrameV1(metadata, rgbaBytes) {
+// Encodes one v1 frame. With no `into`, returns a fresh ArrayBuffer holding
+// exactly the frame. With `into` (an ArrayBuffer of at least 64 + payload
+// bytes), writes the frame at offset 0 and returns a Uint8Array view of it, so
+// a caller sending sixty frames a second can keep one staging buffer for the
+// life of a stream instead of allocating and zero-filling megabytes per frame.
+// A WebSocket copies the bytes out of a view synchronously in send(), so the
+// staging buffer is free to reuse the moment send() returns.
+export function encodeFrameV1(metadata, rgbaBytes, into = undefined) {
   const {
     width,
     height,
@@ -96,8 +107,18 @@ export function encodeFrameV1(metadata, rgbaBytes) {
     throw new RangeError('payload length must equal row stride * height');
   }
 
-  const frame = new ArrayBuffer(HEADER_BYTES + payloadBytes);
-  const view = new DataView(frame);
+  const frameBytes = HEADER_BYTES + payloadBytes;
+  let frame;
+  if (into === undefined) {
+    frame = new ArrayBuffer(frameBytes);
+  } else if (!(into instanceof ArrayBuffer)) {
+    throw new TypeError('into must be an ArrayBuffer');
+  } else if (into.byteLength < frameBytes) {
+    throw new RangeError('into is smaller than the encoded frame');
+  } else {
+    frame = into;
+  }
+  const view = new DataView(frame, 0, HEADER_BYTES);
   view.setUint32(0, MAGIC, true);
   view.setUint16(4, VERSION, true);
   view.setUint16(6, HEADER_BYTES, true);
@@ -105,14 +126,19 @@ export function encodeFrameV1(metadata, rgbaBytes) {
   view.setUint16(12, pixelFormat, true);
   view.setUint16(14, colorSpace, true);
   view.setUint16(16, alphaMode, true);
+  view.setUint16(18, 0, true);
   view.setUint32(20, width, true);
   view.setUint32(24, height, true);
   view.setUint32(28, rowStride, true);
   view.setUint32(32, payloadBytes, true);
   view.setBigUint64(36, BigInt(sequence), true);
   view.setBigUint64(44, BigInt(presentationTimeUs), true);
-  new Uint8Array(frame, HEADER_BYTES).set(payload);
-  return frame;
+  // Reserved tail: a reused buffer must not carry stale bytes here.
+  view.setUint32(52, 0, true);
+  view.setUint32(56, 0, true);
+  view.setUint32(60, 0, true);
+  new Uint8Array(frame, HEADER_BYTES, payloadBytes).set(payload);
+  return into === undefined ? frame : new Uint8Array(frame, 0, frameBytes);
 }
 
 export function decodeFrameHeaderV1(bytes) {

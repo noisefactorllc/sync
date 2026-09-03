@@ -113,3 +113,28 @@ test('accepts a header alone but rejects a supplied frame with length mismatch',
   assert.throws(() => decodeFrameHeaderV1(frame.subarray(0, 79)), /payload/i);
   assert.throws(() => decodeFrameHeaderV1(new Uint8Array(64)), /magic/i);
 });
+
+test('encodes into a caller-provided buffer and returns a view over it', () => {
+  const into = new ArrayBuffer(96);
+  new Uint8Array(into).fill(0xff);
+  const view = encodeFrameV1(metadata, payload, into);
+
+  assert.ok(view instanceof Uint8Array);
+  assert.equal(view.buffer, into);
+  assert.equal(view.byteOffset, 0);
+  assert.equal(view.byteLength, 80);
+  assert.deepEqual(decodeFrameHeaderV1(view), decodeFrameHeaderV1(encodeFrameV1(metadata, payload)));
+  // A dirty buffer must not leak stale bytes into the reserved fields.
+  assert.equal(new DataView(into).getUint16(18, true), 0);
+  assert.deepEqual([...new Uint8Array(into, 52, 12)], new Array(12).fill(0));
+  assert.deepEqual([...view.subarray(64)], [...payload]);
+  // Bytes past the frame are the caller's and are left alone.
+  assert.deepEqual([...new Uint8Array(into, 80)], new Array(16).fill(0xff));
+});
+
+test('rejects a provided buffer that is too small or not an ArrayBuffer', () => {
+  assert.throws(() => encodeFrameV1(metadata, payload, new ArrayBuffer(79)), RangeError);
+  assert.throws(() => encodeFrameV1(metadata, payload, new Uint8Array(96)), TypeError);
+  assert.throws(() => encodeFrameV1(metadata, payload, {}), TypeError);
+});
+

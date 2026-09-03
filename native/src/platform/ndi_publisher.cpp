@@ -778,7 +778,12 @@ auto NdiFramePublisher::publish(std::string_view sender_id, const protocol::Fram
 
   Impl::FrameBuffer& buffer = entry->buffers[entry->next_buffer_index];
   if (!impl_->ensure_buffer_capacity(buffer, required_bytes)) {
-    impl_->latch_failure(ProviderFailureKind::NdiSendFailed, 0, 0);
+    // The budget refusing a frame this large is not the runtime failing, so
+    // it must not latch a fatal failure and stop the daemon. Failed here
+    // means the hub reports Failed unless another provider accepted the
+    // frame, and the server then closes that sender's data socket with 1011:
+    // one sender loses its session over an over-budget frame size, which is
+    // what the Spout provider already does.
     return PublishResult::Failed;
   }
 

@@ -347,6 +347,25 @@ struct CompanionProcess::Impl {
 
   CompanionProcessOptions options;
   std::shared_ptr<OwnedTaskState> owned_state;
+  // One session per endpoint for the life of the supervisor. The status poll
+  // runs every second for as long as the menu app is open; a session, its
+  // ephemeral stores, and its delegate queue are meant to be built once, not
+  // eighty-six thousand times a day.
+  __strong NSURLSession* status_session = nil;
+  __strong NSURLSession* health_session = nil;
+
+  NSURLSession* session_for(__strong NSURLSession*& slot, bool cache_policy) {
+    if (slot != nil) return slot;
+    NSURLSessionConfiguration* configuration =
+        [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    configuration.timeoutIntervalForRequest = options.health_timeout_seconds;
+    configuration.timeoutIntervalForResource = options.health_timeout_seconds;
+    if (cache_policy) {
+      configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    }
+    slot = [NSURLSession sessionWithConfiguration:configuration];
+    return slot;
+  }
 
   void run_management(std::vector<std::string> arguments,
                       std::function<void(int, std::string, std::string,
@@ -376,6 +395,7 @@ struct CompanionProcess::Impl {
 
     auto stdout_capture = std::make_shared<std::string>();
     auto stderr_capture = std::make_shared<std::string>();
+    const double termination_grace_seconds = options.termination_timeout_seconds;
     dispatch_queue_t queue =
         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
     dispatch_group_t group = dispatch_group_create();
@@ -412,6 +432,20 @@ struct CompanionProcess::Impl {
           // it still owns rather than racing a raw kill against reuse.
           if (task.running) {
             [task terminate];
+            // A helper that ignores SIGTERM would otherwise park the three
+            // reader and waiter blocks above for good, and every later menu
+            // open would park three more. The kill ends the child, which
+            // closes its pipes, which lets the readers and the waiter return.
+            const pid_t pid = task.processIdentifier;
+            dispatch_after(
+                dispatch_time(DISPATCH_TIME_NOW,
+                              static_cast<int64_t>(termination_grace_seconds *
+                                                   NSEC_PER_SEC)),
+                dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                  if (task.running && task.processIdentifier == pid) {
+                    ::kill(pid, SIGKILL);
+                  }
+                });
           }
           on_main([completion] { completion(-1, {}, {}, true); });
         });
@@ -434,6 +468,12 @@ CompanionProcess::~CompanionProcess() {
   }
   task.standardError = nil;
   task.standardOutput = nil;
+  // A probe still in flight completes with an error and posts to main; the
+  // completion captures no supervisor state.
+  [impl_->status_session invalidateAndCancel];
+  [impl_->health_session invalidateAndCancel];
+  impl_->status_session = nil;
+  impl_->health_session = nil;
 }
 
 std::vector<std::string> CompanionProcess::launch_arguments() const {
@@ -472,10 +512,16 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   state->exit_callback = std::move(exit_callback);
 
   Impl* process = impl_.get();
+  // At end of file the read source stays readable forever, so Foundation
+  // would call a handler that stays installed in a tight loop until the
+  // termination handler removes it. Release it here as well.
   state->stderr_pipe.fileHandleForReading.readabilityHandler =
       ^(NSFileHandle* handle) {
         NSData* data = handle.availableData;
-        if (data.length == 0) return;
+        if (data.length == 0) {
+          handle.readabilityHandler = nil;
+          return;
+        }
         std::string bytes(static_cast<const char*>(data.bytes), data.length);
         on_main([state, bytes = std::move(bytes)] {
           if (state->stderr_callback) state->stderr_callback(bytes);
@@ -483,7 +529,7 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
       };
   state->stdout_pipe.fileHandleForReading.readabilityHandler =
       ^(NSFileHandle* handle) {
-        (void)handle.availableData;
+        if (handle.availableData.length == 0) handle.readabilityHandler = nil;
       };
   task.terminationHandler = ^(NSTask* terminated) {
     state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
@@ -519,12 +565,8 @@ void CompanionProcess::probe(ProbeCallback completion) {
   const double timeout_seconds = impl_->options.health_timeout_seconds;
   // Older daemons do not have /status. Probe it directly here and retry
   // /health only for the precise old-endpoint response.
-  NSURLSessionConfiguration* configuration =
-      [NSURLSessionConfiguration ephemeralSessionConfiguration];
-  configuration.timeoutIntervalForRequest = timeout_seconds;
-  configuration.timeoutIntervalForResource = timeout_seconds;
-  configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-  NSURLSession* session = [NSURLSession sessionWithConfiguration:configuration];
+  NSURLSession* session = impl_->session_for(impl_->status_session, true);
+  NSURLSession* fallback_session = impl_->session_for(impl_->health_session, false);
   NSString* endpoint = ns_string(endpoint_base + "/status");
   NSMutableURLRequest* status_request =
       [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
@@ -537,13 +579,6 @@ void CompanionProcess::probe(ProbeCallback completion) {
             ? static_cast<NSHTTPURLResponse*>(response)
             : nil;
     if (error == nil && (http.statusCode == 400 || http.statusCode == 404)) {
-      [session finishTasksAndInvalidate];
-      NSURLSessionConfiguration* fallback_configuration =
-          [NSURLSessionConfiguration ephemeralSessionConfiguration];
-      fallback_configuration.timeoutIntervalForRequest = timeout_seconds;
-      fallback_configuration.timeoutIntervalForResource = timeout_seconds;
-      NSURLSession* fallback_session =
-          [NSURLSession sessionWithConfiguration:fallback_configuration];
       NSString* fallback_endpoint = ns_string(endpoint_base + "/health");
       NSMutableURLRequest* health_request = [NSMutableURLRequest
           requestWithURL:[NSURL URLWithString:fallback_endpoint]];
@@ -566,7 +601,6 @@ void CompanionProcess::probe(ProbeCallback completion) {
                        ? cpp_string(fallback_error.localizedDescription)
                        : (!health.has_value() ? "Sync health was unavailable."
                                               : std::string{}));
-        [fallback_session finishTasksAndInvalidate];
         on_main([completion, health, message] { completion(health, message); });
       }] resume];
       return;
@@ -580,7 +614,6 @@ void CompanionProcess::probe(ProbeCallback completion) {
                    ? cpp_string(error.localizedDescription)
                    : (!health.has_value() ? "Sync status was unavailable."
                                           : std::string{}));
-    [session finishTasksAndInvalidate];
     on_main([completion, health, message] { completion(health, message); });
   }] resume];
 }
