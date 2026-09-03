@@ -37,6 +37,7 @@ foreach ($required in @(
     'Sync.exe',
     'syncd.exe',
     'SpoutLibrary.dll',
+    'SyncCamera.dll',
     'Sync.ico',
     'LICENSE.txt',
     'Third-Party-Notices.txt')) {
@@ -71,8 +72,9 @@ function Get-PeMachine([string]$path) {
 $imageFileMachineAmd64 = 0x8664
 $binaries = Get-ChildItem -LiteralPath $Bundle -File |
   Where-Object { $_.Extension -in @('.exe', '.dll') }
-if ($binaries.Count -lt 3) {
-  Fail "expected the tray app, the helper, and SpoutLibrary at minimum, found $($binaries.Count) binaries"
+if ($binaries.Count -lt 4) {
+  Fail ("expected the tray app, the helper, SpoutLibrary and the camera source " +
+        "at minimum, found $($binaries.Count) binaries")
 }
 foreach ($binary in $binaries) {
   $machine = Get-PeMachine $binary.FullName

@@ -117,9 +117,10 @@ if ([string]::IsNullOrWhiteSpace($BinaryDir)) { $BinaryDir = $BuildDir }
 $BinaryDir = Resolve-AbsoluteDirectory $BinaryDir 'binary directory'
 $trayExe = Join-Path $BinaryDir 'Sync.exe'
 $helperExe = Join-Path $BinaryDir 'syncd.exe'
-foreach ($required in @($trayExe, $helperExe)) {
+$cameraSource = Join-Path $BinaryDir 'SyncCamera.dll'
+foreach ($required in @($trayExe, $helperExe, $cameraSource)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-    Fail "build sync_menu and syncd before packaging: $required is missing"
+    Fail "build sync_menu, syncd and sync_camera_source before packaging: $required is missing"
   }
 }
 
@@ -143,6 +144,11 @@ New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
 
 Copy-Item -LiteralPath $trayExe -Destination (Join-Path $bundleDir 'Sync.exe')
 Copy-Item -LiteralPath $helperExe -Destination (Join-Path $bundleDir 'syncd.exe')
+# The camera media source. It ships beside the executables because the frame
+# server resolves it through the absolute path recorded at registration, and
+# that path has to remain readable by Local Service -- which rules out
+# anywhere under a user profile.
+Copy-Item -LiteralPath $cameraSource -Destination (Join-Path $bundleDir 'SyncCamera.dll')
 # Spout is BSD-2-Clause, so unlike the NDI runtime it may be redistributed.
 # It sits beside the executables because that is the only non-user-writable
 # directory the provider's discovery search trusts.

@@ -70,6 +70,16 @@ Name: "{userstartup}\Sync"; Filename: "{app}\Sync.exe"; Tasks: startupicon
 Filename: "{app}\Sync.exe"; Description: "Start Sync now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+; Registration wrote the media source CLSID to HKLM, so removing it needs the
+; same elevation. A per-user uninstall is not elevated and will prompt; a
+; declined prompt leaves the key behind for the next install to reuse, which
+; is why failure is ignored here rather than failing the uninstall. This also
+; removes the camera device itself -- it was created with Lifetime_System and
+; would otherwise outlive the app in every picker.
+;
+; Ordered before the taskkill lines because it runs syncd.exe, which the next
+; two lines are about to terminate.
+Filename: "{app}\syncd.exe"; Parameters: "--unregister-camera"; Flags: runhidden skipifdoesntexist; RunOnceId: "UnregisterSyncCamera"
 ; Sync's tray app owns the helper through a kill-on-close job object, so
 ; closing the tray app is enough to stop syncd; /IM matches whichever instance
 ; is running. Failure is ignored because "not running" is the common case.
