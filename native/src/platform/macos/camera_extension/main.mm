@@ -4,8 +4,9 @@
 // consumer sees, and a sink stream syncd feeds through the CoreMediaIO
 // client API (cmio_camera_sink.mm). Sample buffers arriving on the sink are
 // forwarded to the source as they are. When nothing arrives for a while the
-// relay policy asks for a black frame so the camera never goes dark on a
-// consumer that already opened it.
+// relay policy asks for the idle frame, a card saying Sync is waiting, so a
+// consumer that already opened the camera sees Sync rather than a black
+// picture that reads as a broken device.
 //
 // This process is sandboxed and owned by macOS: it is launched when a
 // consumer opens the camera and torn down when the last one leaves. It holds
@@ -20,10 +21,11 @@
 
 #include <mach/mach_time.h>
 
-#include <cstring>
+#include <cstddef>
 #include <string_view>
 
 #include <sync/platform/camera_identity.hpp>
+#include <sync/platform/camera_idle_card.hpp>
 #include <sync/platform/camera_relay_policy.hpp>
 
 namespace camera = noisefactor::sync::camera;
@@ -108,9 +110,9 @@ NSUUID* sink_stream_uuid() {
   CVPixelBufferPoolRef _pool;
   CMVideoFormatDescriptionRef _formatDescription;
   // The idle frame never changes, so it is painted once and every idle tick
-  // sends the same buffer: no pool draw and no full-canvas fill thirty times
+  // sends the same buffer: no pool draw and no full-canvas draw thirty times
   // a second while a consumer is open and no sender is feeding the camera.
-  CVPixelBufferRef _blackPixels;
+  CVPixelBufferRef _idlePixels;
 }
 
 - (instancetype)init {
@@ -161,7 +163,7 @@ NSUUID* sink_stream_uuid() {
 
 - (void)dealloc {
   if (_timer != nil) dispatch_source_cancel(_timer);
-  if (_blackPixels != nullptr) CVPixelBufferRelease(_blackPixels);
+  if (_idlePixels != nullptr) CVPixelBufferRelease(_idlePixels);
   if (_pool != nullptr) CVPixelBufferPoolRelease(_pool);
   if (_formatDescription != nullptr) CFRelease(_formatDescription);
 }
@@ -222,14 +224,14 @@ NSUUID* sink_stream_uuid() {
     SyncCameraDeviceSource* self = weakSelf;
     if (self == nil) return;
     if (self->_policy.tick(host_time_ns()) == camera::CameraRelayPolicy::Action::EmitBlack) {
-      [self sendBlackFrame];
+      [self sendIdleFrame];
     }
   });
   dispatch_resume(_timer);
 }
 
-- (CVPixelBufferRef)blackPixels {
-  if (_blackPixels != nullptr) return _blackPixels;
+- (CVPixelBufferRef)idlePixels {
+  if (_idlePixels != nullptr) return _idlePixels;
   CVPixelBufferRef pixels = nullptr;
   if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &pixels) !=
           kCVReturnSuccess ||
@@ -237,26 +239,18 @@ NSUUID* sink_stream_uuid() {
     return nullptr;
   }
   CVPixelBufferLockBaseAddress(pixels, 0);
-  uint8_t* base = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(pixels));
+  auto* base = static_cast<std::byte*>(CVPixelBufferGetBaseAddress(pixels));
   const size_t stride = CVPixelBufferGetBytesPerRow(pixels);
-  const size_t row_bytes = static_cast<size_t>(camera::kCanvas.width) * 4;
-  // Paint one row of opaque black, then copy it down the buffer.
-  for (uint32_t x = 0; x < camera::kCanvas.width; ++x) {
-    base[static_cast<size_t>(x) * 4 + 0] = 0;
-    base[static_cast<size_t>(x) * 4 + 1] = 0;
-    base[static_cast<size_t>(x) * 4 + 2] = 0;
-    base[static_cast<size_t>(x) * 4 + 3] = 255;
-  }
-  for (uint32_t row = 1; row < camera::kCanvas.height; ++row) {
-    std::memcpy(base + static_cast<size_t>(row) * stride, base, row_bytes);
-  }
+  // A failed draw leaves opaque black behind, which is still a valid frame.
+  (void)camera::draw_camera_idle_card({base, stride * camera::kCanvas.height}, stride,
+                                      camera::kCanvas);
   CVPixelBufferUnlockBaseAddress(pixels, 0);
-  _blackPixels = pixels;
-  return _blackPixels;
+  _idlePixels = pixels;
+  return _idlePixels;
 }
 
-- (void)sendBlackFrame {
-  CVPixelBufferRef pixels = [self blackPixels];
+- (void)sendIdleFrame {
+  CVPixelBufferRef pixels = [self idlePixels];
   if (pixels == nullptr) return;
   const uint64_t now = host_time_ns();
   CMSampleTimingInfo timing{

@@ -80,7 +80,9 @@ they support.
 | Camera | macOS | Sync Camera extension, bundled in Sync.app | Yes — activated by Sync.app on first launch, approved once in System Settings |
 
 The camera provider publishes a 1920×1080 BGRA stream as the "Sync Camera"
-device, so any app that picks a camera can use it. The extension ships inside
+device, so any app that picks a camera can use it. While no sender is live
+the camera shows a dark card reading "Sync: waiting for Noisedeck" rather
+than a black picture. The extension ships inside
 Sync.app; macOS activates it only for an app under /Applications, and asks the
 user once. Sync.app restarts its helper when activation completes, which is
 when the camera first appears in Noisedeck's provider list.

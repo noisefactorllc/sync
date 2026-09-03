@@ -448,6 +448,21 @@ if(APPLE)
     PRIVATE ${ACCELERATE_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
   )
 
+  find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+  find_library(CORETEXT_FRAMEWORK CoreText REQUIRED)
+  add_library(sync_camera_idle_card
+    native/src/platform/macos/camera_idle_card.mm
+  )
+  target_compile_features(sync_camera_idle_card PUBLIC cxx_std_20)
+  set_target_properties(sync_camera_idle_card PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_camera_idle_card PUBLIC native/include)
+  target_compile_options(sync_camera_idle_card PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_camera_idle_card
+    PRIVATE ${COREGRAPHICS_FRAMEWORK} ${CORETEXT_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
+  )
+
   add_library(sync_camera_publisher
     native/src/platform/macos/camera_publisher.cpp
   )
@@ -457,6 +472,7 @@ if(APPLE)
 
   add_executable(sync_camera_tests
     native/test/macos/camera_frame_fitter_test.mm
+    native/test/macos/camera_idle_card_test.mm
     native/test/macos/camera_publisher_test.cpp
     native/test/macos/camera_relay_policy_test.cpp
     native/test/test_main.cpp
@@ -468,7 +484,8 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_camera_tests PRIVATE
-    sync_camera_publisher sync_camera_relay_policy ${FOUNDATION_FRAMEWORK}
+    sync_camera_publisher sync_camera_idle_card sync_camera_relay_policy
+    ${FOUNDATION_FRAMEWORK}
   )
   add_test(NAME sync_camera_tests COMMAND sync_camera_tests)
 
@@ -530,7 +547,8 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_camera_extension PRIVATE
-    sync_camera_relay_policy ${COREMEDIAIO_FRAMEWORK} ${COREMEDIA_FRAMEWORK}
+    sync_camera_relay_policy sync_camera_idle_card
+    ${COREMEDIAIO_FRAMEWORK} ${COREMEDIA_FRAMEWORK}
     ${COREVIDEO_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${IOSURFACE_FRAMEWORK}
   )
 
