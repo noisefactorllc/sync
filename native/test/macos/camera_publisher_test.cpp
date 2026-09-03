@@ -27,6 +27,7 @@ using noisefactor::sync::protocol::FrameView;
 struct FakeSink final : CameraSink {
   bool is_available = true;
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::None;
+  std::int32_t status = 0;
   CameraSinkSubmit next_result = CameraSinkSubmit::Accepted;
   std::size_t submitted = 0;
   std::uint32_t last_width = 0;
@@ -39,6 +40,7 @@ struct FakeSink final : CameraSink {
   auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason override {
     return reason;
   }
+  auto unavailable_status() const noexcept -> std::int32_t override { return status; }
   auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit override {
     ++submitted;
     last_width = frame.width;
@@ -151,11 +153,39 @@ SYNC_TEST(camera_publisher_maps_sink_results_and_rejects_bad_input) {
 SYNC_TEST(camera_publisher_publishes_nothing_while_unavailable) {
   FakeSink sink;
   sink.is_available = false;
-  sink.reason = CameraSinkUnavailableReason::ConnectionRefused;
+  sink.reason = CameraSinkUnavailableReason::StreamNotStarted;
+  sink.status = -67;
   CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.unavailable_status() == -67);
   SYNC_REQUIRE(publisher.open_sender("a", "first"));
   SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == PublishResult::Failed);
   SYNC_REQUIRE(sink.submitted == 0);
+}
+
+// Each reason names a different thing to do, and a CoreMediaIO refusal carries
+// the status macOS returned, since a bare phrase leaves a bug report empty.
+SYNC_TEST(camera_unavailability_phrases_are_distinct_and_carry_the_status) {
+  using noisefactor::sync::camera::describe_unavailability;
+  const CameraSinkUnavailableReason all[] = {
+      CameraSinkUnavailableReason::DeviceNotFound,
+      CameraSinkUnavailableReason::SinkStreamMissing,
+      CameraSinkUnavailableReason::QueueNotProvided,
+      CameraSinkUnavailableReason::StreamNotStarted,
+  };
+  for (std::size_t outer = 0; outer < 4; ++outer) {
+    SYNC_REQUIRE(std::string(describe(all[outer])).size() > 0);
+    for (std::size_t inner = outer + 1; inner < 4; ++inner) {
+      SYNC_REQUIRE(std::string(describe(all[outer])) != std::string(describe(all[inner])));
+    }
+  }
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::DeviceNotFound, 0) ==
+               std::string(describe(CameraSinkUnavailableReason::DeviceNotFound)));
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::StreamNotStarted, -67) ==
+               std::string(describe(CameraSinkUnavailableReason::StreamNotStarted)) +
+                   " (OSStatus -67)");
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::QueueNotProvided, 1852797029) ==
+               std::string(describe(CameraSinkUnavailableReason::QueueNotProvided)) +
+                   " (OSStatus 1852797029)");
 }
 
 SYNC_TEST(camera_publisher_is_bounded_in_senders) {

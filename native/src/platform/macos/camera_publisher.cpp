@@ -62,6 +62,10 @@ auto CameraFramePublisher::unavailable_reason() const noexcept -> CameraSinkUnav
   return impl_->sink.unavailable_reason();
 }
 
+auto CameraFramePublisher::unavailable_status() const noexcept -> std::int32_t {
+  return impl_->sink.unavailable_status();
+}
+
 auto CameraFramePublisher::driving_sender() const noexcept -> std::string_view {
   const Impl::SenderEntry* entry = impl_->driving();
   return entry == nullptr ? std::string_view{} : entry->id_view();

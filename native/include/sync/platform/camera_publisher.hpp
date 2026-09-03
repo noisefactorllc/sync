@@ -33,6 +33,7 @@ class CameraFramePublisher final : public FramePublisher {
 
   [[nodiscard]] auto available() const noexcept -> bool;
   [[nodiscard]] auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason;
+  [[nodiscard]] auto unavailable_status() const noexcept -> std::int32_t;
   // Empty when no sender is open.
   [[nodiscard]] auto driving_sender() const noexcept -> std::string_view;
 

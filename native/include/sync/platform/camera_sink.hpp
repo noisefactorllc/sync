@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 
 namespace noisefactor::sync::camera {
 
@@ -13,7 +14,12 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
   None = 0,
   DeviceNotFound,
   SinkStreamMissing,
-  ConnectionRefused,
+  // The extension is installed and its sink stream was found, but
+  // CMIOStreamCopyBufferQueue did not hand over a queue.
+  QueueNotProvided,
+  // The queue was obtained, but CMIODeviceStartStream refused to start the
+  // sink stream.
+  StreamNotStarted,
 };
 
 [[nodiscard]] constexpr auto describe(CameraSinkUnavailableReason reason) noexcept -> const char* {
@@ -24,10 +30,26 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
       return "the Sync Camera extension is not installed, or has not been approved in System Settings";
     case CameraSinkUnavailableReason::SinkStreamMissing:
       return "the Sync Camera extension is a different version than this Sync";
-    case CameraSinkUnavailableReason::ConnectionRefused:
-      return "the Sync Camera extension did not accept a connection";
+    case CameraSinkUnavailableReason::QueueNotProvided:
+      return "the Sync Camera extension did not provide its sink queue";
+    case CameraSinkUnavailableReason::StreamNotStarted:
+      return "the Sync Camera extension did not start its sink stream";
   }
   return "unknown camera problem";
+}
+
+// The phrase above plus the CoreMediaIO status that produced it, when there is
+// one. A bare phrase told a user what to do but told nobody why macOS said no;
+// the OSStatus is what a bug report needs.
+[[nodiscard]] inline auto describe_unavailability(CameraSinkUnavailableReason reason,
+                                                  std::int32_t status) -> std::string {
+  std::string text = describe(reason);
+  if (status != 0) {
+    text += " (OSStatus ";
+    text += std::to_string(status);
+    text += ')';
+  }
+  return text;
 }
 
 // One fitted frame: top-down 32BGRA, opaque, exactly the advertised canvas.
@@ -53,6 +75,9 @@ class CameraSink {
   [[nodiscard]] virtual auto available() const noexcept -> bool = 0;
   [[nodiscard]] virtual auto unavailable_reason() const noexcept
       -> CameraSinkUnavailableReason = 0;
+  // The CoreMediaIO OSStatus behind unavailable_reason(), or 0 when the reason
+  // carries no status (not found, not installed, or available).
+  [[nodiscard]] virtual auto unavailable_status() const noexcept -> std::int32_t { return 0; }
   // The frame is a borrowed view valid only for this call.
   virtual auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit = 0;
 };

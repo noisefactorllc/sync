@@ -221,7 +221,9 @@ int run_with_providers(nfsync::ServerOptions &options,
   constexpr bool kCameraImplemented = true;
   const bool camera_available = camera.available();
   nfsync::FramePublisher *const camera_publisher = &camera;
-  const char *const camera_reason = nfsync::camera::describe(camera.unavailable_reason());
+  const std::string camera_reason_text = nfsync::camera::describe_unavailability(
+      camera.unavailable_reason(), camera.unavailable_status());
+  const char *const camera_reason = camera_reason_text.c_str();
 #else
   constexpr bool kCameraImplemented = false;
   constexpr bool camera_available = false;

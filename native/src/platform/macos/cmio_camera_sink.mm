@@ -73,6 +73,10 @@ template <typename T>
 
 }  // namespace
 
+namespace {
+void queue_altered(CMIOStreamID, void*, void*) noexcept {}
+}  // namespace
+
 struct CmioCameraSink::Impl {
   explicit Impl(Options options) : depth(options.queue_depth == 0 ? 1 : options.queue_depth) {
     discover(std::string(options.device_uid));
@@ -86,6 +90,7 @@ struct CmioCameraSink::Impl {
   }
 
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::DeviceNotFound;
+  OSStatus status = 0;
   CMIODeviceID device = kCMIOObjectUnknown;
   CMIOStreamID stream = kCMIOObjectUnknown;
   CMSimpleQueueRef queue = nullptr;
@@ -127,14 +132,21 @@ struct CmioCameraSink::Impl {
     }
     if (stream == kCMIOObjectUnknown) return;
 
-    reason = CameraSinkUnavailableReason::ConnectionRefused;
-    if (CMIOStreamCopyBufferQueue(stream, nullptr, nullptr, &queue) != kCMIOHardwareNoError ||
-        queue == nullptr) {
+    // CoreMediaIO registers the queue-altered proc as part of copying the
+    // queue; every working sink client (Apple's sample, OBS) passes a real
+    // routine, so pass a no-op rather than NULL. Nothing waits on it: submit()
+    // polls the queue count instead.
+    reason = CameraSinkUnavailableReason::QueueNotProvided;
+    status = CMIOStreamCopyBufferQueue(stream, &queue_altered, nullptr, &queue);
+    if (status != kCMIOHardwareNoError || queue == nullptr) {
       queue = nullptr;
       return;
     }
-    if (CMIODeviceStartStream(device, stream) != kCMIOHardwareNoError) return;
+    reason = CameraSinkUnavailableReason::StreamNotStarted;
+    status = CMIODeviceStartStream(device, stream);
+    if (status != kCMIOHardwareNoError) return;
     started = true;
+    status = 0;
 
     NSDictionary* attributes = @{
       (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
@@ -163,6 +175,10 @@ auto CmioCameraSink::available() const noexcept -> bool {
 
 auto CmioCameraSink::unavailable_reason() const noexcept -> CameraSinkUnavailableReason {
   return impl_->reason;
+}
+
+auto CmioCameraSink::unavailable_status() const noexcept -> std::int32_t {
+  return impl_->status;
 }
 
 auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {
