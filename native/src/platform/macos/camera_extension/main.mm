@@ -286,13 +286,20 @@ NSUUID* sink_stream_uuid() {
 
 @end
 
-@implementation SyncCameraSourceStream
+@implementation SyncCameraSourceStream {
+  // The frame duration consumers see and may set. The daemon relays sink
+  // frames as they arrive, so this is advertised pacing, not a throttle:
+  // it defaults to the fastest the canvas allows so a consumer that asks
+  // for nothing gets 60 fps when the sender provides it.
+  CMTime _frameDuration;
+}
 
 - (instancetype)initWithDevice:(SyncCameraDeviceSource*)device
                    description:(CMVideoFormatDescriptionRef)description {
   self = [super init];
   if (self == nil) return nil;
   _device = device;
+  _frameDuration = CMTimeMake(1, static_cast<int32_t>(camera::kMaximumFramesPerSecond));
   _format = [CMIOExtensionStreamFormat
       streamFormatWithFormatDescription:description
                  maxFrameDuration:CMTimeMake(1, 1)
@@ -326,15 +333,31 @@ NSUUID* sink_stream_uuid() {
   }
   if ([properties containsObject:CMIOExtensionPropertyStreamFrameDuration]) {
     result.frameDuration =
-        (__bridge_transfer NSDictionary*)CMTimeCopyAsDictionary(CMTimeMake(1, 30), kCFAllocatorDefault);
+        (__bridge_transfer NSDictionary*)CMTimeCopyAsDictionary(_frameDuration, kCFAllocatorDefault);
   }
   return result;
 }
 
+// A consumer may ask for any frame duration the format allows, from the
+// canvas maximum rate down to one frame a second. Anything else leaves the
+// current value in place; the request is still reported as succeeded, as a
+// camera that refuses a property write tends to be dropped by the consumer.
 - (BOOL)setStreamProperties:(CMIOExtensionStreamProperties*)streamProperties
                       error:(NSError**)outError {
-  (void)streamProperties;
   (void)outError;
+  NSDictionary* requested = streamProperties.frameDuration;
+  if (requested == nil) return YES;
+  const CMTime duration = CMTimeMakeFromDictionary((__bridge CFDictionaryRef)requested);
+  if (!CMTIME_IS_NUMERIC(duration) || CMTimeCompare(duration, kCMTimeZero) <= 0) return YES;
+  const CMTime fastest = CMTimeMake(1, static_cast<int32_t>(camera::kMaximumFramesPerSecond));
+  const CMTime slowest = CMTimeMake(1, 1);
+  if (CMTimeCompare(duration, fastest) < 0 || CMTimeCompare(duration, slowest) > 0) return YES;
+  if (CMTimeCompare(duration, _frameDuration) == 0) return YES;
+  _frameDuration = duration;
+  [_stream notifyPropertiesChanged:@{
+    CMIOExtensionPropertyStreamFrameDuration :
+        [CMIOExtensionPropertyState propertyStateWithValue:requested],
+  }];
   return YES;
 }
 
@@ -398,8 +421,8 @@ NSUUID* sink_stream_uuid() {
     result.activeFormatIndex = @(0);
   }
   if ([properties containsObject:CMIOExtensionPropertyStreamFrameDuration]) {
-    result.frameDuration =
-        (__bridge_transfer NSDictionary*)CMTimeCopyAsDictionary(CMTimeMake(1, 30), kCFAllocatorDefault);
+    result.frameDuration = (__bridge_transfer NSDictionary*)CMTimeCopyAsDictionary(
+        CMTimeMake(1, static_cast<int32_t>(camera::kMaximumFramesPerSecond)), kCFAllocatorDefault);
   }
   if ([properties containsObject:CMIOExtensionPropertyStreamSinkBufferQueueSize]) {
     result.sinkBufferQueueSize = @(4);
