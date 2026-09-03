@@ -262,6 +262,13 @@ if(APPLE)
     native/src/platform/macos/app_main.mm
   )
   target_compile_features(sync_menu PRIVATE cxx_std_20)
+  # The menu app reports the product version in About and in Copy Diagnostics.
+  # It does not link sync_protocol, whose PUBLIC define carries the version to
+  # syncd, so without this line the app compiles server.hpp's fallback and shows
+  # "0.2.0" next to a helper reporting the real release.
+  target_compile_definitions(sync_menu PRIVATE
+    SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
+  )
   set_target_properties(sync_menu PROPERTIES
     OBJCXX_STANDARD 20
     OUTPUT_NAME Sync
@@ -798,6 +805,11 @@ elseif(WIN32)
   add_executable(sync_menu WIN32
     native/src/platform/windows/app_main.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
+  )
+  # Same version plumbing as the macOS menu app: the tray does not link
+  # sync_protocol, so the define must be set here too.
+  target_compile_definitions(sync_menu PRIVATE
+    SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
   )
   target_compile_features(sync_menu PRIVATE cxx_std_20)
   set_target_properties(sync_menu PROPERTIES OUTPUT_NAME Sync)
