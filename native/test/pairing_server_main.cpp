@@ -19,6 +19,16 @@
 
 namespace {
 
+// This binary is built with SYNC_PAIRING_PROMPT_DEADLINE_MS defined (see
+// CMakeLists.txt), which is the whole point of it being a separate target.
+// The late-approval mode has to answer after that deadline, so it is computed
+// from it rather than kept in step by hand.
+#if defined(SYNC_PAIRING_PROMPT_DEADLINE_MS)
+constexpr long long kLateApprovalDelayMs = SYNC_PAIRING_PROMPT_DEADLINE_MS + 200;
+#else
+constexpr long long kLateApprovalDelayMs = 30'200;
+#endif
+
 class FakePrompt final : public noisefactor::sync::pairing::PairingPrompt {
 public:
   enum class Mode { Approve, Deny, Timeout, Hang, LateApprove, Saturate };
@@ -35,9 +45,14 @@ public:
   noisefactor::sync::pairing::PromptResult poll() noexcept override {
     if (!active_ || mode_ == Mode::Hang)
       return {};
+    // Derived from the deadline rather than written next to it as a second
+    // constant. The point of this mode is to answer *after* the prompt
+    // deadline has fired, so the two numbers are one decision; when they were
+    // written separately, raising the deadline silently turned this into an
+    // on-time approval and the test stopped testing anything.
     if (mode_ == Mode::LateApprove &&
         std::chrono::steady_clock::now() - started_ <
-            std::chrono::milliseconds(540))
+            std::chrono::milliseconds(kLateApprovalDelayMs))
       return {};
     active_ = false;
     return {.available = true,

@@ -434,15 +434,31 @@ void restart_sync(AppState& app) {
   if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
     return camera::CameraActivationState::NeedsElevation;
   }
-  wchar_t recorded[MAX_PATH]{};
-  DWORD bytes = sizeof(recorded);
-  const LSTATUS read = ::RegQueryValueExW(key, nullptr, nullptr, nullptr,
-                                          reinterpret_cast<LPBYTE>(recorded), &bytes);
+  // Sized from the value itself rather than assuming MAX_PATH. A deep install
+  // directory on a long-path-enabled machine would otherwise come back
+  // ERROR_MORE_DATA and report NeedsElevation forever, for a camera that is
+  // correctly registered -- sending the user to re-run an elevated step that
+  // changes nothing.
+  DWORD type = 0;
+  DWORD bytes = 0;
+  LSTATUS read = ::RegQueryValueExW(key, nullptr, nullptr, &type, nullptr, &bytes);
+  std::wstring recorded;
+  if (read == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && bytes > 0) {
+    recorded.assign(bytes / sizeof(wchar_t) + 1, L'\0');
+    DWORD copied = bytes;
+    read = ::RegQueryValueExW(key, nullptr, nullptr, &type,
+                              reinterpret_cast<LPBYTE>(recorded.data()), &copied);
+    // RegQueryValueExW does not promise a terminator; the extra element above
+    // is there so forcing one cannot run off the end.
+    recorded[recorded.size() - 1] = L'\0';
+    recorded.resize(::wcslen(recorded.c_str()));
+  }
   ::RegCloseKey(key);
   // The key alone is not enough. It can outlive the DLL it names -- a move, a
   // partial uninstall, a side-by-side install -- and reporting Active then
   // greys out the only line that could put it right, leaving no way back.
-  if (read != ERROR_SUCCESS || ::GetFileAttributesW(recorded) == INVALID_FILE_ATTRIBUTES) {
+  if (read != ERROR_SUCCESS || recorded.empty() ||
+      ::GetFileAttributesW(recorded.c_str()) == INVALID_FILE_ATTRIBUTES) {
     return camera::CameraActivationState::NeedsElevation;
   }
   return camera::CameraActivationState::Active;
@@ -499,9 +515,14 @@ void enable_camera(AppState& app) {
     // Bounded, not INFINITE. This runs on the tray's UI thread, so a helper
     // that wedges -- a stuck LoadLibraryW, a blocked registry write -- would
     // otherwise freeze the message loop for good: no icon, no menu, no Quit,
-    // and nothing to do but end the process from Task Manager. The budget is
-    // generous because it also covers the user reading the UAC prompt.
-    constexpr DWORD kRegistrationTimeoutMs = 120'000;
+    // and nothing to do but end the process from Task Manager.
+    //
+    // Fifteen seconds, not minutes: ShellExecuteExW with "runas" returns only
+    // after the consent dialog has been answered, so hProcess does not exist
+    // until the user has already decided. This covers the registration alone
+    // -- a handful of registry writes -- and anything longer is a wedge, not
+    // a slow user.
+    constexpr DWORD kRegistrationTimeoutMs = 15'000;
     if (::WaitForSingleObject(info.hProcess, kRegistrationTimeoutMs) == WAIT_OBJECT_0) {
       ::GetExitCodeProcess(info.hProcess, &exit_code);
     }

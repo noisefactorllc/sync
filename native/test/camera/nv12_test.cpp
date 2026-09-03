@@ -1,5 +1,6 @@
 #include "test_harness.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -50,13 +51,39 @@ SYNC_TEST(pure_red_lands_on_known_chroma) {
   const auto bgra = solid_bgra(2, 2, 0, 0, 255);
   std::vector<std::byte> nv12(nv12_size_bytes(2, 2, 2));
   SYNC_REQUIRE(bgra_to_nv12(bgra, 8, 2, 2, nv12, 2));
-  // BT.601 studio red: Y 81, U 90, V 240.
+  // BT.709 studio red: Y 63, U 102, V 240. These are the numbers that pin the
+  // matrix -- BT.601 red is Y 81, U 90, so a silent switch back would fail
+  // here rather than out in a consumer's colours.
   const auto y = static_cast<std::uint8_t>(nv12[0]);
   const auto u = static_cast<std::uint8_t>(nv12[4]);
   const auto v = static_cast<std::uint8_t>(nv12[5]);
-  SYNC_REQUIRE(y >= 80 && y <= 82);
-  SYNC_REQUIRE(u >= 89 && u <= 91);
+  SYNC_REQUIRE(y >= 62 && y <= 64);
+  SYNC_REQUIRE(u >= 101 && u <= 103);
   SYNC_REQUIRE(v >= 239 && v <= 241);
+}
+
+SYNC_TEST(a_saturated_colour_survives_a_studio_range_round_trip) {
+  // The bug this pins: grey round-trips cleanly under any matrix, so only a
+  // saturated colour shows an encoder and a decoder disagreeing. Encode, then
+  // decode with the BT.709 studio inverse a consumer uses, and require the
+  // original back within the rounding the 4:2:0 chroma allows.
+  constexpr std::uint8_t kRed = 96;
+  constexpr std::uint8_t kGreen = 192;
+  constexpr std::uint8_t kBlue = 64;
+  const auto bgra = solid_bgra(2, 2, kBlue, kGreen, kRed);
+  std::vector<std::byte> nv12(nv12_size_bytes(2, 2, 2));
+  SYNC_REQUIRE(bgra_to_nv12(bgra, 8, 2, 2, nv12, 2));
+
+  const double y = (static_cast<double>(static_cast<std::uint8_t>(nv12[0])) - 16.0) / 219.0;
+  const double u = (static_cast<double>(static_cast<std::uint8_t>(nv12[4])) - 128.0) / 224.0;
+  const double v = (static_cast<double>(static_cast<std::uint8_t>(nv12[5])) - 128.0) / 224.0;
+  const double r = 255.0 * (y + 1.5748 * v);
+  const double g = 255.0 * (y - 0.1873 * u - 0.4681 * v);
+  const double b = 255.0 * (y + 1.8556 * u);
+
+  SYNC_REQUIRE(std::abs(r - kRed) <= 3.0);
+  SYNC_REQUIRE(std::abs(g - kGreen) <= 3.0);
+  SYNC_REQUIRE(std::abs(b - kBlue) <= 3.0);
 }
 
 SYNC_TEST(every_luma_row_is_written_at_the_stride) {

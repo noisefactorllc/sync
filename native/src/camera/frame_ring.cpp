@@ -52,10 +52,12 @@ auto FrameRingWriter::has_demand(std::uint64_t now_us) const noexcept -> bool {
   if (header_ == nullptr) return false;
   const std::uint64_t last = header_->last_demand_us.load(std::memory_order_acquire);
   if (last == 0) return false;
-  // Unsigned, so a demand stamped slightly ahead of this clock reads as very
-  // stale rather than very fresh. Both sides use the same steady clock, but
-  // the comparison should not depend on that.
-  if (now_us < last) return true;
+  // Unsigned, so a demand stamped ahead of this clock would otherwise wrap to
+  // an enormous age and read as stale forever. Tolerate a stamp from the
+  // future by the same margin, but only that much: an unbounded allowance
+  // would let one corrupt value latch demand on permanently, which is the
+  // failure the heartbeat exists to remove.
+  if (now_us < last) return (last - now_us) <= kFrameRingDemandTimeoutUs;
   return (now_us - last) <= kFrameRingDemandTimeoutUs;
 }
 
@@ -89,11 +91,13 @@ FrameRingReader::FrameRingReader(std::span<const std::byte> mapping) noexcept {
 
 auto FrameRingReader::valid() const noexcept -> bool { return header_ != nullptr; }
 
-void FrameRingReader::record_demand(std::uint64_t now_us) const noexcept {
+void FrameRingReader::record_demand(std::uint64_t now_us) noexcept {
   if (header_ == nullptr) return;
-  // The reader half writes exactly this one field. The section is mapped
-  // read-only on the source side for the payload, so the cast is deliberate
-  // and confined here.
+  // Non-const on purpose: this is the one field the reading half writes, and
+  // a const method that mutated through a cast hid that from every caller.
+  // The cast itself remains because the span is const -- the mapping behind
+  // it must be writable, which SectionOwner guarantees by mapping
+  // FILE_MAP_WRITE.
   const_cast<FrameRingHeader*>(header_)->last_demand_us.store(now_us, std::memory_order_release);
 }
 

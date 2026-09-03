@@ -34,11 +34,11 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
   // MFCreateVirtualCamera itself refused, most often because camera privacy
   // settings deny access.
   VirtualCameraRefused,
-  // Registered, but no consumer has activated the source yet, so it has not
-  // created the shared section for syncd to write into.
-  SectionMissing,
   // The section exists but its DACL refused this account.
   SectionAccessDenied,
+  // The section was opened but is not the size this build expects, which
+  // means the media source and the daemon are different versions.
+  SectionVersionMismatch,
 };
 
 [[nodiscard]] constexpr auto describe(CameraSinkUnavailableReason reason) noexcept -> const char* {
@@ -59,10 +59,10 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
       return "the Sync Camera source is not registered; choose Enable Sync Camera from the Sync tray menu";
     case CameraSinkUnavailableReason::VirtualCameraRefused:
       return "Windows refused to create the Sync camera; camera privacy settings may be denying access";
-    case CameraSinkUnavailableReason::SectionMissing:
-      return "the Sync Camera source has not been started by a camera app yet";
     case CameraSinkUnavailableReason::SectionAccessDenied:
       return "the Sync Camera source refused this account access to its frame buffer";
+    case CameraSinkUnavailableReason::SectionVersionMismatch:
+      return "the Sync Camera source is a different version than this Sync; reinstall Sync";
   }
   return "unknown camera problem";
 }

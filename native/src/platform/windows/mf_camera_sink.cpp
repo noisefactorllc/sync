@@ -112,18 +112,35 @@ struct MfCameraSink::Impl {
     if (writer != nullptr) return true;
     section = ::OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, options.section.c_str());
     if (section == nullptr) {
-      note_open_failure(::GetLastError());
+      // Not found is the ordinary idle state: no consumer has activated the
+      // source, so it has not created its section. Denied is a DACL problem
+      // the user cannot guess at.
+      const DWORD error = ::GetLastError();
+      if (error == ERROR_ACCESS_DENIED) {
+        reason = CameraSinkUnavailableReason::SectionAccessDenied;
+        status = static_cast<std::int32_t>(HRESULT_FROM_WIN32(error));
+      }
       return false;
     }
     view = ::MapViewOfFile(section, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, frame_ring_bytes());
     if (view == nullptr) {
-      note_open_failure(::GetLastError());
+      // The section opened, so this is not permissions -- it is a section
+      // smaller than this build's header, which means the media source is a
+      // different version. Windows reports that as ERROR_ACCESS_DENIED too,
+      // and calling it a DACL problem would send the user to permissions for
+      // a mismatch only a reinstall fixes.
+      const DWORD error = ::GetLastError();
+      reason = CameraSinkUnavailableReason::SectionVersionMismatch;
+      status = static_cast<std::int32_t>(HRESULT_FROM_WIN32(error));
       close_section();
       return false;
     }
     writer = std::make_unique<FrameRingWriter>(
         std::span<std::byte>(static_cast<std::byte*>(view), frame_ring_bytes()));
     if (!writer->valid()) {
+      // Right size, wrong contents: a magic or version this build does not
+      // recognise is the same mixed-install problem seen from the inside.
+      reason = CameraSinkUnavailableReason::SectionVersionMismatch;
       close_section();
       return false;
     }
@@ -133,14 +150,6 @@ struct MfCameraSink::Impl {
     return false;
   }
 
-  // A section that is simply not there yet is the ordinary idle state and
-  // says nothing. A section that refuses this account is a DACL problem the
-  // user cannot guess at, so it is recorded where the diagnostics can see it.
-  void note_open_failure(DWORD error) noexcept {
-    if (error != ERROR_ACCESS_DENIED) return;
-    reason = CameraSinkUnavailableReason::SectionAccessDenied;
-    status = static_cast<std::int32_t>(HRESULT_FROM_WIN32(error));
-  }
 };
 
 MfCameraSink::MfCameraSink() : MfCameraSink(Options{}) {}

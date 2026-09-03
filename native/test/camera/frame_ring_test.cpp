@@ -37,7 +37,7 @@ SYNC_TEST(the_section_name_is_global) {
 SYNC_TEST(demand_expires_so_a_closed_consumer_stops_the_sender) {
   std::vector<std::byte> mapping(frame_ring_bytes());
   FrameRingWriter writer(mapping);
-  const FrameRingReader reader(mapping);
+  FrameRingReader reader(mapping);
   constexpr std::uint64_t kNow = 10'000'000'000;
 
   // Nothing has ever asked for a frame.
@@ -54,7 +54,7 @@ SYNC_TEST(demand_expires_so_a_closed_consumer_stops_the_sender) {
 SYNC_TEST(demand_from_a_clock_running_ahead_is_not_read_as_ancient) {
   std::vector<std::byte> mapping(frame_ring_bytes());
   FrameRingWriter writer(mapping);
-  const FrameRingReader reader(mapping);
+  FrameRingReader reader(mapping);
   // The subtraction is unsigned, so a demand stamped even slightly ahead of
   // the reader's clock would otherwise wrap to an enormous age and read as
   // "nobody is watching" for the life of the process.

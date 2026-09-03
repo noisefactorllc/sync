@@ -81,8 +81,35 @@ struct SourcePixel {
 // bilinear does not help there: at an exact 2x reduction its samples land on
 // source pixel centres and it degenerates to point sampling, alias and all.
 // Growing interpolates bilinearly, where averaging one pixel would do nothing.
+// A frame that already matches the placement is copied, not resampled. macOS
+// short-circuits the same case (camera_frame_fitter.mm hands it straight to
+// convert_into), and it is the common one: a 1920x1080 output into a
+// 1920x1080 canvas. Resampling it would both blur it and cost four samples a
+// pixel to arrive somewhere worse than where it started.
+void permute_into(const protocol::FrameView& frame, std::span<std::byte> canvas_bytes,
+                  std::size_t canvas_stride, const CameraPlacement& placement) noexcept {
+  const bool straight = frame.alpha_mode == kAlphaStraight;
+  for (std::uint32_t row = 0; row < placement.height; ++row) {
+    std::byte* out = canvas_bytes.data() +
+                     static_cast<std::size_t>(placement.y + row) * canvas_stride +
+                     static_cast<std::size_t>(placement.x) * kBytesPerPixel;
+    for (std::uint32_t column = 0; column < placement.width; ++column) {
+      const SourcePixel pixel = sample(frame, straight, column, row);
+      out[0] = static_cast<std::byte>(pixel.b);
+      out[1] = static_cast<std::byte>(pixel.g);
+      out[2] = static_cast<std::byte>(pixel.r);
+      out[3] = std::byte{255};
+      out += kBytesPerPixel;
+    }
+  }
+}
+
 void scale_permute_into(const protocol::FrameView& frame, std::span<std::byte> canvas_bytes,
                         std::size_t canvas_stride, const CameraPlacement& placement) noexcept {
+  if (frame.width == placement.width && frame.height == placement.height) {
+    permute_into(frame, canvas_bytes, canvas_stride, placement);
+    return;
+  }
   const bool straight = frame.alpha_mode == kAlphaStraight;
   // 16.16 fixed point throughout.
   const std::uint64_t x_step =
@@ -129,11 +156,21 @@ void scale_permute_into(const protocol::FrameView& frame, std::span<std::byte> c
         g /= count;
         r /= count;
       } else {
-        // Growing: sample the centre of the destination pixel and interpolate.
-        // Without the half-step the whole image shifts up and left by half a
-        // source pixel.
-        const std::uint64_t source_x = left_edge + x_step / 2;
-        const std::uint64_t source_y = top_edge + y_step / 2;
+        // Growing: sample the centre of the destination pixel, expressed in
+        // source pixel *centres*.
+        //
+        // The half-pixel subtraction is the whole correctness of this branch.
+        // left_edge is in pixel-corner units while an integer source
+        // coordinate names a pixel centre, so the mapping is
+        // (dest + 0.5) * step - 0.5. Omitting the -0.5 biases every upscale
+        // half a source pixel up and left, and at 1:1 it lands the sample
+        // exactly between two pixels and blurs a frame that should have been
+        // copied untouched. Saturated, because the first column and row map
+        // behind the origin.
+        const std::uint64_t centre_x = left_edge + x_step / 2;
+        const std::uint64_t centre_y = top_edge + y_step / 2;
+        const std::uint64_t source_x = centre_x > 32768 ? centre_x - 32768 : 0;
+        const std::uint64_t source_y = centre_y > 32768 ? centre_y - 32768 : 0;
         const std::uint32_t x0 =
             std::min<std::uint32_t>(static_cast<std::uint32_t>(source_x >> 16U), last_column);
         const std::uint32_t y0 =

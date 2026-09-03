@@ -36,6 +36,13 @@ constexpr std::uint64_t kFrameDuration100ns = 10'000'000ULL / kMaximumFramesPerS
   type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
   type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
   type->SetUINT32(MF_MT_FIXED_SIZE_SAMPLES, TRUE);
+  // Stated, not left to be guessed. bgra_to_nv12 encodes BT.709 studio range,
+  // and a consumer handed an undeclared HD NV12 frame assumes exactly that --
+  // but only by convention. Saying so keeps the ones that read attributes and
+  // the ones that guess from the frame size on the same answer, and an
+  // encoder change here fails loudly instead of shifting everyone's colour.
+  type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+  type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
   ::MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, kCanvas.width, kCanvas.height);
   ::MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, kMaximumFramesPerSecond, 1);
   ::MFSetAttributeRatio(type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -210,7 +217,7 @@ void SyncCameraStream::ComposeFrame() {
   const std::uint64_t now_ns = SystemTime100ns() * 100ULL;
 
   if (section_.open()) {
-    const FrameRingReader reader(section_.mapping());
+    FrameRingReader reader(section_.mapping());
     if (reader.valid()) {
       // Tell the sender something is watching. Without this it cannot
       // distinguish an open camera from one every consumer has closed, and

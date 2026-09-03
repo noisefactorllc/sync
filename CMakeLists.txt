@@ -160,7 +160,15 @@ add_executable(sync_pairing_test_server
 target_compile_features(sync_pairing_test_server PRIVATE cxx_std_20)
 target_compile_definitions(sync_pairing_test_server PRIVATE
   SYNC_PAIRING_COOLDOWN_MS=1000
-  SYNC_PAIRING_PROMPT_DEADLINE_MS=525
+  # The pairing prompt deadline is absolute: it bounds the store commit as well
+  # as the wait for a human, which is deliberate -- a late approval must never
+  # issue a token. That makes it a race against real disk I/O, and 525ms lost
+  # that race on a loaded CI runner: the durability-uncertain case reported
+  # pairing_timeout instead of store_durability_uncertain. 1500 leaves the
+  # fail-point path room without approaching the client's own read budget
+  # (TIMEOUT_MS in test/integration/loopback.test.js), which the deliberate
+  # timeout cases would otherwise trip instead.
+  SYNC_PAIRING_PROMPT_DEADLINE_MS=1500
 )
 target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
 

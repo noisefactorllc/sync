@@ -115,6 +115,79 @@ SYNC_TEST(fit_paints_bars_black_around_a_letterboxed_source) {
   SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[centre]) == 255);
 }
 
+SYNC_TEST(a_canvas_sized_frame_is_copied_pixel_for_pixel) {
+  // The common case: a 1920x1080 output into a 1920x1080 canvas. It must come
+  // out untouched. Every other fit test uses a solid colour, which is
+  // invariant under blur and cannot tell a copy from a resample -- a
+  // resampler that averaged neighbours here passed all of them while
+  // delivering a half-blurred, half-pixel-shifted frame.
+  std::vector<std::byte> payload(static_cast<std::size_t>(kCanvas.width) * kCanvas.height *
+                                 kBytesPerPixel);
+  for (std::uint32_t y = 0; y < kCanvas.height; ++y) {
+    for (std::uint32_t x = 0; x < kCanvas.width; ++x) {
+      const std::size_t at =
+          (static_cast<std::size_t>(y) * kCanvas.width + x) * kBytesPerPixel;
+      // Deliberately high frequency: neighbouring pixels differ, so any
+      // averaging shows up immediately.
+      payload[at + 0] = static_cast<std::byte>(((x + y) % 2) == 0 ? 255 : 0);
+      payload[at + 1] = static_cast<std::byte>(x % 256);
+      payload[at + 2] = static_cast<std::byte>(y % 256);
+      payload[at + 3] = static_cast<std::byte>(255);
+    }
+  }
+  const auto frame = frame_over(payload, kCanvas.width, kCanvas.height, kAlphaOpaque);
+  std::vector<std::byte> canvas(kStride * kCanvas.height);
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame, canvas, kStride, kCanvas, scratch));
+
+  for (std::uint32_t y = 0; y < kCanvas.height; ++y) {
+    for (std::uint32_t x = 0; x < kCanvas.width; ++x) {
+      const std::size_t in = (static_cast<std::size_t>(y) * kCanvas.width + x) * kBytesPerPixel;
+      const std::size_t out =
+          static_cast<std::size_t>(y) * kStride + static_cast<std::size_t>(x) * kBytesPerPixel;
+      // RGBA in, BGRA out, alpha forced opaque.
+      SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[out + 0]) ==
+                   static_cast<std::uint8_t>(payload[in + 2]));
+      SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[out + 1]) ==
+                   static_cast<std::uint8_t>(payload[in + 1]));
+      SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[out + 2]) ==
+                   static_cast<std::uint8_t>(payload[in + 0]));
+      SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[out + 3]) == 255);
+    }
+  }
+}
+
+SYNC_TEST(an_upscale_is_not_biased_half_a_pixel) {
+  // A 2x upscale of a hard edge. Centre-aligned bilinear keeps the first two
+  // destination pixels at the source's first value; a mapping that forgets to
+  // subtract half a source pixel shifts the whole ramp one pixel early.
+  constexpr std::uint32_t kSourceWidth = 960;
+  constexpr std::uint32_t kSourceHeight = 540;
+  std::vector<std::byte> payload(static_cast<std::size_t>(kSourceWidth) * kSourceHeight *
+                                 kBytesPerPixel);
+  for (std::uint32_t y = 0; y < kSourceHeight; ++y) {
+    for (std::uint32_t x = 0; x < kSourceWidth; ++x) {
+      const auto level = static_cast<std::uint8_t>(x < kSourceWidth / 2 ? 0 : 255);
+      const std::size_t at = (static_cast<std::size_t>(y) * kSourceWidth + x) * kBytesPerPixel;
+      payload[at + 0] = static_cast<std::byte>(level);
+      payload[at + 1] = static_cast<std::byte>(level);
+      payload[at + 2] = static_cast<std::byte>(level);
+      payload[at + 3] = static_cast<std::byte>(255);
+    }
+  }
+  const auto frame = frame_over(payload, kSourceWidth, kSourceHeight, kAlphaOpaque);
+  std::vector<std::byte> canvas(kStride * kCanvas.height);
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame, canvas, kStride, kCanvas, scratch));
+
+  // Far from the edge the value is exact in both halves, with no bleed.
+  const std::size_t row = static_cast<std::size_t>(kCanvas.height / 2) * kStride;
+  SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[row + 0]) == 0);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[row + 4]) == 0);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[row + (kCanvas.width - 1) * kBytesPerPixel]) ==
+               255);
+}
+
 SYNC_TEST(fit_resamples_rather_than_picking_nearest_pixels) {
   // A one-pixel-wide black-and-white checkerboard, downscaled. Nearest
   // neighbour keeps every sample at 0 or 255 and lands aliased; a filtered

@@ -2,7 +2,6 @@
 
 #include <windows.h>
 
-
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -78,7 +77,10 @@ struct FakeSource {
   }
 
   // What the media source does on every RequestSample.
-  void demand(std::uint64_t at_us) const { FrameRingReader(mapping()).record_demand(at_us); }
+  void demand(std::uint64_t at_us) const {
+    FrameRingReader reader(mapping());
+    reader.record_demand(at_us);
+  }
 };
 
 [[nodiscard]] auto canvas_filled(std::uint8_t value) -> std::vector<std::byte> {
@@ -159,7 +161,13 @@ SYNC_TEST(a_sink_loses_capacity_once_demand_goes_stale) {
   // A consumer that closed the camera stops asking. Without this the writer
   // latches on the first consumer and the publisher goes on fitting 1080p
   // frames into a ring nothing reads, for the rest of the daemon's life.
-  source.demand(now_us() - kFrameRingDemandTimeoutUs - 1'000'000);
+  // Clamped: steady_clock counts from boot, so on a machine up for less than
+  // a couple of seconds this subtraction would wrap and read as fresh demand.
+  const std::uint64_t now = now_us();
+  const std::uint64_t stale = now > (kFrameRingDemandTimeoutUs + 1'000'000)
+                                  ? now - kFrameRingDemandTimeoutUs - 1'000'000
+                                  : 1;
+  source.demand(stale);
   SYNC_REQUIRE(!sink.has_capacity());
   SYNC_REQUIRE(sink.submit(submission(canvas_filled(1), 1)) == CameraSinkSubmit::Backpressured);
 }

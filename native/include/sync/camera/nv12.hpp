@@ -11,9 +11,9 @@ namespace noisefactor::sync::camera {
 [[nodiscard]] auto nv12_size_bytes(std::uint32_t width, std::uint32_t height,
                                    std::size_t y_stride) noexcept -> std::size_t;
 
-// Converts top-down opaque BGRA to NV12 (BT.601, studio range), the pairing
-// Media Foundation's capture pipeline assumes for a 1080p camera. Chroma is
-// box-averaged over each 2x2 block.
+// Converts top-down opaque BGRA to NV12 (BT.709, studio range), which is what
+// a consumer assumes for an HD frame and what the media type declares.
+// Chroma is box-averaged over each 2x2 block.
 //
 // Both dimensions must be even. An odd width would need ceil(width/2)*2 bytes
 // per chroma row -- more than y_stride -- so the last UV pair would spill into

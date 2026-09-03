@@ -17,7 +17,13 @@ namespace noisefactor::sync::camera {
 // finish copying before the writer can come back around to that slot.
 inline constexpr std::uint32_t kFrameRingSlots = 3;
 inline constexpr std::uint32_t kFrameRingMagic = 0x53594E43;  // "SYNC"
-inline constexpr std::uint32_t kFrameRingVersion = 1;
+// Bumped to 2 when last_demand_us was inserted into the header. That moved
+// slot[] by eight bytes, and the two halves ship as separate artifacts
+// installed at different privilege levels -- an old syncd against a new
+// source maps fewer bytes, passes every other check, and then writes payloads
+// eight bytes short of where the source reads them while its first slot
+// sequence aliases this field. A version that did not move made that silent.
+inline constexpr std::uint32_t kFrameRingVersion = 2;
 
 // One slot's payload: the full canvas as top-down BGRA.
 inline constexpr std::size_t kFrameRingSlotBytes =
@@ -109,7 +115,7 @@ class FrameRingReader {
   [[nodiscard]] auto valid() const noexcept -> bool;
   // Called by the media source each time a consumer asks for a frame, so the
   // sender on the other side can tell whether anything is still watching.
-  void record_demand(std::uint64_t now_us) const noexcept;
+  void record_demand(std::uint64_t now_us) noexcept;
   // Monotonic publish count, so a caller can tell a new frame from a repeat.
   [[nodiscard]] auto newest_sequence() const noexcept -> std::uint64_t;
   // Copies the newest complete frame into out. False when nothing has been

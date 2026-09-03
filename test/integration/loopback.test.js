@@ -29,6 +29,12 @@ const POLYMORPHIC_ORIGIN = "app://polymorphic";
 const VISUALIZE_ORIGIN = "app://visualize";
 const TOKEN = "test-token-123";
 const TIMEOUT_MS = 3_000;
+// Pairing answers can legitimately take longer than everything else here: the
+// deliberate timeout cases only answer once the daemon's prompt deadline
+// fires, and that deadline bounds a real store commit. Kept well clear of
+// sync_pairing_test_server's SYNC_PAIRING_PROMPT_DEADLINE_MS (CMakeLists.txt)
+// so the client never times out first and reports the wrong failure.
+const PAIRING_TIMEOUT_MS = 10_000;
 const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
 // The providers a daemon configures when no --publisher is named. NDI is on
 // both platforms because its send path takes a CPU frame and needs no
@@ -355,8 +361,8 @@ class WebSocketClient {
     return withTimeout(promise, description, timeoutMs);
   }
 
-  async nextJson(description = "control response") {
-    const frame = await this.nextFrame(description);
+  async nextJson(description = "control response", timeoutMs = TIMEOUT_MS) {
+    const frame = await this.nextFrame(description, timeoutMs);
     assert.equal(frame.final, true);
     assert.equal(frame.opcode, 0x1);
     return JSON.parse(frame.payload.toString("utf8"));
@@ -581,8 +587,8 @@ async function pairWithDaemon(ready, origin, name = "Noisedeck") {
   const upgraded = await upgrade({ port: ready.port, route: "/pair", origin });
   assert.equal(upgraded.status, 101);
   upgraded.client.sendJson({ type: "pair", protocolVersions: [1], name });
-  const response = await upgraded.client.nextJson("pairing response");
-  const close = await upgraded.client.nextFrame("pairing close");
+  const response = await upgraded.client.nextJson("pairing response", PAIRING_TIMEOUT_MS);
+  const close = await upgraded.client.nextFrame("pairing close", PAIRING_TIMEOUT_MS);
   assert.equal(close.opcode, 0x8);
   upgraded.client.send(0x8, close.payload);
   await upgraded.client.waitClosed();

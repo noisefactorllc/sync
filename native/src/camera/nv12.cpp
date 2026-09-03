@@ -8,12 +8,22 @@ namespace {
 
 constexpr std::size_t kBgraBytesPerPixel = 4;
 
-// BT.601 studio range, fixed point in 16.16. Y in [16,235], chroma in [16,240]
-// centred on 128 -- the pairing Media Foundation assumes for an SD-origin
-// camera format, and what consumers render correctly without a colour hint.
-constexpr std::int32_t kYr = 16829, kYg = 33039, kYb = 6416, kYOffset = 16 << 16;
-constexpr std::int32_t kUr = -9714, kUg = -19071, kUb = 28784, kChromaOffset = 128 << 16;
-constexpr std::int32_t kVr = 28784, kVg = -24103, kVb = -4681;
+// BT.709 studio range, fixed point in 16.16. Y in [16,235], chroma in [16,240]
+// centred on 128.
+//
+// BT.709 and not BT.601: the canvas is 1920x1080, and a consumer handed HD
+// NV12 decodes it as 709. Encoding 601 and letting the other side assume 709
+// is a systematic colour error, not a rounding one -- rgb(96,192,64) came
+// back from Chromium as rgb(90,176,65), and predicting that exact pair of
+// values is what identified the mismatch. Grey hides it completely, which is
+// why the round trip looked clean until a saturated colour went through.
+//
+// The media type declares MF_MT_YUV_MATRIX and MF_MT_VIDEO_NOMINAL_RANGE to
+// match, so a consumer that reads the attributes and one that guesses from
+// the frame size both arrive at the same answer.
+constexpr std::int32_t kYr = 11966, kYg = 40254, kYb = 4064, kYOffset = 16 << 16;
+constexpr std::int32_t kUr = -6595, kUg = -22187, kUb = 28782, kChromaOffset = 128 << 16;
+constexpr std::int32_t kVr = 28782, kVg = -26146, kVb = -2639;
 
 [[nodiscard]] constexpr auto clamp_byte(std::int32_t fixed) noexcept -> std::uint8_t {
   const std::int32_t value = (fixed + (1 << 15)) >> 16;
