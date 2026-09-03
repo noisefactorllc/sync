@@ -747,6 +747,25 @@ elseif(WIN32)
   target_link_libraries(sync_camera_relay_policy_tests PRIVATE sync_camera_relay_policy)
   add_test(NAME sync_camera_relay_policy_tests COMMAND sync_camera_relay_policy_tests)
 
+  # The waiting card. Drawn through WIC and Direct2D onto a plain memory
+  # bitmap: no window, no device, so it renders the same inside the frame
+  # server as it does under ctest.
+  add_library(sync_camera_idle_card
+    native/src/platform/windows/camera_idle_card.cpp
+  )
+  target_compile_features(sync_camera_idle_card PUBLIC cxx_std_20)
+  target_include_directories(sync_camera_idle_card PUBLIC native/include)
+  target_link_libraries(sync_camera_idle_card PUBLIC d2d1 dwrite windowscodecs ole32)
+
+  add_executable(sync_camera_idle_card_tests
+    native/test/windows/camera_idle_card_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_idle_card_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_idle_card_tests PRIVATE native/test)
+  target_link_libraries(sync_camera_idle_card_tests PRIVATE sync_camera_idle_card)
+  add_test(NAME sync_camera_idle_card_tests COMMAND sync_camera_idle_card_tests)
+
   add_executable(sync_camera_fitter_tests
     native/test/camera/frame_fitter_test.cpp
     native/test/camera/camera_publisher_test.cpp
