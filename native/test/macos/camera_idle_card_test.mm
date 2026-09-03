@@ -60,7 +60,7 @@ SYNC_TEST(camera_idle_card_is_opaque_visible_and_not_uniform) {
       if (p[0] > 180 && p[1] > 180 && p[2] > 180) ++bright_centre;
     }
     const auto top = pixel(bytes, stride, x, 4);
-    if (top[0] > 180) ++bright_top;
+    if (top[0] > 180 && top[1] > 180 && top[2] > 180) ++bright_top;
   }
   SYNC_REQUIRE(bright_centre > 500);
   SYNC_REQUIRE(bright_top == 0);

@@ -92,8 +92,13 @@ NSUUID* sink_stream_uuid() {
 // chain must keep polling so the replacement daemon is picked up, but at a
 // pace and log volume that cannot be mistaken for a fault of its own.
 @property(nonatomic, assign) uint64_t consecutiveErrors;
+// The queue CoreMediaIO delivers this stream's callbacks on. The consume
+// chain re-arms onto the same queue, so every touch of the properties
+// above is serialized regardless of what the framework's default would be.
+@property(nonatomic, strong) dispatch_queue_t clientQueue;
 - (instancetype)initWithDevice:(SyncCameraDeviceSource*)device
-                   description:(CMVideoFormatDescriptionRef)description;
+                   description:(CMVideoFormatDescriptionRef)description
+                   clientQueue:(dispatch_queue_t)clientQueue;
 @end
 
 // ---------------------------------------------------------------------------
@@ -105,6 +110,7 @@ NSUUID* sink_stream_uuid() {
 @property(nonatomic, strong) SyncCameraSinkStream* sink;
 @property(nonatomic, strong) dispatch_queue_t queue;
 @property(nonatomic, strong) dispatch_source_t timer;
+- (instancetype)initWithClientQueue:(dispatch_queue_t)clientQueue;
 - (void)sourceStarted;
 - (void)sourceStopped;
 - (void)relaySampleBuffer:(CMSampleBufferRef)buffer;
@@ -120,7 +126,7 @@ NSUUID* sink_stream_uuid() {
   CVPixelBufferRef _idlePixels;
 }
 
-- (instancetype)init {
+- (instancetype)initWithClientQueue:(dispatch_queue_t)clientQueue {
   self = [super init];
   if (self == nil) return nil;
   _queue = dispatch_queue_create("io.noisefactor.sync.camera.device", DISPATCH_QUEUE_SERIAL);
@@ -156,7 +162,9 @@ NSUUID* sink_stream_uuid() {
                                            legacyDeviceID:ns(camera::kDeviceUid)
                                                    source:self];
   _source = [[SyncCameraSourceStream alloc] initWithDevice:self description:_formatDescription];
-  _sink = [[SyncCameraSinkStream alloc] initWithDevice:self description:_formatDescription];
+  _sink = [[SyncCameraSinkStream alloc] initWithDevice:self
+                                           description:_formatDescription
+                                           clientQueue:clientQueue];
   NSError* error = nil;
   if (![_device addStream:_source.stream error:&error] ||
       ![_device addStream:_sink.stream error:&error]) {
@@ -246,9 +254,12 @@ NSUUID* sink_stream_uuid() {
   CVPixelBufferLockBaseAddress(pixels, 0);
   auto* base = static_cast<std::byte*>(CVPixelBufferGetBaseAddress(pixels));
   const size_t stride = CVPixelBufferGetBytesPerRow(pixels);
-  // A failed draw leaves opaque black behind, which is still a valid frame.
-  (void)camera::draw_camera_idle_card({base, stride * camera::kCanvas.height}, stride,
-                                      camera::kCanvas);
+  // A failed draw leaves opaque black behind, which is still a valid frame,
+  // but it is the picture this card exists to replace, so say so once.
+  if (!camera::draw_camera_idle_card({base, stride * camera::kCanvas.height}, stride,
+                                     camera::kCanvas)) {
+    NSLog(@"sync camera: idle card could not be drawn; showing black");
+  }
   CVPixelBufferUnlockBaseAddress(pixels, 0);
   _idlePixels = pixels;
   return _idlePixels;
@@ -259,7 +270,7 @@ NSUUID* sink_stream_uuid() {
   if (pixels == nullptr) return;
   const uint64_t now = host_time_ns();
   CMSampleTimingInfo timing{
-      .duration = CMTimeMake(1, 30),
+      .duration = CMTimeMake(static_cast<int64_t>(_policy.idle_interval_ns()), 1'000'000'000),
       .presentationTimeStamp = CMTimeMake(static_cast<int64_t>(now), 1'000'000'000),
       .decodeTimeStamp = kCMTimeInvalid,
   };
@@ -339,24 +350,29 @@ NSUUID* sink_stream_uuid() {
 }
 
 // A consumer may ask for any frame duration the format allows, from the
-// canvas maximum rate down to one frame a second. Anything else leaves the
-// current value in place; the request is still reported as succeeded, as a
-// camera that refuses a property write tends to be dropped by the consumer.
+// canvas maximum rate down to one frame a second. AVFoundation checks a
+// request against the format's range before it reaches the extension, so
+// anything else is unexpected and simply leaves the current value in place,
+// as Apple's sample extension does. The value is last-writer-wins across
+// consumers and lives as long as this process, which macOS ends when the
+// last consumer leaves.
 - (BOOL)setStreamProperties:(CMIOExtensionStreamProperties*)streamProperties
                       error:(NSError**)outError {
   (void)outError;
   NSDictionary* requested = streamProperties.frameDuration;
   if (requested == nil) return YES;
   const CMTime duration = CMTimeMakeFromDictionary((__bridge CFDictionaryRef)requested);
-  if (!CMTIME_IS_NUMERIC(duration) || CMTimeCompare(duration, kCMTimeZero) <= 0) return YES;
+  if (!CMTIME_IS_NUMERIC(duration)) return YES;
   const CMTime fastest = CMTimeMake(1, static_cast<int32_t>(camera::kMaximumFramesPerSecond));
   const CMTime slowest = CMTimeMake(1, 1);
   if (CMTimeCompare(duration, fastest) < 0 || CMTimeCompare(duration, slowest) > 0) return YES;
   if (CMTimeCompare(duration, _frameDuration) == 0) return YES;
   _frameDuration = duration;
+  NSDictionary* canonical =
+      (__bridge_transfer NSDictionary*)CMTimeCopyAsDictionary(_frameDuration, kCFAllocatorDefault);
   [_stream notifyPropertiesChanged:@{
     CMIOExtensionPropertyStreamFrameDuration :
-        [CMIOExtensionPropertyState propertyStateWithValue:requested],
+        [CMIOExtensionPropertyState propertyStateWithValue:canonical],
   }];
   return YES;
 }
@@ -383,10 +399,12 @@ NSUUID* sink_stream_uuid() {
 @implementation SyncCameraSinkStream
 
 - (instancetype)initWithDevice:(SyncCameraDeviceSource*)device
-                   description:(CMVideoFormatDescriptionRef)description {
+                   description:(CMVideoFormatDescriptionRef)description
+                   clientQueue:(dispatch_queue_t)clientQueue {
   self = [super init];
   if (self == nil) return nil;
   _device = device;
+  _clientQueue = clientQueue;
   _format = [CMIOExtensionStreamFormat
       streamFormatWithFormatDescription:description
                  maxFrameDuration:CMTimeMake(1, 1)
@@ -440,6 +458,10 @@ NSUUID* sink_stream_uuid() {
   return YES;
 }
 
+// A replacement daemon authorizes here before, or instead of, a new start.
+// consumeWithGeneration: reads _client on every call rather than capturing
+// it, so a chain that outlives the old daemon picks the new client up on
+// its next poll even when the framework never calls start again.
 - (BOOL)authorizedToStartStreamForClient:(CMIOExtensionClient*)client {
   _client = client;
   return YES;
@@ -479,6 +501,7 @@ NSUUID* sink_stream_uuid() {
                                            hostTimeInNanoseconds:host_time_ns()];
                            [self.stream notifyScheduledOutputChanged:output];
                          }
+                         if (generation != self.consumeGeneration) return;
                          if (error != nil) {
                            // Log the first failure and then one in every
                            // 256, so a dead client cannot flood the log.
@@ -494,18 +517,21 @@ NSUUID* sink_stream_uuid() {
                            }
                            self.consecutiveErrors = 0;
                          }
-                         if (generation != self.consumeGeneration) return;
                          if (hasMore && error == nil) {
                            [self consumeWithGeneration:generation];
                          } else if (self.streaming) {
                            // Nothing queued yet: poll again shortly rather
                            // than spin. Four milliseconds is well under one
-                           // frame at 60 fps. A failing client is polled at
-                           // 100 ms instead: enough to notice a replacement
-                           // daemon promptly, not enough to burn a core.
-                           const int64_t delay = error == nil ? 4 * NSEC_PER_MSEC : 100 * NSEC_PER_MSEC;
+                           // frame at 60 fps. A client that keeps failing
+                           // is polled at 100 ms instead: enough to notice a
+                           // replacement daemon promptly, not enough to burn
+                           // a core. The first few failures keep the fast
+                           // poll so a transient one costs no frames.
+                           const int64_t delay = self.consecutiveErrors < 4
+                                                     ? 4 * NSEC_PER_MSEC
+                                                     : 100 * NSEC_PER_MSEC;
                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay),
-                                          dispatch_get_main_queue(), ^{
+                                          self.clientQueue, ^{
                                             SyncCameraSinkStream* later = weakSelf;
                                             if (later != nil) [later consumeWithGeneration:generation];
                                           });
@@ -521,6 +547,9 @@ NSUUID* sink_stream_uuid() {
 @interface SyncCameraProviderSource : NSObject <CMIOExtensionProviderSource>
 @property(nonatomic, strong) CMIOExtensionProvider* provider;
 @property(nonatomic, strong) SyncCameraDeviceSource* deviceSource;
+// Owned rather than left to the framework's default, so the sink stream can
+// re-arm its polling on the very queue its callbacks arrive on.
+@property(nonatomic, strong) dispatch_queue_t clientQueue;
 @end
 
 @implementation SyncCameraProviderSource
@@ -528,8 +557,9 @@ NSUUID* sink_stream_uuid() {
 - (instancetype)init {
   self = [super init];
   if (self == nil) return nil;
-  _provider = [CMIOExtensionProvider providerWithSource:self clientQueue:nil];
-  _deviceSource = [[SyncCameraDeviceSource alloc] init];
+  _clientQueue = dispatch_queue_create("io.noisefactor.sync.camera.client", DISPATCH_QUEUE_SERIAL);
+  _provider = [CMIOExtensionProvider providerWithSource:self clientQueue:_clientQueue];
+  _deviceSource = [[SyncCameraDeviceSource alloc] initWithClientQueue:_clientQueue];
   NSError* error = nil;
   if (_deviceSource == nil || ![_provider addDevice:_deviceSource.device error:&error]) {
     NSLog(@"sync camera: could not add device: %@", error);

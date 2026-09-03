@@ -60,6 +60,11 @@ void fill_black_opaque(std::span<std::byte> bgra, std::size_t stride, CameraCanv
       return false;
     }
     CGColorRef ink = CGColorCreateGenericRGB(0.92, 0.92, 0.95, 1.0);
+    if (ink == nullptr) {
+      CFRelease(font);
+      CGContextRelease(context);
+      return false;
+    }
     NSDictionary* attributes = @{
       (__bridge id)kCTFontAttributeName : (__bridge id)font,
       (__bridge id)kCTForegroundColorAttributeName : (__bridge id)ink,
