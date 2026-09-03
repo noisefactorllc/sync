@@ -87,6 +87,11 @@ NSUUID* sink_stream_uuid() {
 // it on, so a chain left over from an earlier start recognizes itself as
 // stale and ends instead of polling beside the new one forever.
 @property(nonatomic, assign) uint64_t consumeGeneration;
+// Consecutive consume calls that returned an error. A daemon that died
+// without stopping the stream leaves a client that fails every call; the
+// chain must keep polling so the replacement daemon is picked up, but at a
+// pace and log volume that cannot be mistaken for a fault of its own.
+@property(nonatomic, assign) uint64_t consecutiveErrors;
 - (instancetype)initWithDevice:(SyncCameraDeviceSource*)device
                    description:(CMVideoFormatDescriptionRef)description;
 @end
@@ -420,6 +425,7 @@ NSUUID* sink_stream_uuid() {
 - (BOOL)startStreamAndReturnError:(NSError**)outError {
   (void)outError;
   _streaming = YES;
+  _consecutiveErrors = 0;
   [self consumeWithGeneration:++_consumeGeneration];
   return YES;
 }
@@ -451,16 +457,31 @@ NSUUID* sink_stream_uuid() {
                            [self.stream notifyScheduledOutputChanged:output];
                          }
                          if (error != nil) {
-                           NSLog(@"sync camera: sink consume error: %@", error);
+                           // Log the first failure and then one in every
+                           // 256, so a dead client cannot flood the log.
+                           const uint64_t count = ++self.consecutiveErrors;
+                           if (count == 1 || count % 256 == 0) {
+                             NSLog(@"sync camera: sink consume error (%llu so far): %@",
+                                   count, error);
+                           }
+                         } else {
+                           if (self.consecutiveErrors != 0) {
+                             NSLog(@"sync camera: sink consume recovered after %llu errors",
+                                   self.consecutiveErrors);
+                           }
+                           self.consecutiveErrors = 0;
                          }
                          if (generation != self.consumeGeneration) return;
-                         if (hasMore) {
+                         if (hasMore && error == nil) {
                            [self consumeWithGeneration:generation];
                          } else if (self.streaming) {
                            // Nothing queued yet: poll again shortly rather
                            // than spin. Four milliseconds is well under one
-                           // frame at 60 fps.
-                           dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_MSEC),
+                           // frame at 60 fps. A failing client is polled at
+                           // 100 ms instead: enough to notice a replacement
+                           // daemon promptly, not enough to burn a core.
+                           const int64_t delay = error == nil ? 4 * NSEC_PER_MSEC : 100 * NSEC_PER_MSEC;
+                           dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay),
                                           dispatch_get_main_queue(), ^{
                                             SyncCameraSinkStream* later = weakSelf;
                                             if (later != nil) [later consumeWithGeneration:generation];
