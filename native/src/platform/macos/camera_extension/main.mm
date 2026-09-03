@@ -21,6 +21,7 @@
 
 #include <mach/mach_time.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <string_view>
 
@@ -118,6 +119,12 @@ NSUUID* sink_stream_uuid() {
 
 @implementation SyncCameraDeviceSource {
   camera::CameraRelayPolicy _policy;
+  // The clock the policy is ticked with. It advances by whole idle
+  // intervals from the first tick, never less, so a tick the timer delivers
+  // late followed by one on time still measures a full interval apart and
+  // the policy emits on every tick. It is never behind host time, so a
+  // frame that just arrived can never read as being in its future.
+  uint64_t _tickNs;
   CVPixelBufferPoolRef _pool;
   CMVideoFormatDescriptionRef _formatDescription;
   // The idle frame never changes, so it is painted once and every idle tick
@@ -231,12 +238,19 @@ NSUUID* sink_stream_uuid() {
   if (_timer != nil) return;
   _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _queue);
   const uint64_t interval = _policy.idle_interval_ns();
-  dispatch_source_set_timer(_timer, dispatch_time(DISPATCH_TIME_NOW, 0), interval, interval / 4);
+  // A quarter-interval leeway let ticks land far enough apart from each
+  // other that the policy skipped some; a sixteenth keeps them near the
+  // schedule, and the tick clock below absorbs what is left.
+  dispatch_source_set_timer(_timer, dispatch_time(DISPATCH_TIME_NOW, 0), interval, interval / 16);
+  _tickNs = 0;
   __weak SyncCameraDeviceSource* weakSelf = self;
   dispatch_source_set_event_handler(_timer, ^{
     SyncCameraDeviceSource* self = weakSelf;
     if (self == nil) return;
-    if (self->_policy.tick(host_time_ns()) == camera::CameraRelayPolicy::Action::EmitBlack) {
+    const uint64_t now = host_time_ns();
+    const uint64_t scheduled = self->_tickNs == 0 ? now : self->_tickNs + interval;
+    self->_tickNs = std::max(now, scheduled);
+    if (self->_policy.tick(self->_tickNs) == camera::CameraRelayPolicy::Action::EmitBlack) {
       [self sendIdleFrame];
     }
   });
