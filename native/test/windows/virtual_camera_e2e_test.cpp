@@ -121,7 +121,9 @@ struct Environment {
 }
 
 SYNC_TEST(the_sync_camera_is_created_and_enumerable_as_a_system_camera) {
-  environment();
+  // Called for the side effect: COM and Media Foundation come up once for
+  // the whole binary.
+  (void)environment();
   const MfCameraSink sink;
   SYNC_REQUIRE(sink.unavailable_reason() != CameraSinkUnavailableReason::SourceNotRegistered);
   SYNC_REQUIRE(sink.available());
@@ -134,7 +136,9 @@ SYNC_TEST(the_sync_camera_is_created_and_enumerable_as_a_system_camera) {
 }
 
 SYNC_TEST(the_camera_shows_the_waiting_card_with_no_sender_and_the_frame_with_one) {
-  environment();
+  // Called for the side effect: COM and Media Foundation come up once for
+  // the whole binary.
+  (void)environment();
   MfCameraSink sink;
   SYNC_REQUIRE(sink.available());
 
