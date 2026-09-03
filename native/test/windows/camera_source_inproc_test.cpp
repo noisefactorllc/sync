@@ -82,6 +82,29 @@ SYNC_TEST(the_class_object_is_an_activator_not_the_source) {
   SYNC_REQUIRE(factory->CreateInstance(nullptr, IID_PPV_ARGS(&direct)) == E_NOINTERFACE);
 }
 
+using DllCanUnloadNowFn = HRESULT(__stdcall*)();
+
+// COM hosts really do call CoFreeUnusedLibraries on idle timers. A DLL that
+// answers "yes, unload me" while the frame server holds a live media source
+// gets unloaded under it, and every vtable pointer in that source dangles.
+SYNC_TEST(the_dll_refuses_to_unload_while_an_object_is_alive) {
+  Environment& env = environment();
+  SYNC_REQUIRE(env.module != nullptr);
+  auto can_unload =
+      reinterpret_cast<DllCanUnloadNowFn>(::GetProcAddress(env.module, "DllCanUnloadNow"));
+  SYNC_REQUIRE(can_unload != nullptr);
+
+  {
+    auto source = CreateSource();
+    SYNC_REQUIRE(source);
+    SYNC_REQUIRE(can_unload() == S_FALSE);
+    source->Shutdown();
+  }
+  // Every object released, so the DLL may go. Shutdown alone is not enough --
+  // the object has to be gone, which is why the scope closes first.
+  SYNC_REQUIRE(can_unload() == S_OK);
+}
+
 [[nodiscard]] auto StreamDescriptorOf(const ComPtr<IMFMediaSource>& source)
     -> ComPtr<IMFStreamDescriptor> {
   ComPtr<IMFPresentationDescriptor> presentation;

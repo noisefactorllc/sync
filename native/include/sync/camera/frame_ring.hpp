@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -44,6 +45,12 @@ struct FrameRingHeader {
   std::uint32_t slots;
   std::uint32_t slot_bytes;
   std::atomic<std::uint64_t> newest;  // monotonic count of published frames
+  // When the media source last asked for a frame, in the sender's own clock
+  // units. A heartbeat rather than a consumer count: the count would leak if
+  // the frame server were ever torn down between the increment and the
+  // decrement, and a stale count is indistinguishable from a live consumer.
+  // Staleness is self-correcting.
+  std::atomic<std::uint64_t> last_demand_us;
   FrameRingSlot slot[kFrameRingSlots];
 };
 
@@ -51,19 +58,22 @@ struct FrameRingHeader {
   return sizeof(FrameRingHeader) + kFrameRingSlotBytes * kFrameRingSlots;
 }
 
-// Kernel object names. Both live in the Global namespace because the media
-// source runs in session 0 and syncd in the user's session. Deliberately not
-// keyed by user: the media source cannot be told which account to pair with
-// without an administrator-only API, so it grants INTERACTIVE on the section
-// instead and whoever is logged in feeds the camera.
+// The shared section's name. It lives in the Global namespace because the
+// media source runs in session 0 and syncd in the user's session. Deliberately
+// not keyed by user: the media source cannot be told which account to pair
+// with without an administrator-only API, so it grants INTERACTIVE on the
+// section instead and whoever is logged in feeds the camera.
 [[nodiscard]] auto section_name() -> std::wstring;
-[[nodiscard]] auto frame_event_name() -> std::wstring;
 
 // Writes frames into a mapped ring. Does not own the mapping.
 class FrameRingWriter {
  public:
   explicit FrameRingWriter(std::span<std::byte> mapping) noexcept;
   [[nodiscard]] auto valid() const noexcept -> bool;
+  // True while a consumer has asked for a frame recently enough to still be
+  // watching. False once the camera is open to nobody, which is what stops
+  // the publisher fitting 1080p frames that nothing would read.
+  [[nodiscard]] auto has_demand(std::uint64_t now_us) const noexcept -> bool;
   [[nodiscard]] auto has_capacity() const noexcept -> bool;
   // Copies bgra into the next slot and publishes it. False when the mapping is
   // invalid or the payload does not match the canvas.
@@ -75,11 +85,31 @@ class FrameRingWriter {
   std::byte* payload_ = nullptr;
 };
 
+// How long after the media source's last request for a frame the sender keeps
+// treating the camera as watched. Generous next to a 60 fps request cadence,
+// so an ordinary hitch never reads as "nobody is looking", and short enough
+// that a closed consumer stops the sender fitting frames within a second.
+inline constexpr std::uint64_t kFrameRingDemandTimeoutUs = 1'000'000;
+
+// The clock both halves stamp and compare demand with. It has to be the same
+// domain in two processes, which steady_clock is: MSVC implements it on
+// QueryPerformanceCounter, which is machine-wide. Defined here so neither
+// side can pick a different one.
+[[nodiscard]] inline auto camera_clock_us() noexcept -> std::uint64_t {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
 // Reads the newest complete frame. Does not own the mapping.
 class FrameRingReader {
  public:
   explicit FrameRingReader(std::span<const std::byte> mapping) noexcept;
   [[nodiscard]] auto valid() const noexcept -> bool;
+  // Called by the media source each time a consumer asks for a frame, so the
+  // sender on the other side can tell whether anything is still watching.
+  void record_demand(std::uint64_t now_us) const noexcept;
   // Monotonic publish count, so a caller can tell a new frame from a repeat.
   [[nodiscard]] auto newest_sequence() const noexcept -> std::uint64_t;
   // Copies the newest complete frame into out. False when nothing has been

@@ -36,6 +36,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -178,8 +179,18 @@ int run_with_providers(nfsync::ServerOptions &options,
   nfsync::SpoutFramePublisher spout({
       .library_path = command.spout_library_path,
   });
-  nfsync::camera::MfCameraSink camera_sink;
-  nfsync::camera::CameraFramePublisher camera(camera_sink);
+  // Constructed only when this run actually selects the camera. Unlike the
+  // macOS sink, which just looks for a device someone else installed, this
+  // constructor calls MFCreateVirtualCamera with Lifetime_System -- it
+  // registers a machine-wide camera that survives a reboot. Building it
+  // unconditionally meant `syncd --publisher ndi` put a "Sync" camera in
+  // every application's picker and left it there.
+  std::optional<nfsync::camera::MfCameraSink> camera_sink;
+  std::optional<nfsync::camera::CameraFramePublisher> camera;
+  if (configured(command, "camera", true)) {
+    camera_sink.emplace();
+    camera.emplace(*camera_sink);
+  }
 #endif
   nfsync::NdiFramePublisher ndi({
       .runtime_path = command.ndi_runtime_path,
@@ -225,12 +236,25 @@ int run_with_providers(nfsync::ServerOptions &options,
 // The two implementations differ entirely underneath -- a CoreMediaIO
 // extension against a Media Foundation virtual camera -- but they meet at
 // CameraFramePublisher, so the provider looks the same from here.
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__)
   constexpr bool kCameraImplemented = true;
   const bool camera_available = camera.available();
   nfsync::FramePublisher *const camera_publisher = &camera;
   const std::string camera_reason_text = nfsync::camera::describe_unavailability(
       camera.unavailable_reason(), camera.unavailable_status());
+  const char *const camera_reason = camera_reason_text.c_str();
+#elif defined(_WIN32)
+  constexpr bool kCameraImplemented = true;
+  // Unset whenever this run did not select the camera, in which case nothing
+  // below reads these: ProviderAssembly::offer drops an unconfigured provider
+  // before it looks at availability.
+  const bool camera_available = camera_sink.has_value() && camera->available();
+  nfsync::FramePublisher *const camera_publisher = camera.has_value() ? &*camera : nullptr;
+  const std::string camera_reason_text =
+      camera_sink.has_value()
+          ? nfsync::camera::describe_unavailability(camera_sink->unavailable_reason(),
+                                                    camera_sink->unavailable_status())
+          : std::string("the camera was not selected for this run");
   const char *const camera_reason = camera_reason_text.c_str();
 #else
   constexpr bool kCameraImplemented = false;

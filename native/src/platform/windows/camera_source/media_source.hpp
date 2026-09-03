@@ -23,6 +23,7 @@
 #include <sync/platform/camera_relay_policy.hpp>
 
 #include "attribute_store.hpp"
+#include "module_lock.hpp"
 #include "section_owner.hpp"
 
 namespace noisefactor::sync::camera {
@@ -94,6 +95,7 @@ class SyncCameraStream final : public IMFMediaStream2,
   [[nodiscard]] auto StartLocked() -> HRESULT;
   [[nodiscard]] auto StopLocked() -> HRESULT;
 
+  ModuleReference module_reference_;
   std::atomic<ULONG> references_{1};
   // Weak on purpose: the source owns the stream, so a strong reference here
   // would be a cycle neither ever escapes.
@@ -183,6 +185,7 @@ class SyncCameraSource final : public IMFMediaSourceEx,
  private:
   ~SyncCameraSource();
 
+  ModuleReference module_reference_;
   std::atomic<ULONG> references_{1};
   std::mutex mutex_;
   bool shutdown_ = false;
@@ -218,6 +221,7 @@ class SyncCameraActivator final : public AttributeStore<IMFActivate> {
  private:
   ~SyncCameraActivator();
 
+  ModuleReference module_reference_;
   std::atomic<ULONG> references_{1};
   Microsoft::WRL::ComPtr<SyncCameraSource> source_;
 };

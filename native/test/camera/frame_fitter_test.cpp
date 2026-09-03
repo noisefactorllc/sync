@@ -115,6 +115,42 @@ SYNC_TEST(fit_paints_bars_black_around_a_letterboxed_source) {
   SYNC_REQUIRE(static_cast<std::uint8_t>(canvas[centre]) == 255);
 }
 
+SYNC_TEST(fit_resamples_rather_than_picking_nearest_pixels) {
+  // A one-pixel-wide black-and-white checkerboard, downscaled. Nearest
+  // neighbour keeps every sample at 0 or 255 and lands aliased; a filtered
+  // resample averages neighbours and produces intermediate values. Solid
+  // colours cannot tell the two apart, which is why the other tests do not.
+  constexpr std::uint32_t kWidth = 3840;
+  constexpr std::uint32_t kHeight = 2160;
+  std::vector<std::byte> payload(static_cast<std::size_t>(kWidth) * kHeight * kBytesPerPixel);
+  for (std::uint32_t y = 0; y < kHeight; ++y) {
+    for (std::uint32_t x = 0; x < kWidth; ++x) {
+      const auto level = static_cast<std::uint8_t>(((x + y) % 2) == 0 ? 255 : 0);
+      const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * kBytesPerPixel;
+      payload[at + 0] = static_cast<std::byte>(level);
+      payload[at + 1] = static_cast<std::byte>(level);
+      payload[at + 2] = static_cast<std::byte>(level);
+      payload[at + 3] = static_cast<std::byte>(255);
+    }
+  }
+  const auto frame = frame_over(payload, kWidth, kHeight, kAlphaOpaque);
+  std::vector<std::byte> canvas(kStride * kCanvas.height);
+  CameraFitScratch scratch;
+  SYNC_REQUIRE(fit_camera_frame(frame, canvas, kStride, kCanvas, scratch));
+
+  std::size_t intermediate = 0;
+  for (std::uint32_t row = 0; row < kCanvas.height; ++row) {
+    for (std::uint32_t column = 0; column < kCanvas.width; ++column) {
+      const auto value = static_cast<std::uint8_t>(
+          canvas[static_cast<std::size_t>(row) * kStride +
+                 static_cast<std::size_t>(column) * kBytesPerPixel]);
+      if (value > 16 && value < 239) ++intermediate;
+    }
+  }
+  // Most of the canvas should be blended. Nearest neighbour would score zero.
+  SYNC_REQUIRE(intermediate > (static_cast<std::size_t>(kCanvas.width) * kCanvas.height) / 2);
+}
+
 SYNC_TEST(fit_rejects_a_bottom_up_frame) {
   const auto payload = solid_rgba(1920, 1080, 255, 0, 0, 255);
   auto frame = frame_over(payload, 1920, 1080, kAlphaOpaque);

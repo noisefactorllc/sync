@@ -5,6 +5,7 @@
 #include <string>
 
 #include "media_source.hpp"
+#include "module_lock.hpp"
 #include "source_guids.hpp"
 
 namespace {
@@ -91,6 +92,7 @@ class SourceFactory final : public IClassFactory {
   }
 
  private:
+  noisefactor::sync::camera::ModuleReference module_reference_;
   std::atomic<ULONG> references_{1};
 };
 
@@ -118,6 +120,12 @@ extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID riid, void
 }
 
 extern "C" HRESULT __stdcall DllCanUnloadNow() {
+  // Outstanding objects count as much as explicit locks. Answering on locks
+  // alone lets COM unload this DLL while the frame server still holds a live
+  // media source, and every vtable pointer in it then dangles.
+  if (noisefactor::sync::camera::module_references().load(std::memory_order_acquire) != 0) {
+    return S_FALSE;
+  }
   return g_locks.load(std::memory_order_acquire) == 0 ? S_OK : S_FALSE;
 }
 

@@ -431,11 +431,21 @@ void restart_sync(AppState& app) {
   const std::wstring path = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") +
                             kSyncCameraSourceClsidString + L"\\InprocServer32";
   HKEY key = nullptr;
-  if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ, &key) == ERROR_SUCCESS) {
-    ::RegCloseKey(key);
-    return camera::CameraActivationState::Active;
+  if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+    return camera::CameraActivationState::NeedsElevation;
   }
-  return camera::CameraActivationState::NeedsElevation;
+  wchar_t recorded[MAX_PATH]{};
+  DWORD bytes = sizeof(recorded);
+  const LSTATUS read = ::RegQueryValueExW(key, nullptr, nullptr, nullptr,
+                                          reinterpret_cast<LPBYTE>(recorded), &bytes);
+  ::RegCloseKey(key);
+  // The key alone is not enough. It can outlive the DLL it names -- a move, a
+  // partial uninstall, a side-by-side install -- and reporting Active then
+  // greys out the only line that could put it right, leaving no way back.
+  if (read != ERROR_SUCCESS || ::GetFileAttributesW(recorded) == INVALID_FILE_ATTRIBUTES) {
+    return camera::CameraActivationState::NeedsElevation;
+  }
+  return camera::CameraActivationState::Active;
 }
 
 // Runs syncd --register-camera elevated. ShellExecuteExW with "runas" is what
@@ -445,14 +455,23 @@ void restart_sync(AppState& app) {
 void enable_camera(AppState& app) {
   app.camera_state = camera::CameraActivationState::Registering;
 
+  // Grown rather than a fixed MAX_PATH, matching the two sibling helpers: a
+  // long-path-enabled machine with a deep install directory would otherwise
+  // report failure permanently with nothing to diagnose.
   std::wstring helper(MAX_PATH, L'\0');
-  const DWORD written =
-      ::GetModuleFileNameW(nullptr, helper.data(), static_cast<DWORD>(helper.size()));
-  if (written == 0 || written >= helper.size()) {
-    app.camera_state = camera::CameraActivationState::Failed;
-    return;
+  for (;;) {
+    const DWORD written =
+        ::GetModuleFileNameW(nullptr, helper.data(), static_cast<DWORD>(helper.size()));
+    if (written == 0) {
+      app.camera_state = camera::CameraActivationState::Failed;
+      return;
+    }
+    if (written < helper.size()) {
+      helper.resize(written);
+      break;
+    }
+    helper.resize(helper.size() * 2);
   }
-  helper.resize(written);
   const std::size_t separator = helper.find_last_of(L'\\');
   if (separator == std::wstring::npos) {
     app.camera_state = camera::CameraActivationState::Failed;
@@ -477,8 +496,15 @@ void enable_camera(AppState& app) {
 
   DWORD exit_code = 1;
   if (info.hProcess != nullptr) {
-    ::WaitForSingleObject(info.hProcess, INFINITE);
-    ::GetExitCodeProcess(info.hProcess, &exit_code);
+    // Bounded, not INFINITE. This runs on the tray's UI thread, so a helper
+    // that wedges -- a stuck LoadLibraryW, a blocked registry write -- would
+    // otherwise freeze the message loop for good: no icon, no menu, no Quit,
+    // and nothing to do but end the process from Task Manager. The budget is
+    // generous because it also covers the user reading the UAC prompt.
+    constexpr DWORD kRegistrationTimeoutMs = 120'000;
+    if (::WaitForSingleObject(info.hProcess, kRegistrationTimeoutMs) == WAIT_OBJECT_0) {
+      ::GetExitCodeProcess(info.hProcess, &exit_code);
+    }
     ::CloseHandle(info.hProcess);
   }
   app.camera_state = exit_code == 0 ? probe_camera_state()

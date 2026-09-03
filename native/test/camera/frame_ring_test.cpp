@@ -13,10 +13,10 @@ namespace {
 using noisefactor::sync::camera::FrameRingHeader;
 using noisefactor::sync::camera::FrameRingReader;
 using noisefactor::sync::camera::FrameRingWriter;
-using noisefactor::sync::camera::frame_event_name;
 using noisefactor::sync::camera::frame_ring_bytes;
 using noisefactor::sync::camera::kBytesPerPixel;
 using noisefactor::sync::camera::kCanvas;
+using noisefactor::sync::camera::kFrameRingDemandTimeoutUs;
 using noisefactor::sync::camera::kFrameRingSlotBytes;
 using noisefactor::sync::camera::kFrameRingSlots;
 using noisefactor::sync::camera::section_name;
@@ -27,14 +27,39 @@ constexpr std::size_t kStride = static_cast<std::size_t>(kCanvas.width) * kBytes
   return std::vector<std::byte>(kFrameRingSlotBytes, static_cast<std::byte>(value));
 }
 
-SYNC_TEST(names_are_global_and_distinct) {
-  const std::wstring section = section_name();
-  SYNC_REQUIRE(section.rfind(L"Global\\", 0) == 0);
-  const std::wstring event = frame_event_name();
-  SYNC_REQUIRE(event.rfind(L"Global\\", 0) == 0);
-  // Separate kernel objects: sharing a name would make CreateEventW fail
-  // against the existing section.
-  SYNC_REQUIRE(event != section);
+SYNC_TEST(the_section_name_is_global) {
+  // Global, because the media source runs in session 0 and syncd in the
+  // user's session. A Local name would put the two in different namespaces
+  // and each would quietly get a section of its own.
+  SYNC_REQUIRE(section_name().rfind(L"Global\\", 0) == 0);
+}
+
+SYNC_TEST(demand_expires_so_a_closed_consumer_stops_the_sender) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+  constexpr std::uint64_t kNow = 10'000'000'000;
+
+  // Nothing has ever asked for a frame.
+  SYNC_REQUIRE(!writer.has_demand(kNow));
+
+  reader.record_demand(kNow);
+  SYNC_REQUIRE(writer.has_demand(kNow));
+  SYNC_REQUIRE(writer.has_demand(kNow + kFrameRingDemandTimeoutUs));
+  // Past the timeout the consumer is gone and the sender must stop fitting
+  // frames for it.
+  SYNC_REQUIRE(!writer.has_demand(kNow + kFrameRingDemandTimeoutUs + 1));
+}
+
+SYNC_TEST(demand_from_a_clock_running_ahead_is_not_read_as_ancient) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+  // The subtraction is unsigned, so a demand stamped even slightly ahead of
+  // the reader's clock would otherwise wrap to an enormous age and read as
+  // "nobody is watching" for the life of the process.
+  reader.record_demand(10'000'000'000);
+  SYNC_REQUIRE(writer.has_demand(9'999'999'000));
 }
 
 SYNC_TEST(a_fresh_ring_has_nothing_to_read) {

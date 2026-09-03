@@ -40,7 +40,6 @@ struct MfCameraSink::Impl {
   bool media_foundation_started = false;
   ComPtr<IMFVirtualCamera> camera;
   HANDLE section = nullptr;
-  HANDLE frame_event = nullptr;
   void* view = nullptr;
   std::unique_ptr<FrameRingWriter> writer;
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::None;
@@ -101,22 +100,24 @@ struct MfCameraSink::Impl {
       ::CloseHandle(section);
       section = nullptr;
     }
-    if (frame_event != nullptr) {
-      ::CloseHandle(frame_event);
-      frame_event = nullptr;
-    }
   }
 
-  // The section exists only while a consumer has the camera open, because the
-  // media source creates it when the frame server activates it. So this is
-  // tried on every frame rather than once at construction: a consumer can
-  // arrive and leave many times over one run of the daemon.
-  [[nodiscard]] auto ensure_section() -> bool {
+  // The section exists only while the media source has been activated, so
+  // this is tried on every frame rather than once at construction: a consumer
+  // can arrive and leave many times over one run of the daemon.
+  //
+  // noexcept because both callers are: an allocation failure here has to read
+  // as backpressure, not as std::terminate taking the daemon down.
+  [[nodiscard]] auto ensure_section() noexcept -> bool try {
     if (writer != nullptr) return true;
     section = ::OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, options.section.c_str());
-    if (section == nullptr) return false;
+    if (section == nullptr) {
+      note_open_failure(::GetLastError());
+      return false;
+    }
     view = ::MapViewOfFile(section, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, frame_ring_bytes());
     if (view == nullptr) {
+      note_open_failure(::GetLastError());
       close_section();
       return false;
     }
@@ -126,8 +127,19 @@ struct MfCameraSink::Impl {
       close_section();
       return false;
     }
-    frame_event = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, options.frame_event.c_str());
     return true;
+  } catch (...) {
+    close_section();
+    return false;
+  }
+
+  // A section that is simply not there yet is the ordinary idle state and
+  // says nothing. A section that refuses this account is a DACL problem the
+  // user cannot guess at, so it is recorded where the diagnostics can see it.
+  void note_open_failure(DWORD error) noexcept {
+    if (error != ERROR_ACCESS_DENIED) return;
+    reason = CameraSinkUnavailableReason::SectionAccessDenied;
+    status = static_cast<std::int32_t>(HRESULT_FROM_WIN32(error));
   }
 };
 
@@ -148,10 +160,17 @@ auto MfCameraSink::unavailable_reason() const noexcept -> CameraSinkUnavailableR
 auto MfCameraSink::unavailable_status() const noexcept -> std::int32_t { return impl_->status; }
 
 auto MfCameraSink::has_capacity() const noexcept -> bool {
-  // No consumer, no section, nowhere to put a frame. Answering no here is what
-  // stops the publisher fitting a 1080p frame sixty times a second that
+  // Nowhere to put a frame, or nobody asking for one. Answering no here is
+  // what stops the publisher fitting a 1080p frame sixty times a second that
   // nothing would read.
-  return available() && impl_->ensure_section();
+  //
+  // The section alone is not the test. This process keeps its own view mapped,
+  // which keeps the named section alive after every consumer has gone, so
+  // "the section opens" stays true forever once anything has ever opened the
+  // camera. Whether the media source has recently asked for a frame is the
+  // question that actually has an answer.
+  if (!available() || !impl_->ensure_section()) return false;
+  return impl_->writer->has_demand(camera_clock_us());
 }
 
 auto MfCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {
@@ -160,10 +179,10 @@ auto MfCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSu
   if (frame.width != kCanvas.width || frame.height != kCanvas.height) {
     return CameraSinkSubmit::Failed;
   }
+  if (!impl_->writer->has_demand(camera_clock_us())) return CameraSinkSubmit::Backpressured;
   if (!impl_->writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us)) {
     return CameraSinkSubmit::Failed;
   }
-  if (impl_->frame_event != nullptr) ::SetEvent(impl_->frame_event);
   return CameraSinkSubmit::Accepted;
 }
 

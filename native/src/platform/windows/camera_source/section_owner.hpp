@@ -32,7 +32,6 @@ class SectionOwner {
 
  private:
   HANDLE section_ = nullptr;
-  HANDLE event_ = nullptr;
   void* view_ = nullptr;
   std::size_t bytes_ = 0;
 };

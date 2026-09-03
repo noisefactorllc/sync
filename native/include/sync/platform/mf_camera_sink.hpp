@@ -21,19 +21,20 @@ namespace noisefactor::sync::camera {
 // extension hands the daemon a queue; here the daemon opens a section the
 // source created, because only a process in session 0 can create one.
 //
-// Discovery happens once at construction, exactly as it does on macOS. A
-// source registered later is picked up by restarting the daemon, which the
-// tray app does when it finishes enabling the camera.
+// Registration is checked once at construction, as on macOS: a source
+// registered later is picked up by restarting the daemon, which the tray app
+// does when it finishes enabling the camera. The section itself is opened
+// lazily and re-checked per frame, because a consumer can open and close the
+// camera many times over one run.
 class MfCameraSink final : public CameraSink {
  public:
   struct Options {
-    // The kernel objects the media source owns. Production uses the Global
-    // names; a test overrides them with Local ones, because creating a Global
+    // The shared section the media source owns. Production uses the Global
+    // name; a test overrides it with a Local one, because creating a Global
     // object needs SeCreateGlobalPrivilege and only a session 0 service has
     // it -- the same asymmetry that made the source own the section in the
     // first place.
     std::wstring section = section_name();
-    std::wstring frame_event = frame_event_name();
     // Tests drive the ring directly and must not register a camera with the
     // system; production leaves this true.
     bool create_virtual_camera = true;

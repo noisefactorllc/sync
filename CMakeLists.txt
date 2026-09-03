@@ -823,7 +823,7 @@ elseif(WIN32)
   )
   target_compile_features(sync_mf_camera_sink_tests PRIVATE cxx_std_20)
   target_include_directories(sync_mf_camera_sink_tests PRIVATE native/test)
-  target_link_libraries(sync_mf_camera_sink_tests PRIVATE sync_mf_camera_sink)
+  target_link_libraries(sync_mf_camera_sink_tests PRIVATE sync_mf_camera_sink mfplat)
   add_test(NAME sync_mf_camera_sink_tests COMMAND sync_mf_camera_sink_tests)
 
   # A tool, not a test: feeds the camera so a genuine application can be
@@ -836,9 +836,13 @@ elseif(WIN32)
   target_link_libraries(sync_camera_feed_probe PRIVATE sync_mf_camera_sink)
 
   # Tier 2: the only test that proves the whole path. It needs a Windows 11
-  # build (22000+) and the media source registered under HKLM, so it is not
-  # part of the default ctest run -- see the sync_camera_e2e label and the
-  # camera job in .github/workflows/ci.yml.
+  # build (22000+) and the media source registered under HKLM.
+  #
+  # A LABELS property does not exclude anything on its own -- it is registered
+  # in the default set like every other test, and a caller who has not
+  # registered the source excludes it with `ctest --label-exclude
+  # sync_camera_e2e`. That is what CI's main test step does before its own
+  # camera step registers the source and runs this by label.
   add_executable(sync_virtual_camera_e2e_tests
     native/test/windows/virtual_camera_e2e_test.cpp
     native/test/test_main.cpp

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -17,10 +18,13 @@ namespace {
 using noisefactor::sync::camera::CameraSinkFrame;
 using noisefactor::sync::camera::CameraSinkSubmit;
 using noisefactor::sync::camera::CameraSinkUnavailableReason;
+using noisefactor::sync::camera::camera_clock_us;
 using noisefactor::sync::camera::FrameRingReader;
+using noisefactor::sync::camera::FrameRingWriter;
 using noisefactor::sync::camera::frame_ring_bytes;
 using noisefactor::sync::camera::kBytesPerPixel;
 using noisefactor::sync::camera::kCanvas;
+using noisefactor::sync::camera::kFrameRingDemandTimeoutUs;
 using noisefactor::sync::camera::kFrameRingSlotBytes;
 using noisefactor::sync::camera::MfCameraSink;
 using noisefactor::sync::camera::windows_supports_virtual_cameras;
@@ -30,16 +34,18 @@ constexpr std::size_t kStride = static_cast<std::size_t>(kCanvas.width) * kBytes
 // Local rather than Global. Creating a Global object needs
 // SeCreateGlobalPrivilege, which only a session 0 service has -- the very
 // asymmetry that makes the media source, not syncd, own the real section. The
-// sink cannot tell the two namespaces apart, so a Local pair exercises it
+// sink cannot tell the two namespaces apart, so a Local one exercises it
 // exactly the same way.
 constexpr wchar_t kTestSection[] = L"Local\\SyncCameraTest.frames";
-constexpr wchar_t kTestEvent[] = L"Local\\SyncCameraTest.frame";
 
 [[nodiscard]] auto test_options() -> MfCameraSink::Options {
-  return {.section = kTestSection, .frame_event = kTestEvent, .create_virtual_camera = false};
+  return {.section = kTestSection, .create_virtual_camera = false};
 }
 
-// Stands in for the media source, which is the half that creates the section.
+[[nodiscard]] auto now_us() -> std::uint64_t { return camera_clock_us(); }
+
+// Stands in for the media source, which is the half that creates the section
+// and stamps demand on it whenever a consumer asks for a frame.
 struct FakeSource {
   HANDLE section = nullptr;
   void* view = nullptr;
@@ -49,6 +55,13 @@ struct FakeSource {
                                    static_cast<DWORD>(frame_ring_bytes()), kTestSection);
     if (section != nullptr) {
       view = ::MapViewOfFile(section, FILE_MAP_ALL_ACCESS, 0, 0, frame_ring_bytes());
+      // The real SectionOwner stamps the ring at creation, so demand can be
+      // recorded before any frame exists. Standing in for it means doing the
+      // same.
+      if (view != nullptr) {
+        (void)FrameRingWriter(
+            std::span<std::byte>(static_cast<std::byte*>(view), frame_ring_bytes()));
+      }
     }
   }
 
@@ -63,6 +76,9 @@ struct FakeSource {
   [[nodiscard]] auto mapping() const -> std::span<const std::byte> {
     return {static_cast<const std::byte*>(view), frame_ring_bytes()};
   }
+
+  // What the media source does on every RequestSample.
+  void demand(std::uint64_t at_us) const { FrameRingReader(mapping()).record_demand(at_us); }
 };
 
 [[nodiscard]] auto canvas_filled(std::uint8_t value) -> std::vector<std::byte> {
@@ -115,19 +131,43 @@ SYNC_TEST(a_sink_with_no_consumer_is_available_but_has_no_capacity) {
   SYNC_REQUIRE(!sink.has_capacity());
 }
 
-SYNC_TEST(a_sink_opens_a_section_the_source_created) {
+SYNC_TEST(a_section_with_no_recent_demand_still_has_no_capacity) {
   const FakeSource source;
   SYNC_REQUIRE(source.view != nullptr);
   const MfCameraSink sink(test_options());
   SYNC_REQUIRE(sink.available());
-  SYNC_REQUIRE(sink.unavailable_reason() == CameraSinkUnavailableReason::None);
+  // The section exists but nothing has asked for a frame. This is the state
+  // after every consumer closes the camera, and it must not read as demand.
+  SYNC_REQUIRE(!sink.has_capacity());
+}
+
+SYNC_TEST(a_sink_gains_capacity_when_a_consumer_asks_for_a_frame) {
+  const FakeSource source;
+  MfCameraSink sink(test_options());
+  SYNC_REQUIRE(!sink.has_capacity());
+  source.demand(now_us());
   SYNC_REQUIRE(sink.has_capacity());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x2B), 42)) == CameraSinkSubmit::Accepted);
+}
+
+SYNC_TEST(a_sink_loses_capacity_once_demand_goes_stale) {
+  const FakeSource source;
+  MfCameraSink sink(test_options());
+  source.demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+
+  // A consumer that closed the camera stops asking. Without this the writer
+  // latches on the first consumer and the publisher goes on fitting 1080p
+  // frames into a ring nothing reads, for the rest of the daemon's life.
+  source.demand(now_us() - kFrameRingDemandTimeoutUs - 1'000'000);
+  SYNC_REQUIRE(!sink.has_capacity());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(1), 1)) == CameraSinkSubmit::Backpressured);
 }
 
 SYNC_TEST(a_submitted_frame_lands_in_the_ring) {
   const FakeSource source;
   MfCameraSink sink(test_options());
-  SYNC_REQUIRE(sink.available());
+  source.demand(now_us());
   const auto frame = canvas_filled(0x3C);
   SYNC_REQUIRE(sink.submit(submission(frame, 9999)) == CameraSinkSubmit::Accepted);
 
@@ -144,7 +184,7 @@ SYNC_TEST(a_submitted_frame_lands_in_the_ring) {
 SYNC_TEST(successive_frames_advance_the_ring) {
   const FakeSource source;
   MfCameraSink sink(test_options());
-  SYNC_REQUIRE(sink.available());
+  source.demand(now_us());
   for (std::uint8_t value = 1; value <= 4; ++value) {
     SYNC_REQUIRE(sink.submit(submission(canvas_filled(value), value)) ==
                  CameraSinkSubmit::Accepted);
@@ -160,7 +200,7 @@ SYNC_TEST(successive_frames_advance_the_ring) {
 SYNC_TEST(a_frame_that_is_not_the_canvas_fails_rather_than_corrupting_the_ring) {
   const FakeSource source;
   MfCameraSink sink(test_options());
-  SYNC_REQUIRE(sink.available());
+  source.demand(now_us());
   CameraSinkFrame wrong_size = submission(canvas_filled(0x11), 1);
   wrong_size.height = kCanvas.height / 2;
   SYNC_REQUIRE(sink.submit(wrong_size) == CameraSinkSubmit::Failed);
@@ -185,6 +225,7 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
   // construction the way the CoreMediaIO sink discovers its device.
   const FakeSource source;
   SYNC_REQUIRE(source.view != nullptr);
+  source.demand(now_us());
   SYNC_REQUIRE(sink.has_capacity());
   SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x2B), 42)) == CameraSinkSubmit::Accepted);
 

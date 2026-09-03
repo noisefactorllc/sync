@@ -19,8 +19,6 @@ constexpr int kTornReadRetries = 4;
 
 auto section_name() -> std::wstring { return L"Global\\SyncCamera.frames"; }
 
-auto frame_event_name() -> std::wstring { return L"Global\\SyncCamera.frame"; }
-
 FrameRingWriter::FrameRingWriter(std::span<std::byte> mapping) noexcept {
   if (mapping.data() == nullptr || mapping.size() < frame_ring_bytes()) return;
   auto* header = reinterpret_cast<FrameRingHeader*>(mapping.data());
@@ -32,6 +30,7 @@ FrameRingWriter::FrameRingWriter(std::span<std::byte> mapping) noexcept {
     header->slots = kFrameRingSlots;
     header->slot_bytes = static_cast<std::uint32_t>(kFrameRingSlotBytes);
     header->newest.store(0, std::memory_order_relaxed);
+    header->last_demand_us.store(0, std::memory_order_relaxed);
     for (auto& slot : header->slot) {
       slot.sequence.store(0, std::memory_order_relaxed);
     }
@@ -48,6 +47,17 @@ FrameRingWriter::FrameRingWriter(std::span<std::byte> mapping) noexcept {
 auto FrameRingWriter::valid() const noexcept -> bool { return header_ != nullptr; }
 
 auto FrameRingWriter::has_capacity() const noexcept -> bool { return header_ != nullptr; }
+
+auto FrameRingWriter::has_demand(std::uint64_t now_us) const noexcept -> bool {
+  if (header_ == nullptr) return false;
+  const std::uint64_t last = header_->last_demand_us.load(std::memory_order_acquire);
+  if (last == 0) return false;
+  // Unsigned, so a demand stamped slightly ahead of this clock reads as very
+  // stale rather than very fresh. Both sides use the same steady clock, but
+  // the comparison should not depend on that.
+  if (now_us < last) return true;
+  return (now_us - last) <= kFrameRingDemandTimeoutUs;
+}
 
 auto FrameRingWriter::write(std::span<const std::byte> bgra, std::size_t row_stride,
                             std::uint64_t presentation_time_us) noexcept -> bool {
@@ -78,6 +88,14 @@ FrameRingReader::FrameRingReader(std::span<const std::byte> mapping) noexcept {
 }
 
 auto FrameRingReader::valid() const noexcept -> bool { return header_ != nullptr; }
+
+void FrameRingReader::record_demand(std::uint64_t now_us) const noexcept {
+  if (header_ == nullptr) return;
+  // The reader half writes exactly this one field. The section is mapped
+  // read-only on the source side for the payload, so the cast is deliberate
+  // and confined here.
+  const_cast<FrameRingHeader*>(header_)->last_demand_us.store(now_us, std::memory_order_release);
+}
 
 auto FrameRingReader::newest_sequence() const noexcept -> std::uint64_t {
   return header_ == nullptr ? 0 : header_->newest.load(std::memory_order_acquire);

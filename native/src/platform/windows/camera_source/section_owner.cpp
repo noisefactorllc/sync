@@ -29,7 +29,6 @@ constexpr wchar_t kSectionSddl[] =
 SectionOwner::~SectionOwner() {
   if (view_ != nullptr) ::UnmapViewOfFile(view_);
   if (section_ != nullptr) ::CloseHandle(section_);
-  if (event_ != nullptr) ::CloseHandle(event_);
 }
 
 auto SectionOwner::open() noexcept -> bool {
@@ -46,13 +45,14 @@ auto SectionOwner::open() noexcept -> bool {
   attributes.bInheritHandle = FALSE;
 
   const std::wstring section = section_name();
-  const std::wstring event = frame_event_name();
   bytes_ = frame_ring_bytes();
   section_ = ::CreateFileMappingW(INVALID_HANDLE_VALUE, &attributes, PAGE_READWRITE, 0,
                                   static_cast<DWORD>(bytes_), section.c_str());
   if (section_ != nullptr) {
-    event_ = ::CreateEventW(&attributes, FALSE, FALSE, event.c_str());
-    view_ = ::MapViewOfFile(section_, FILE_MAP_READ, 0, 0, bytes_);
+    // Read/write, not read-only: frames travel one way, but the source stamps
+    // the demand heartbeat in the header so the sender on the other side can
+    // tell whether anything is still watching.
+    view_ = ::MapViewOfFile(section_, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, bytes_);
   }
   ::LocalFree(descriptor);
 
@@ -61,12 +61,16 @@ auto SectionOwner::open() noexcept -> bool {
       ::CloseHandle(section_);
       section_ = nullptr;
     }
-    if (event_ != nullptr) {
-      ::CloseHandle(event_);
-      event_ = nullptr;
-    }
     return false;
   }
+
+  // Stamp the ring here, at creation, rather than leaving it to whichever
+  // side writes first. The source has to record demand before any frame
+  // exists -- that is the whole point of the heartbeat -- and a reader only
+  // trusts a stamped mapping. Left to the sender, the two would deadlock
+  // politely: no demand until a frame arrives, no frame until demand does.
+  // FrameRingWriter adopts an already-stamped ring, so this is idempotent.
+  (void)FrameRingWriter(std::span<std::byte>(static_cast<std::byte*>(view_), bytes_));
   return true;
 }
 

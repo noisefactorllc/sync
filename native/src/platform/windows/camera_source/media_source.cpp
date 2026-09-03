@@ -212,6 +212,10 @@ void SyncCameraStream::ComposeFrame() {
   if (section_.open()) {
     const FrameRingReader reader(section_.mapping());
     if (reader.valid()) {
+      // Tell the sender something is watching. Without this it cannot
+      // distinguish an open camera from one every consumer has closed, and
+      // goes on fitting 1080p frames into a ring nothing reads.
+      reader.record_demand(camera_clock_us());
       const std::uint64_t sequence = reader.newest_sequence();
       if (sequence != 0 && sequence != last_ring_sequence_) {
         std::uint64_t presentation = 0;
