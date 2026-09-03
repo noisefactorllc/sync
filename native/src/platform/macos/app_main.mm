@@ -159,7 +159,14 @@ std::uint64_t monotonic_milliseconds() noexcept {
     return;
   }
   _cameraState = camera::CameraActivationState::Active;
-  [self restartSync:nil];
+  // The device is published to CoreMediaIO a moment after activation
+  // completes; a helper started in that gap discovers nothing and reports
+  // the camera unavailable until its next restart.
+  __weak SyncAppDelegate* weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    SyncAppDelegate* self = weakSelf;
+    if (self != nil && !self->_quitting) [self restartSync:nil];
+  });
 }
 
 - (void)request:(OSSystemExtensionRequest*)request didFailWithError:(NSError*)error {
