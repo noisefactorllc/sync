@@ -136,6 +136,12 @@ cmake --build build --config Release --target syncd
 ctest --test-dir build --build-config Release --output-on-failure
 ```
 
+The camera's end-to-end test is labelled `sync_camera_e2e` and is the one test
+that needs more than a build: Windows 11 and the media source registered under
+HKLM. Run `syncd --register-camera` from an elevated prompt first, or exclude
+it with `ctest --label-exclude sync_camera_e2e`. Everything else, including the
+media source driven in process, runs on any Windows machine.
+
 MSVC is what CI builds and what the installer ships. The tree also builds and
 passes its tests under MinGW-w64 (GCC), which needs no administrator rights
 and is a practical local setup:

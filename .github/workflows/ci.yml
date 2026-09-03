@@ -148,8 +148,45 @@ jobs:
       - name: Run native tests
         shell: pwsh
         run: |
-          ctest --test-dir build --build-config $env:BUILD_TYPE --output-on-failure
+          # The camera end-to-end test needs a registered media source and a
+          # Windows 11 build, so it is excluded here and run by its own step
+          # below, which sets both up. Everything else -- including the whole
+          # media source driven in process -- runs on any Windows image.
+          ctest --test-dir build --build-config $env:BUILD_TYPE --output-on-failure `
+            --label-exclude sync_camera_e2e
           if ($LASTEXITCODE -ne 0) { throw "ctest failed" }
+
+      # Records what this runner image can host. Never fails the job: an image
+      # that cannot run a virtual camera is a fact worth having in the log,
+      # and the step below decides what to do about it.
+      - name: Report camera capability of this runner image
+        id: camera_capability
+        shell: pwsh
+        run: |
+          & "build/$env:BUILD_TYPE/sync_camera_capability_probe.exe" |
+            Tee-Object -FilePath camera-capability.txt
+          $verdict = $LASTEXITCODE
+          "verdict=$verdict" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Get-Content camera-capability.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          exit 0
+
+      # The gate: the camera does not ship unless this passes somewhere. A
+      # hosted runner is an administrator, so registration needs no prompt.
+      # Exit code 4 means the source is not registered yet, which is expected
+      # on the first run of this step -- registration happens here.
+      - name: Register the camera source and run the end-to-end camera test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "build/$env:BUILD_TYPE/syncd.exe" --register-camera
+          if ($LASTEXITCODE -ne 0) { throw "camera registration failed" }
+          try {
+            ctest --test-dir build --build-config $env:BUILD_TYPE --output-on-failure `
+              --label-regex sync_camera_e2e
+            if ($LASTEXITCODE -ne 0) { throw "virtual camera end-to-end test failed" }
+          } finally {
+            & "build/$env:BUILD_TYPE/syncd.exe" --unregister-camera
+          }
 
       - name: Run browser SDK tests
         run: npm run test:browser
