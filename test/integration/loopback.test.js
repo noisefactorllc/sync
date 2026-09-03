@@ -33,11 +33,12 @@ const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
 // The providers a daemon configures when no --publisher is named. NDI is on
 // both platforms because its send path takes a CPU frame and needs no
 // platform-specific GPU layer; Syphon and Spout are each platform-bound.
-// Naming no publisher selects every provider the platform implements. macOS
-// adds the camera, which rides in a system extension and is unavailable on
-// any machine that has not approved it, CI included.
+// Naming no publisher selects every provider the platform implements. Both
+// platforms now offer the camera -- a system extension on macOS, a Media
+// Foundation virtual camera on Windows -- and it is unavailable on any
+// machine that has not approved or registered it, CI included.
 const DEFAULT_PROVIDER_IDS = process.platform === "win32"
-  ? ["spout", "ndi"]
+  ? ["spout", "ndi", "camera"]
   : ["syphon", "ndi", "camera"];
 
 function withTimeout(promise, description, timeoutMs = TIMEOUT_MS) {

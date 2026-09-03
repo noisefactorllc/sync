@@ -826,6 +826,15 @@ elseif(WIN32)
   target_link_libraries(sync_mf_camera_sink_tests PRIVATE sync_mf_camera_sink)
   add_test(NAME sync_mf_camera_sink_tests COMMAND sync_mf_camera_sink_tests)
 
+  # A tool, not a test: feeds the camera so a genuine application can be
+  # pointed at it. Same role spout_receiver_probe and ndi_receiver_probe play
+  # for their providers.
+  add_executable(sync_camera_feed_probe
+    native/test/windows/camera_feed_probe.cpp
+  )
+  target_compile_features(sync_camera_feed_probe PRIVATE cxx_std_20)
+  target_link_libraries(sync_camera_feed_probe PRIVATE sync_mf_camera_sink)
+
   # Tier 2: the only test that proves the whole path. It needs a Windows 11
   # build (22000+) and the media source registered under HKLM, so it is not
   # part of the default ctest run -- see the sync_camera_e2e label and the
