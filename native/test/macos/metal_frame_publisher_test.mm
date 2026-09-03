@@ -680,7 +680,12 @@ SYNC_TEST(metal_publisher_never_commits_a_consumer_rejected_command_buffer) {
   frame.view.sequence++;
   SYNC_REQUIRE(publisher.publish("reject", frame.view) == PublishResult::Accepted);
   SYNC_REQUIRE(wait_until([&] { return consumer.event.signaledValue == 2; }));
-  SYNC_REQUIRE(consumer.accepted_command_buffer.status == MTLCommandBufferStatusCompleted);
+  // The event is signaled when the GPU reaches the signal command; the
+  // buffer's status becomes Completed a moment later, once the driver has
+  // run its completion bookkeeping. Wait for it rather than read it once.
+  SYNC_REQUIRE(wait_until([&] {
+    return consumer.accepted_command_buffer.status == MTLCommandBufferStatusCompleted;
+  }));
 }
 
 }  // namespace
