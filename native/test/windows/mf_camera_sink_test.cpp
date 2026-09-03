@@ -36,7 +36,7 @@ constexpr wchar_t kTestSection[] = L"Local\\SyncCameraTest.frames";
 constexpr wchar_t kTestEvent[] = L"Local\\SyncCameraTest.frame";
 
 [[nodiscard]] auto test_options() -> MfCameraSink::Options {
-  return {.section = kTestSection, .frame_event = kTestEvent};
+  return {.section = kTestSection, .frame_event = kTestEvent, .create_virtual_camera = false};
 }
 
 // Stands in for the media source, which is the half that creates the section.
@@ -106,11 +106,13 @@ SYNC_TEST(the_build_check_is_not_fooled_by_the_compatibility_shim) {
   SYNC_REQUIRE(windows_supports_virtual_cameras() == (build >= 22000));
 }
 
-SYNC_TEST(a_sink_with_no_source_reports_section_missing) {
-  // No FakeSource in scope, so the section does not exist.
+SYNC_TEST(a_sink_with_no_consumer_is_available_but_has_no_capacity) {
+  // No FakeSource in scope, so no consumer has activated the source and there
+  // is no section. The camera still exists as a device, so the provider is
+  // available; it simply has nowhere to put a frame this instant.
   const MfCameraSink sink(test_options());
-  SYNC_REQUIRE(!sink.available());
-  SYNC_REQUIRE(sink.unavailable_reason() == CameraSinkUnavailableReason::SectionMissing);
+  SYNC_REQUIRE(sink.available());
+  SYNC_REQUIRE(!sink.has_capacity());
 }
 
 SYNC_TEST(a_sink_opens_a_section_the_source_created) {
@@ -167,10 +169,27 @@ SYNC_TEST(a_frame_that_is_not_the_canvas_fails_rather_than_corrupting_the_ring) 
   SYNC_REQUIRE(reader.newest_sequence() == 0);
 }
 
-SYNC_TEST(an_unavailable_sink_refuses_to_submit) {
+SYNC_TEST(submitting_with_no_consumer_is_backpressure_not_failure) {
   MfCameraSink sink(test_options());
-  SYNC_REQUIRE(!sink.available());
-  SYNC_REQUIRE(sink.submit(submission(canvas_filled(1), 1)) == CameraSinkSubmit::Failed);
+  // Nobody is watching, so the frame goes nowhere -- but that is the camera
+  // being idle, not the camera being broken, and Failed would be reported to
+  // the user as an error.
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(1), 1)) == CameraSinkSubmit::Backpressured);
+}
+
+SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
+  MfCameraSink sink(test_options());
+  SYNC_REQUIRE(!sink.has_capacity());
+  // A consumer can open and close the camera many times over one run of the
+  // daemon, so the section is retried per frame rather than once at
+  // construction the way the CoreMediaIO sink discovers its device.
+  const FakeSource source;
+  SYNC_REQUIRE(source.view != nullptr);
+  SYNC_REQUIRE(sink.has_capacity());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x2B), 42)) == CameraSinkSubmit::Accepted);
+
+  const FrameRingReader reader(source.mapping());
+  SYNC_REQUIRE(reader.newest_sequence() == 1);
 }
 
 }  // namespace

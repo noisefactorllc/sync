@@ -34,6 +34,9 @@ class MfCameraSink final : public CameraSink {
     // first place.
     std::wstring section = section_name();
     std::wstring frame_event = frame_event_name();
+    // Tests drive the ring directly and must not register a camera with the
+    // system; production leaves this true.
+    bool create_virtual_camera = true;
   };
 
   MfCameraSink();

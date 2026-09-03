@@ -18,6 +18,8 @@
 #endif
 
 #if defined(_WIN32)
+#include <sync/platform/camera_publisher.hpp>
+#include <sync/platform/mf_camera_sink.hpp>
 #include <sync/platform/pairing_prompt.hpp>
 #include <sync/platform/spout_publisher.hpp>
 #ifndef WIN32_LEAN_AND_MEAN
@@ -175,6 +177,8 @@ int run_with_providers(nfsync::ServerOptions &options,
   nfsync::SpoutFramePublisher spout({
       .library_path = command.spout_library_path,
   });
+  nfsync::camera::MfCameraSink camera_sink;
+  nfsync::camera::CameraFramePublisher camera(camera_sink);
 #endif
   nfsync::NdiFramePublisher ndi({
       .runtime_path = command.ndi_runtime_path,
@@ -217,7 +221,10 @@ int run_with_providers(nfsync::ServerOptions &options,
   nfsync::FramePublisher *const spout_publisher = nullptr;
   const char *const spout_reason = "this build does not implement spout on this platform";
 #endif
-#if defined(__APPLE__)
+// The two implementations differ entirely underneath -- a CoreMediaIO
+// extension against a Media Foundation virtual camera -- but they meet at
+// CameraFramePublisher, so the provider looks the same from here.
+#if defined(__APPLE__) || defined(_WIN32)
   constexpr bool kCameraImplemented = true;
   const bool camera_available = camera.available();
   nfsync::FramePublisher *const camera_publisher = &camera;

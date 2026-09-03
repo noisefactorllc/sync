@@ -180,12 +180,26 @@ SYNC_TEST(camera_unavailability_phrases_are_distinct_and_carry_the_status) {
   }
   SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::DeviceNotFound, 0) ==
                std::string(describe(CameraSinkUnavailableReason::DeviceNotFound)));
+  // The status is an OSStatus on macOS and an HRESULT on Windows. They are
+  // read differently -- a small signed integer against a hex word -- and
+  // labelling a Windows HRESULT "OSStatus" would send a bug report looking up
+  // the wrong number, so the wording follows the platform.
+#if defined(_WIN32)
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::VirtualCameraRefused,
+                                       static_cast<std::int32_t>(0x80070005)) ==
+               std::string(describe(CameraSinkUnavailableReason::VirtualCameraRefused)) +
+                   " (HRESULT 0x80070005)");
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::SectionAccessDenied, -67) ==
+               std::string(describe(CameraSinkUnavailableReason::SectionAccessDenied)) +
+                   " (HRESULT 0xFFFFFFBD)");
+#else
   SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::StreamNotStarted, -67) ==
                std::string(describe(CameraSinkUnavailableReason::StreamNotStarted)) +
                    " (OSStatus -67)");
   SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::QueueNotProvided, 1852797029) ==
                std::string(describe(CameraSinkUnavailableReason::QueueNotProvided)) +
                    " (OSStatus 1852797029)");
+#endif
 }
 
 SYNC_TEST(camera_publisher_is_bounded_in_senders) {

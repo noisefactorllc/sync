@@ -796,7 +796,8 @@ elseif(WIN32)
   )
   target_compile_features(sync_mf_camera_sink PUBLIC cxx_std_20)
   target_include_directories(sync_mf_camera_sink PUBLIC native/include)
-  target_link_libraries(sync_mf_camera_sink PUBLIC sync_camera_frame_ring PRIVATE advapi32)
+  target_link_libraries(sync_mf_camera_sink PUBLIC sync_camera_frame_ring
+    PRIVATE advapi32 mfplat mfsensorgroup mfuuid ole32)
 
   add_executable(sync_mf_camera_sink_tests
     native/test/windows/mf_camera_sink_test.cpp
@@ -993,7 +994,8 @@ elseif(WIN32)
     ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
   )
   target_link_libraries(syncd PRIVATE
-    sync_pairing_prompt sync_spout_publisher user32
+    sync_pairing_prompt sync_spout_publisher
+    sync_camera_publisher sync_mf_camera_sink user32
   )
 
   # Both executables embed the version resource, so both need the icon to

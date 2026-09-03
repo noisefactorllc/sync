@@ -77,7 +77,8 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
   std::string text = describe(reason);
   if (status != 0) {
 #if defined(_WIN32)
-    char buffer[16]{};
+    // " (HRESULT 0x" + 8 hex digits + ")" is 21 characters plus a terminator.
+    char buffer[32]{};
     std::snprintf(buffer, sizeof(buffer), " (HRESULT 0x%08X)", static_cast<unsigned>(status));
     text += buffer;
 #else
