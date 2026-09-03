@@ -747,6 +747,37 @@ elseif(WIN32)
   target_link_libraries(sync_camera_relay_policy_tests PRIVATE sync_camera_relay_policy)
   add_test(NAME sync_camera_relay_policy_tests COMMAND sync_camera_relay_policy_tests)
 
+  # The media source the frame server loads. A COM in-proc server: it owns the
+  # shared ring, reads frames syncd writes into it, and converts them to
+  # whatever the consumer negotiated.
+  add_library(sync_camera_source SHARED
+    native/src/platform/windows/camera_source/dll_main.cpp
+    native/src/platform/windows/camera_source/media_source.cpp
+    native/src/platform/windows/camera_source/section_owner.cpp
+    native/src/platform/windows/camera_source/SyncCamera.def
+  )
+  set_target_properties(sync_camera_source PROPERTIES OUTPUT_NAME SyncCamera)
+  target_compile_features(sync_camera_source PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_source PRIVATE native/include)
+  target_link_libraries(sync_camera_source PRIVATE
+    sync_camera_frame_ring sync_camera_nv12 sync_camera_idle_card sync_camera_relay_policy
+    mfplat mfuuid mf advapi32 ole32)
+
+  add_executable(sync_camera_source_tests
+    native/test/windows/camera_source_inproc_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_source_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_source_tests PRIVATE native/test native/include)
+  target_link_libraries(sync_camera_source_tests PRIVATE
+    sync_camera_frame_ring sync_camera_nv12 mfplat mfuuid ole32)
+  add_dependencies(sync_camera_source_tests sync_camera_source)
+  # The test loads the DLL by name, so it has to sit beside the test binary.
+  add_custom_command(TARGET sync_camera_source_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:sync_camera_source> $<TARGET_FILE_DIR:sync_camera_source_tests>)
+  add_test(NAME sync_camera_source_tests COMMAND sync_camera_source_tests)
+
   # The waiting card. Drawn through WIC and Direct2D onto a plain memory
   # bitmap: no window, no device, so it renders the same inside the frame
   # server as it does under ctest.
