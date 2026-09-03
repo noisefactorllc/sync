@@ -64,6 +64,17 @@ diagnosed, remove it when the fix ships.
   unable to authenticate pairings until it restarts.
 - **The Windows installer is not code-signed** and Windows warns about an
   unrecognised publisher; each release publishes a SHA-256 instead.
+- **The Windows camera needs Windows 11.** `MFCreateVirtualCamera` arrived in
+  build 22000, so on Windows 10 the provider reports "the camera needs
+  Windows 11 (build 22000) or later" and the rest of Sync is unaffected.
+- **Declining the uninstall prompt leaves the camera registered.** Removing
+  the CLSID from HKLM needs the same elevation that added it, and a per-user
+  uninstall is not elevated. The stale key is harmless and the next install
+  reuses it; `syncd --unregister-camera`, run as an administrator, clears it.
+- **Two users signed in at once share one Windows camera.** The media source
+  cannot be told which account to pair with without an administrator-only
+  API, so it accepts frames from whoever is logged in interactively. With
+  fast user switching the most recent sender wins.
 
 ## Providers
 
@@ -78,14 +89,30 @@ they support.
 | Spout | Windows | `SpoutLibrary.dll` | Yes — see [docs/dependencies/spout.md](docs/dependencies/spout.md) |
 | NDI | Windows, macOS | NDI Runtime | No — the SDK licence forbids redistribution; see [docs/dependencies/ndi.md](docs/dependencies/ndi.md) |
 | Camera | macOS | Sync Camera extension, bundled in Sync.app | Yes — activated by Sync.app on first launch, approved once in System Settings |
+| Camera | Windows 11 | `SyncCamera.dll`, bundled with the installer | Yes — enabled once from the tray menu, which asks for administrator rights |
 
-The camera provider publishes a 1920×1080 BGRA stream as the "Sync Camera"
-device, so any app that picks a camera can use it. While no sender is live
-the camera shows a dark card reading "Sync: waiting for Noisedeck" rather
-than a black picture. The extension ships inside
-Sync.app; macOS activates it only for an app under /Applications, and asks the
-user once. Sync.app restarts its helper when activation completes, which is
-when the camera first appears in Noisedeck's provider list.
+The camera provider publishes a 1920×1080 stream, so any app that picks a
+camera can use it. While no sender is live the camera shows a dark card
+reading "Sync: waiting for Noisedeck" rather than a black picture.
+
+On **macOS** it is a CoreMediaIO system extension shipping inside Sync.app,
+appearing as "Sync Camera". macOS activates it only for an app under
+/Applications, and asks the user once. Sync.app restarts its helper when
+activation completes, which is when the camera first appears in Noisedeck's
+provider list.
+
+On **Windows** it is a Media Foundation virtual camera, appearing as "Sync"
+— the pipeline appends "Windows Virtual Camera" to the name itself. It needs
+Windows 11 (build 22000), because `MFCreateVirtualCamera` does not exist
+before it; on Windows 10 the provider reports itself unavailable and says so.
+The media source is a COM server the frame server loads, so its CLSID has to
+live in HKLM, which needs administrator rights once: choose **Enable Sync
+Camera…** from the tray menu and approve the prompt. Sync restarts its helper
+afterwards, for the same reason it does on macOS.
+
+The Windows camera offers NV12 first and RGB32 second, and converts from the
+one BGRA canvas per consumer, so two applications can negotiate different
+formats against the same device.
 
 No provider is ever linked at build time. Each is discovered at run time
 through its documented public entry point, and a provider whose runtime is
