@@ -246,6 +246,30 @@ SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
   }
 }
 
+SYNC_TEST(cli_camera_registration_modes_are_argument_free_and_mutually_exclusive) {
+  const auto register_camera = parse({"--register-camera"});
+  SYNC_REQUIRE(register_camera.ok());
+  SYNC_REQUIRE(register_camera.options.mode == cli::Mode::RegisterCamera);
+
+  const auto unregister_camera = parse({"--unregister-camera"});
+  SYNC_REQUIRE(unregister_camera.ok());
+  SYNC_REQUIRE(unregister_camera.options.mode == cli::Mode::UnregisterCamera);
+
+  // Each one is a whole command. Combining them with each other, with the
+  // pairing management commands, or with any server argument is a usage
+  // error rather than a silent precedence rule.
+  for (const auto &rejected : {
+           parse({"--register-camera", "--unregister-camera"}),
+           parse({"--register-camera", "--register-camera"}),
+           parse({"--register-camera", "--list-pairings"}),
+           parse({"--register-camera", "--port", "53979"}),
+           parse({"--unregister-camera", "--publisher", "camera"}),
+           parse({"--register-camera", "extra"}),
+       }) {
+    SYNC_REQUIRE(!rejected.ok());
+  }
+}
+
 SYNC_TEST(cli_management_modes_are_normalized_mutually_exclusive_and_argument_free) {
   const auto list = parse({"--list-pairings"});
   SYNC_REQUIRE(list.ok());

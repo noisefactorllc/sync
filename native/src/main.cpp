@@ -19,6 +19,7 @@
 
 #if defined(_WIN32)
 #include <sync/platform/camera_publisher.hpp>
+#include <sync/platform/camera_registration.hpp>
 #include <sync/platform/mf_camera_sink.hpp>
 #include <sync/platform/pairing_prompt.hpp>
 #include <sync/platform/spout_publisher.hpp>
@@ -375,6 +376,26 @@ int main(int argc, char** argv) {
         command.mode == nfsync::cli::Mode::RevokeOrigin) {
       return nfsync::cli::run_management(command, std::cout, std::cerr);
     }
+#if defined(_WIN32)
+    // Both run elevated and do nothing else: the tray app raises a UAC prompt
+    // for the first, the uninstaller runs the second.
+    if (command.mode == nfsync::cli::Mode::RegisterCamera) {
+      return nfsync::camera::register_camera_source();
+    }
+    if (command.mode == nfsync::cli::Mode::UnregisterCamera) {
+      return nfsync::camera::unregister_camera_source();
+    }
+#else
+    // The parser accepts these everywhere so one set of CLI tests covers every
+    // platform, the same reason it accepts a publisher this platform cannot
+    // provide. A build with no camera to register says so rather than
+    // pretending to succeed.
+    if (command.mode == nfsync::cli::Mode::RegisterCamera ||
+        command.mode == nfsync::cli::Mode::UnregisterCamera) {
+      std::cerr << "syncd: this build does not implement camera registration on this platform\n";
+      return nfsync::cli::kFailureExit;
+    }
+#endif
 
     nfsync::ServerOptions options;
     options.port = command.port;

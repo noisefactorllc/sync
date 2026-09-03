@@ -791,6 +791,14 @@ elseif(WIN32)
       $<TARGET_FILE:sync_camera_source> $<TARGET_FILE_DIR:sync_camera_registration_tests>)
   add_test(NAME sync_camera_registration_tests COMMAND sync_camera_registration_tests)
 
+  add_library(sync_camera_registration
+    native/src/platform/windows/camera_registration.cpp
+  )
+  target_compile_features(sync_camera_registration PUBLIC cxx_std_20)
+  target_include_directories(sync_camera_registration PUBLIC native/include)
+  target_include_directories(sync_camera_registration PRIVATE native/src/platform/windows)
+  target_link_libraries(sync_camera_registration PRIVATE mfplat mfsensorgroup mfuuid ole32)
+
   add_library(sync_mf_camera_sink
     native/src/platform/windows/mf_camera_sink.cpp
   )
@@ -995,7 +1003,7 @@ elseif(WIN32)
   )
   target_link_libraries(syncd PRIVATE
     sync_pairing_prompt sync_spout_publisher
-    sync_camera_publisher sync_mf_camera_sink user32
+    sync_camera_publisher sync_mf_camera_sink sync_camera_registration user32
   )
 
   # Both executables embed the version resource, so both need the icon to

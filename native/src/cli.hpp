@@ -22,7 +22,18 @@ inline constexpr int kDurabilityUncertainExit = 3;
 // providers than the hub can hold, so the CLI refuses to accept more.
 inline constexpr std::size_t kMaximumPublishers = 4;
 
-enum class Mode { Production, StaticTest, ListPairings, RevokeOrigin };
+// RegisterCamera and UnregisterCamera are whole commands rather than server
+// options: the first is what the tray app runs elevated to put the media
+// source CLSID under HKLM, the second is what the uninstaller runs to take it
+// back out again.
+enum class Mode {
+  Production,
+  StaticTest,
+  ListPairings,
+  RevokeOrigin,
+  RegisterCamera,
+  UnregisterCamera,
+};
 
 // Every publisher this build knows how to name. The parser is deliberately
 // platform-neutral: naming a publisher that this platform cannot provide is

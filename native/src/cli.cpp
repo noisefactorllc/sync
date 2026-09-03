@@ -85,6 +85,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   bool saw_ndi_runtime = false;
   bool saw_list = false;
   bool saw_revoke = false;
+  bool saw_register_camera = false;
+  bool saw_unregister_camera = false;
 
   for (std::size_t index = 0; index < arguments.size(); ++index) {
     const std::string_view argument = arguments[index];
@@ -97,6 +99,16 @@ ParseResult parse(std::span<const std::string_view> arguments) {
     if (argument == "--list-pairings") {
       if (saw_list) return result;
       saw_list = true;
+      continue;
+    }
+    if (argument == "--register-camera") {
+      if (saw_register_camera) return result;
+      saw_register_camera = true;
+      continue;
+    }
+    if (argument == "--unregister-camera") {
+      if (saw_unregister_camera) return result;
+      saw_unregister_camera = true;
       continue;
     }
     if (argument != "--port" && argument != "--test-origin" &&
@@ -155,6 +167,20 @@ ParseResult parse(std::span<const std::string_view> arguments) {
       (saw_spout_library && !options.selects_publisher("spout")) ||
       (saw_ndi_runtime && !options.selects_publisher("ndi"));
 
+  // Each camera command is the whole command line. Combining them with each
+  // other, with pairing management, or with any server argument is a usage
+  // error rather than a silent precedence rule.
+  const bool camera_management = saw_register_camera || saw_unregister_camera;
+  if (camera_management) {
+    if (saw_register_camera == saw_unregister_camera || saw_list || saw_revoke || saw_port ||
+        saw_origin || saw_token || saw_test_receiver || saw_publisher || saw_runtime_path) {
+      return result;
+    }
+    options.mode = saw_register_camera ? Mode::RegisterCamera : Mode::UnregisterCamera;
+    result.valid = true;
+    return result;
+  }
+
   const bool management = saw_list || saw_revoke;
   const bool test_shape = saw_origin || saw_token || saw_test_receiver;
   if (management) {
@@ -194,6 +220,8 @@ void print_usage(std::ostream& error) {
            " (--test-receiver | --publisher <syphon|spout|ndi|camera>...)\n"
            "       syncd --list-pairings\n"
            "       syncd --revoke-origin <origin>\n"
+           "       syncd --register-camera\n"
+           "       syncd --unregister-camera\n"
            "\n"
            "Naming no publisher selects every provider this platform"
            " offers.\n";
