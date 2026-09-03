@@ -1080,7 +1080,11 @@ elseif(WIN32)
       -DependencySearchPath ${SYNC_WINDOWS_DEPENDENCY_PATH}
       -BinaryDir $<TARGET_FILE_DIR:syncd>
     DEPENDS
-      sync_menu syncd
+      # sync_camera_source belongs here for the same reason the other two do:
+      # package-windows.ps1 refuses to stage a bundle without SyncCamera.dll,
+      # so a packaging run that did not build it fails late, inside the script,
+      # rather than simply building what it needs first.
+      sync_menu syncd sync_camera_source
       LICENSE
       packaging/Sync.svg
       packaging/windows/Third-Party-Notices.txt

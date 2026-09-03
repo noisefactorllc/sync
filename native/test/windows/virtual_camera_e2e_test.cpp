@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ using Microsoft::WRL::ComPtr;
 using noisefactor::sync::camera::CameraSinkFrame;
 using noisefactor::sync::camera::CameraSinkSubmit;
 using noisefactor::sync::camera::CameraSinkUnavailableReason;
+using noisefactor::sync::camera::describe_unavailability;
 using noisefactor::sync::camera::kBytesPerPixel;
 using noisefactor::sync::camera::kCanvas;
 using noisefactor::sync::camera::MfCameraSink;
@@ -41,6 +43,21 @@ struct Environment {
 [[nodiscard]] auto environment() -> Environment& {
   static Environment instance;
   return instance;
+}
+
+// Fails with the reason and HRESULT rather than a bare "sink.available()".
+// This test only ever runs where a camera is expected to work, so when it
+// does fail the single most useful thing it can do is say why -- the
+// difference between an unregistered source, a refused MFCreateVirtualCamera
+// and a version mismatch is the difference between three different fixes.
+void RequireAvailable(const MfCameraSink& sink) {
+  if (sink.available()) return;
+  std::printf("camera unavailable: %s\n",
+              describe_unavailability(sink.unavailable_reason(),
+                                      sink.unavailable_status())
+                  .c_str());
+  std::fflush(stdout);
+  SYNC_REQUIRE(sink.available());
 }
 
 // Finds the Sync camera the way any ordinary application would: enumerate the
@@ -125,8 +142,7 @@ SYNC_TEST(the_sync_camera_is_created_and_enumerable_as_a_system_camera) {
   // the whole binary.
   (void)environment();
   const MfCameraSink sink;
-  SYNC_REQUIRE(sink.unavailable_reason() != CameraSinkUnavailableReason::SourceNotRegistered);
-  SYNC_REQUIRE(sink.available());
+  RequireAvailable(sink);
 
   const auto source = ActivateSyncCamera();
   // The whole point: an application that never heard of Sync finds it by
@@ -140,7 +156,7 @@ SYNC_TEST(the_camera_shows_the_waiting_card_with_no_sender_and_the_frame_with_on
   // the whole binary.
   (void)environment();
   MfCameraSink sink;
-  SYNC_REQUIRE(sink.available());
+  RequireAvailable(sink);
 
   const auto source = ActivateSyncCamera();
   SYNC_REQUIRE(source);
