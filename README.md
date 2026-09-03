@@ -31,6 +31,40 @@ Both companions are previews and are not ready for general use.
 Reverse-direction native sources and automatic updates are not part of the
 current public implementation.
 
+## Known issues
+
+Things that stop Sync from working today, with the workaround where one
+exists. Please keep this list current: add an entry when a report is
+diagnosed, remove it when the fix ships.
+
+- **Content blockers block the loopback health request.** uBlock Origin,
+  uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
+  stop public pages from reaching `127.0.0.1`; Chrome logs
+  `net::ERR_BLOCKED_BY_CLIENT` and Noisedeck reports the companion absent.
+  Workaround: set the blocker to no filtering on the Noisedeck origin.
+- **Browsers require a loopback permission first.** Chrome 145+ and Firefox
+  150+ gate `127.0.0.1` behind the `loopback-network` permission. The passive
+  check stops at "Needs attention"; only Connect Sync can raise the browser's
+  prompt. Noisedeck Standalone (Electron) grants it by default.
+- **Sync Camera refuses the helper on 0.2.31 and earlier.** The CoreMediaIO
+  sink client passed a NULL queue-altered proc, so an approved extension still
+  reported "did not accept a connection". Fixed in 18e81ea; ships with the
+  next preview release.
+- **Copy Diagnostics reports "Sync 0.2.0" on 0.2.31 and earlier.** The menu
+  bar and tray apps compiled a fallback version string. Fixed in 858a6fd.
+- **The macOS approval row can lag a day behind the request.** System
+  Settings > Privacy & Security > Security shows "System software from
+  application "Sync" was blocked from loading" only for a live request; if
+  it is missing, quit Sync, relaunch it from Applications, and reopen
+  Settings.
+- **The native pairing prompt defaults to Deny.** Pressing Return in the
+  companion's pairing dialog denies the origin.
+- **`syncd --list-pairings` and `--revoke-origin` must not run beside the
+  app.** They open the pairing store directly and leave the running daemon
+  unable to authenticate pairings until it restarts.
+- **The Windows installer is not code-signed** and Windows warns about an
+  unrecognised publisher; each release publishes a SHA-256 instead.
+
 ## Providers
 
 Sync publishes through every provider that is available on the running
