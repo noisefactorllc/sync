@@ -1,9 +1,5 @@
 #pragma once
 
-#if !defined(__APPLE__)
-#error "camera_frame_fitter.hpp is available only on Apple platforms"
-#endif
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -37,7 +33,8 @@ struct CameraPlacement {
 struct CameraFitScratch {
   // Permuted, premultiplied, opaque BGRA copy of the source at source size.
   std::vector<std::byte> swapped;
-  // vImage's temporary buffer for the scale, sized by vImage itself.
+  // Scratch for the scale step. Sized by the implementation; unused when the
+  // frame already matches the canvas.
   std::vector<std::byte> scale_temp;
 };
 

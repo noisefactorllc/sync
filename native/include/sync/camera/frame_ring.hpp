@@ -1,0 +1,96 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+
+#include <sync/platform/camera_identity.hpp>
+
+namespace noisefactor::sync::camera {
+
+// Three slots: one being written, one being read, one spare. Matches the queue
+// depth CmioCameraSink uses on macOS so both platforms drop frames at the same
+// point under load. Three also gives a reader two whole frame periods to
+// finish copying before the writer can come back around to that slot.
+inline constexpr std::uint32_t kFrameRingSlots = 3;
+inline constexpr std::uint32_t kFrameRingMagic = 0x53594E43;  // "SYNC"
+inline constexpr std::uint32_t kFrameRingVersion = 1;
+
+// One slot's payload: the full canvas as top-down BGRA.
+inline constexpr std::size_t kFrameRingSlotBytes =
+    static_cast<std::size_t>(kCanvas.width) * kCanvas.height * kBytesPerPixel;
+
+// A seqlock per slot. The writer stores an odd sequence before touching the
+// payload and the next even one after, so a reader that sees an odd sequence,
+// or a different one before and after its copy, knows it read a torn frame.
+//
+// These atomics live in shared memory written by two processes. uint64 is
+// always lock-free on x64, so this is the ordinary cross-process seqlock
+// rather than std::atomic used outside its contract.
+struct FrameRingSlot {
+  std::atomic<std::uint64_t> sequence;
+  std::uint64_t presentation_time_us;
+  std::uint32_t width;
+  std::uint32_t height;
+  std::uint32_t row_stride;
+  std::uint32_t reserved;
+};
+
+struct FrameRingHeader {
+  std::uint32_t magic;
+  std::uint32_t version;
+  std::uint32_t slots;
+  std::uint32_t slot_bytes;
+  std::atomic<std::uint64_t> newest;  // monotonic count of published frames
+  FrameRingSlot slot[kFrameRingSlots];
+};
+
+[[nodiscard]] constexpr auto frame_ring_bytes() noexcept -> std::size_t {
+  return sizeof(FrameRingHeader) + kFrameRingSlotBytes * kFrameRingSlots;
+}
+
+// Kernel object names. Both live in the Global namespace because the media
+// source runs in session 0 and syncd in the user's session. Deliberately not
+// keyed by user: the media source cannot be told which account to pair with
+// without an administrator-only API, so it grants INTERACTIVE on the section
+// instead and whoever is logged in feeds the camera.
+[[nodiscard]] auto section_name() -> std::wstring;
+[[nodiscard]] auto frame_event_name() -> std::wstring;
+
+// Writes frames into a mapped ring. Does not own the mapping.
+class FrameRingWriter {
+ public:
+  explicit FrameRingWriter(std::span<std::byte> mapping) noexcept;
+  [[nodiscard]] auto valid() const noexcept -> bool;
+  [[nodiscard]] auto has_capacity() const noexcept -> bool;
+  // Copies bgra into the next slot and publishes it. False when the mapping is
+  // invalid or the payload does not match the canvas.
+  [[nodiscard]] auto write(std::span<const std::byte> bgra, std::size_t row_stride,
+                           std::uint64_t presentation_time_us) noexcept -> bool;
+
+ private:
+  FrameRingHeader* header_ = nullptr;
+  std::byte* payload_ = nullptr;
+};
+
+// Reads the newest complete frame. Does not own the mapping.
+class FrameRingReader {
+ public:
+  explicit FrameRingReader(std::span<const std::byte> mapping) noexcept;
+  [[nodiscard]] auto valid() const noexcept -> bool;
+  // Monotonic publish count, so a caller can tell a new frame from a repeat.
+  [[nodiscard]] auto newest_sequence() const noexcept -> std::uint64_t;
+  // Copies the newest complete frame into out. False when nothing has been
+  // published, when out is too small, or when the frame tore under a
+  // concurrent write and did not settle within a bounded number of retries.
+  [[nodiscard]] auto read(std::span<std::byte> out, std::size_t out_stride,
+                          std::uint64_t& presentation_time_us) const noexcept -> bool;
+
+ private:
+  const FrameRingHeader* header_ = nullptr;
+  const std::byte* payload_ = nullptr;
+};
+
+}  // namespace noisefactor::sync::camera

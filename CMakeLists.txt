@@ -173,6 +173,74 @@ add_library(sync_camera_activation
 target_compile_features(sync_camera_activation PUBLIC cxx_std_20)
 target_include_directories(sync_camera_activation PUBLIC native/include)
 
+# The relay policy decides when the camera shows its waiting card instead of a
+# live frame. Pure state machine, no platform calls: the macOS system
+# extension and the Windows media source both run it, so it is built once.
+add_library(sync_camera_relay_policy
+  native/src/camera/relay_policy.cpp
+)
+target_compile_features(sync_camera_relay_policy PUBLIC cxx_std_20)
+target_include_directories(sync_camera_relay_policy PUBLIC native/include)
+
+# The fitter scales a sender frame onto the camera canvas and permutes it to
+# BGRA. macOS does it through vImage in the .mm; every other platform uses the
+# portable one-pass .cpp. The target is declared here so both branches share
+# it, and the Apple-only frameworks are attached inside the APPLE branch
+# below, which is where find_library has run.
+if(APPLE)
+  set(SYNC_CAMERA_FITTER_SOURCE native/src/platform/macos/camera_frame_fitter.mm)
+else()
+  set(SYNC_CAMERA_FITTER_SOURCE native/src/camera/frame_fitter.cpp)
+endif()
+add_library(sync_camera_fitter ${SYNC_CAMERA_FITTER_SOURCE})
+target_compile_features(sync_camera_fitter PUBLIC cxx_std_20)
+target_include_directories(sync_camera_fitter PUBLIC native/include)
+target_link_libraries(sync_camera_fitter PUBLIC sync_protocol)
+
+add_library(sync_camera_publisher
+  native/src/camera/camera_publisher.cpp
+)
+target_compile_features(sync_camera_publisher PUBLIC cxx_std_20)
+target_include_directories(sync_camera_publisher PUBLIC native/include)
+target_link_libraries(sync_camera_publisher PUBLIC sync_protocol sync_camera_fitter)
+
+# The canvas is BGRA, but most Media Foundation consumers ask for NV12. The
+# conversion has no platform dependency, so it is built and tested everywhere
+# rather than only where a camera exists.
+add_library(sync_camera_nv12
+  native/src/camera/nv12.cpp
+)
+target_compile_features(sync_camera_nv12 PUBLIC cxx_std_20)
+target_include_directories(sync_camera_nv12 PUBLIC native/include)
+
+add_executable(sync_camera_nv12_tests
+  native/test/camera/nv12_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_camera_nv12_tests PRIVATE cxx_std_20)
+target_include_directories(sync_camera_nv12_tests PRIVATE native/test)
+target_link_libraries(sync_camera_nv12_tests PRIVATE sync_camera_nv12)
+add_test(NAME sync_camera_nv12_tests COMMAND sync_camera_nv12_tests)
+
+# The shared ring is the transport CoreMediaIO provides for free on macOS: the
+# media source in session 0 creates it, syncd opens it. Layout and naming live
+# here so both halves agree by construction, and the logic is testable with no
+# camera anywhere near it.
+add_library(sync_camera_frame_ring
+  native/src/camera/frame_ring.cpp
+)
+target_compile_features(sync_camera_frame_ring PUBLIC cxx_std_20)
+target_include_directories(sync_camera_frame_ring PUBLIC native/include)
+
+add_executable(sync_camera_frame_ring_tests
+  native/test/camera/frame_ring_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_camera_frame_ring_tests PRIVATE cxx_std_20)
+target_include_directories(sync_camera_frame_ring_tests PRIVATE native/test)
+target_link_libraries(sync_camera_frame_ring_tests PRIVATE sync_camera_frame_ring)
+add_test(NAME sync_camera_frame_ring_tests COMMAND sync_camera_frame_ring_tests)
+
 add_library(sync_companion_model
   native/src/companion_management.cpp
   native/src/companion_model.cpp
@@ -434,17 +502,14 @@ if(APPLE)
 
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
 
-  add_library(sync_camera_fitter
-    native/src/platform/macos/camera_frame_fitter.mm
-  )
-  target_compile_features(sync_camera_fitter PUBLIC cxx_std_20)
+  # sync_camera_fitter is declared above, next to the rest of the portable
+  # camera core; on Apple its source is the vImage .mm, which needs ARC and
+  # these two frameworks.
   set_target_properties(sync_camera_fitter PROPERTIES OBJCXX_STANDARD 20)
-  target_include_directories(sync_camera_fitter PUBLIC native/include)
   target_compile_options(sync_camera_fitter PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_camera_fitter
-    PUBLIC sync_protocol
     PRIVATE ${ACCELERATE_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
   )
 
@@ -463,18 +528,11 @@ if(APPLE)
     PRIVATE ${COREGRAPHICS_FRAMEWORK} ${CORETEXT_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
   )
 
-  add_library(sync_camera_publisher
-    native/src/platform/macos/camera_publisher.cpp
-  )
-  target_compile_features(sync_camera_publisher PUBLIC cxx_std_20)
-  target_include_directories(sync_camera_publisher PUBLIC native/include)
-  target_link_libraries(sync_camera_publisher PUBLIC sync_protocol sync_camera_fitter)
-
   add_executable(sync_camera_tests
     native/test/macos/camera_frame_fitter_test.mm
     native/test/macos/camera_idle_card_test.mm
-    native/test/macos/camera_publisher_test.cpp
-    native/test/macos/camera_relay_policy_test.cpp
+    native/test/camera/camera_publisher_test.cpp
+    native/test/camera/relay_policy_test.cpp
     native/test/test_main.cpp
   )
   target_compile_features(sync_camera_tests PRIVATE cxx_std_20)
@@ -523,12 +581,6 @@ if(APPLE)
     PRIVATE sync_cmio_camera_sink ${FOUNDATION_FRAMEWORK}
   )
   add_test(NAME sync_cmio_camera_sink_tests COMMAND sync_cmio_camera_sink_tests)
-
-  add_library(sync_camera_relay_policy
-    native/src/platform/macos/camera_extension/relay_policy.cpp
-  )
-  target_compile_features(sync_camera_relay_policy PUBLIC cxx_std_20)
-  target_include_directories(sync_camera_relay_policy PUBLIC native/include)
 
   configure_file(
     packaging/macos/SyncCamera-Info.plist.in
@@ -685,6 +737,26 @@ elseif(WIN32)
   target_include_directories(sync_spout_publisher_tests PRIVATE native/test)
   target_link_libraries(sync_spout_publisher_tests PRIVATE sync_spout_publisher)
   add_test(NAME sync_spout_publisher_tests COMMAND sync_spout_publisher_tests)
+
+  add_executable(sync_camera_relay_policy_tests
+    native/test/camera/relay_policy_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_relay_policy_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_relay_policy_tests PRIVATE native/test)
+  target_link_libraries(sync_camera_relay_policy_tests PRIVATE sync_camera_relay_policy)
+  add_test(NAME sync_camera_relay_policy_tests COMMAND sync_camera_relay_policy_tests)
+
+  add_executable(sync_camera_fitter_tests
+    native/test/camera/frame_fitter_test.cpp
+    native/test/camera/camera_publisher_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_fitter_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_fitter_tests PRIVATE native/test)
+  target_link_libraries(sync_camera_fitter_tests PRIVATE
+    sync_camera_publisher sync_camera_fitter)
+  add_test(NAME sync_camera_fitter_tests COMMAND sync_camera_fitter_tests)
 
   add_library(sync_pairing_prompt
     native/src/platform/windows/pairing_prompt.cpp
