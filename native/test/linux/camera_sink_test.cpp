@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +24,16 @@
 namespace {
 
 namespace camera = noisefactor::sync::camera;
+
+std::atomic<bool> wall_clock_enabled{true};
+
+std::uint64_t controlled_clock_ms() noexcept {
+  if (!wall_clock_enabled.load(std::memory_order_relaxed)) return 0;
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 class DeviceOps final : public camera::LinuxCameraDeviceOps {
  public:
@@ -213,16 +224,19 @@ SYNC_TEST(linux_camera_sink_maps_initialization_failures_and_closes_once) {
 SYNC_TEST(linux_camera_sink_keeps_only_the_newest_complete_queued_frame) {
   DeviceOps operations;
   operations.hold_first = true;
+  wall_clock_enabled.store(false, std::memory_order_relaxed);
   noisefactor::sync::DaemonMetrics metrics;
   const auto a = frame(std::byte{0x10});
   const auto b = frame(std::byte{0x80});
   const auto c = frame(std::byte{0xf0});
-  camera::LinuxCameraSink sink(
-      {.device_operations = &operations, .metrics = &metrics});
+  camera::LinuxCameraSink sink({.device_operations = &operations,
+                                .metrics = &metrics,
+                                .clock_ms = controlled_clock_ms});
   SYNC_REQUIRE(sink.submit(sink_frame(a)) == camera::CameraSinkSubmit::Accepted);
   SYNC_REQUIRE(operations.wait_for_first());
   SYNC_REQUIRE(sink.submit(sink_frame(b)) == camera::CameraSinkSubmit::Accepted);
   SYNC_REQUIRE(sink.submit(sink_frame(c)) == camera::CameraSinkSubmit::Accepted);
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
   operations.release();
   SYNC_REQUIRE(operations.wait_for_writes(2));
   const auto snapshot = metrics.snapshot();
@@ -235,6 +249,8 @@ SYNC_TEST(linux_camera_sink_keeps_only_the_newest_complete_queued_frame) {
 
 SYNC_TEST(linux_camera_sink_isolates_backpressure_and_recovers_device_loss) {
   DeviceOps operations;
+  operations.hold_first = true;
+  wall_clock_enabled.store(false, std::memory_order_relaxed);
   const auto size = static_cast<std::ptrdiff_t>(camera::nv12_size_bytes(
       camera::kCanvas.width, camera::kCanvas.height, camera::kCanvas.width));
   operations.scripted = {{-1, EAGAIN}, {-1, ENODEV}, {size, 0}};
@@ -244,11 +260,14 @@ SYNC_TEST(linux_camera_sink_isolates_backpressure_and_recovers_device_loss) {
   camera::LinuxCameraSink sink(
       {.device_operations = &operations,
        .metrics = &metrics,
+       .clock_ms = controlled_clock_ms,
        .health_changed = HealthObserver::changed,
        .health_context = &health});
   SYNC_REQUIRE(sink.submit(sink_frame(bytes)) == camera::CameraSinkSubmit::Accepted);
-  SYNC_REQUIRE(operations.wait_for_writes(1));
+  SYNC_REQUIRE(operations.wait_for_first());
   SYNC_REQUIRE(sink.submit(sink_frame(bytes)) == camera::CameraSinkSubmit::Accepted);
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+  operations.release();
   SYNC_REQUIRE(operations.wait_for_writes(2));
   SYNC_REQUIRE(health.wait_for_recovery());
   SYNC_REQUIRE(sink.healthy());
