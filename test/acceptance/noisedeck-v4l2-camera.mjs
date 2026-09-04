@@ -112,6 +112,32 @@ function sleep(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds))
 }
 
+export async function settleCleanup(label, cleanup, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000
+  const warn = options.warn ?? console.warn
+  let timer
+  try {
+    const outcome = await Promise.race([
+      Promise.resolve().then(cleanup).then(
+        () => ({ status: 'completed' }),
+        error => ({ status: 'failed', error }),
+      ),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve({ status: 'timed-out' }), timeoutMs)
+      }),
+    ])
+    if (outcome.status === 'completed') return true
+    if (outcome.status === 'timed-out') {
+      warn(`acceptance cleanup timed out: ${label} (${timeoutMs}ms)`)
+    } else {
+      warn(`acceptance cleanup failed: ${label}: ${outcome.error.message}`)
+    }
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export function pairingCooldownDelayMs() {
   return 31_000
 }
@@ -547,19 +573,25 @@ export async function runAcceptance() {
       `${JSON.stringify(redactSecrets(evidence), null, 2)}\n`, { mode: 0o600 }).catch(() => {})
     throw error
   } finally {
-    await contextA?.close().catch(() => {})
-    await contextB?.close().catch(() => {})
-    await new Promise(resolve => server.close(resolve))
-    await rm(profiles, { recursive: true, force: true })
+    await Promise.all([
+      settleCleanup('browser context A', () => contextA?.close()),
+      settleCleanup('browser context B', () => contextB?.close()),
+    ])
+    await settleCleanup('local acceptance server', () => new Promise(
+      (resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+    await settleCleanup('browser profiles', () =>
+      rm(profiles, { recursive: true, force: true }))
   }
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   runAcceptance().then(value => {
-    process.stdout.write(`${JSON.stringify({ passed: true, artifacts: value.artifacts })}\n`)
+    process.stdout.write(
+      `${JSON.stringify({ passed: true, artifacts: value.artifacts })}\n`,
+      () => process.exit(0),
+    )
   }).catch(error => {
-    process.stderr.write(`${error.stack ?? error}\n`)
-    process.exitCode = 1
+    process.stderr.write(`${error.stack ?? error}\n`, () => process.exit(1))
   })
 }

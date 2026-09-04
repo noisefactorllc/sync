@@ -11,6 +11,7 @@ import {
   liveReceiverPlan,
   liveSoakProgress,
   redactSecrets,
+  settleCleanup,
   validateAcceptanceEnvironment,
 } from './noisedeck-v4l2-camera.mjs'
 
@@ -157,4 +158,20 @@ test('artifact redaction removes token-shaped values and keys', () => {
   assert.equal(JSON.stringify(redacted).includes(secret), false)
   assert.deepEqual(redacted.token, '[redacted]')
   assert.deepEqual(redacted.sourceHashes, [screenshotHash])
+})
+
+test('post-acceptance cleanup cannot hang the certification process', async () => {
+  const warnings = []
+  const startedAt = Date.now()
+  const completed = await settleCleanup('browser context',
+    () => new Promise(() => {}), {
+      timeoutMs: 20,
+      warn: message => warnings.push(message),
+    })
+
+  assert.equal(completed, false)
+  assert.ok(Date.now() - startedAt < 1_000)
+  assert.deepEqual(warnings, [
+    'acceptance cleanup timed out: browser context (20ms)',
+  ])
 })
