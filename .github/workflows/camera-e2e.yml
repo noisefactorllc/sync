@@ -49,11 +49,35 @@ on:
   workflow_dispatch:
 
 # One camera, one machine: two runs registering different builds of the media
-# source at once would each invalidate the other. Never cancel a run in
-# progress -- the restore step below is what puts the host back.
+# source at once would each invalidate the other.
+#
+# Superseded runs are cancelled. This gate answers "is the tip of main good",
+# and main is linear, so testing the tip subsumes every commit under it --
+# a superseded run can only tell you something the run that replaced it will
+# also tell you. What cancelling buys is that the host is never occupied by an
+# obsolete build: when the runner has been away (asleep, logged out, killed),
+# work does not stack up behind a commit nobody is waiting on any more.
+#
+# The cost is that a superseded commit shows `cancelled` rather than a verdict,
+# so bisecting a camera regression across a burst of pushes means dispatching
+# the gate at a specific SHA by hand.
+#
+# The host stays clean across a cancellation for two reasons, one documented
+# and one measured. The restore step below is `always()`, which GitHub runs on
+# cancellation as well as on failure. And the window it would have to be
+# cancelled inside is tiny: registration through restore is about five seconds,
+# and three deliberate attempts to cancel a run inside it -- polling every two
+# seconds and firing the moment the register step reported success -- all
+# landed after the job had already finished, because cancel propagation to a
+# self-hosted runner is slower than that. A cancel in practice arrives either
+# before the machine's CLSID has been touched or after it has been put back.
+#
+# If a cancellation ever does strand it, the symptom is the desktop's own Sync
+# camera showing nothing, and the fix is one command -- see the troubleshooting
+# section of office-lan.md in Scaffold.
 concurrency:
   group: sync-camera-e2e
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
