@@ -7,6 +7,35 @@ function parseResidentKb(text) {
   return Number(text.trim());
 }
 
+// Windows has no `ps` and no `vmmap`, so a soak there needs its own pair of
+// readings. PowerShell exposes both halves of the same distinction macOS draws:
+//
+//   WorkingSet64        pages resident right now, shared pages included — the
+//                       analogue of RSS, and just as misleading for a leak hunt
+//   PrivateMemorySize64 committed bytes this process alone owns — the analogue
+//                       of physical footprint, and the number a leak shows up in
+//
+// Both print bytes, so they are converted here rather than at the call sites.
+// `-NoProfile` matters: a user profile that prints anything would land in
+// stdout and corrupt the parse.
+const WINDOWS_RESIDENT_EXPR = '(Get-Process -Id %PID%).WorkingSet64';
+const WINDOWS_PRIVATE_EXPR = '(Get-Process -Id %PID%).PrivateMemorySize64';
+
+// Exported so the exact argv is under test. Every other test here injects the
+// `run` seam and therefore never reaches a real command — which means the seam
+// tests would pass whether or not this command is correct. Windows also ships
+// an MSYS `ps` via Git for Windows that EXISTS and rejects these flags, so
+// "does ps run?" is not a usable platform probe either; the branch is on
+// process.platform and the command itself is verified here.
+export const powershellArgs = (expression, pid) =>
+  ['-NoProfile', '-NonInteractive', '-Command', expression.replace('%PID%', String(pid))];
+
+function parseWindowsBytesToKb(text) {
+  const bytes = Number(String(text).trim());
+  if (!Number.isFinite(bytes) || bytes < 0) return NaN;
+  return Math.round(bytes / 1024);
+}
+
 function defaultPsRun(pid) {
   return execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], { encoding: 'utf8' });
 }
@@ -16,16 +45,31 @@ function defaultPsRunAsync(pid) {
     .then((result) => result.stdout);
 }
 
-export function residentKb(pid, { run = defaultPsRun } = {}) {
-  return parseResidentKb(run(pid));
+function defaultWindowsRun(expression) {
+  return (pid) => execFileSync('powershell.exe', powershellArgs(expression, pid), { encoding: 'utf8' });
+}
+
+function defaultWindowsRunAsync(expression) {
+  return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), { encoding: 'utf8' })
+    .then((result) => result.stdout);
+}
+
+export function residentKb(pid, { run, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    return parseWindowsBytesToKb((run ?? defaultWindowsRun(WINDOWS_RESIDENT_EXPR))(pid));
+  }
+  return parseResidentKb((run ?? defaultPsRun)(pid));
 }
 
 // Non-blocking twin of residentKb, built on execFile's callback/promise form
 // rather than execFileSync. Same command, same parsing, same number — only
 // the call no longer blocks the event loop. See footprintKbAsync for why
 // this matters.
-export async function residentKbAsync(pid, { run = defaultPsRunAsync } = {}) {
-  return parseResidentKb(await run(pid));
+export async function residentKbAsync(pid, { run, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    return parseWindowsBytesToKb(await (run ?? defaultWindowsRunAsync(WINDOWS_RESIDENT_EXPR))(pid));
+  }
+  return parseResidentKb(await (run ?? defaultPsRunAsync)(pid));
 }
 
 function parseFootprintKb(text) {
@@ -47,8 +91,26 @@ function defaultVmmapRunAsync(pid) {
 // vmmap is synchronous and takes a few hundred milliseconds, which shows in
 // the table as a small dip in frames sent around each sample. Without the
 // developer tools it is absent, and RSS stands in.
-export function footprintKb(pid, { run = defaultVmmapRun, fallback = residentKb, platform = process.platform } = {}) {
+export function footprintKb(pid, { run, fallback = residentKb, platform = process.platform } = {}) {
+  // Windows draws the same distinction macOS does, under different names:
+  // private bytes exclude shared pages the way physical footprint does, so a
+  // leak shows there while WorkingSet64 (the RSS analogue) stays noisy. Falling
+  // through to `fallback` here would have silently reported the WRONG one of
+  // the two numbers on Windows, which is exactly the kind of present-but-
+  // meaningless reading a soak must never produce.
+  if (platform === 'win32') {
+    // Guarded exactly as the vmmap read below is. Unguarded, a PowerShell
+    // failure propagates out of a function whose whole contract is "degrade to
+    // the coarser reading" — and on Windows the fallback throws too, because
+    // Git for Windows' MSYS `ps` exists and rejects `-o rss=`.
+    let reading;
+    try {
+      reading = parseWindowsBytesToKb((run ?? defaultWindowsRun(WINDOWS_PRIVATE_EXPR))(pid));
+    } catch { reading = NaN; }
+    return Number.isFinite(reading) ? reading : fallback(pid, { platform });
+  }
   if (platform !== 'darwin') return fallback(pid);
+  run = run ?? defaultVmmapRun;
   let text;
   try {
     text = run(pid);
@@ -69,8 +131,17 @@ export function footprintKb(pid, { run = defaultVmmapRun, fallback = residentKb,
 // and manufacturing the sampling gaps a soak analyzer would otherwise blame
 // on the system under test. This does the identical work — same command,
 // same darwin-vs-fallback branch, same parsing — without blocking.
-export async function footprintKbAsync(pid, { run = defaultVmmapRunAsync, fallback = residentKbAsync, platform = process.platform } = {}) {
+export async function footprintKbAsync(pid, { run, fallback = residentKbAsync, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    let reading;
+    try {
+      reading = parseWindowsBytesToKb(
+        await (run ?? defaultWindowsRunAsync(WINDOWS_PRIVATE_EXPR))(pid));
+    } catch { reading = NaN; }
+    return Number.isFinite(reading) ? reading : fallback(pid, { platform });
+  }
   if (platform !== 'darwin') return fallback(pid);
+  run = run ?? defaultVmmapRunAsync;
   let text;
   try {
     text = await run(pid);
@@ -117,6 +188,19 @@ export function parseLeaksReport(raw) {
   return { leaks: Number(match[1]), bytes: Number(match[2]), raw };
 }
 
-export function runLeaks(pid, { run = spawnLeaks } = {}) {
+// `leaks` is a macOS developer tool with no Windows equivalent. Returning the
+// same {leaks: null} shape the restricted-process case already returns keeps
+// one contract: callers treat a null count as "no leak evidence", which the
+// analyzer reports as SKIPPED — declared out of scope up front — rather than as
+// a clean scan. Shelling out to a missing binary and letting it throw would
+// have surfaced as a run failure instead of an honest absence.
+export function runLeaks(pid, { run = spawnLeaks, platform = process.platform } = {}) {
+  if (platform !== 'darwin') {
+    return {
+      leaks: null,
+      bytes: null,
+      raw: `unreachable-block scanning is macOS-only; no equivalent on ${platform}`,
+    };
+  }
   return parseLeaksReport(run(pid));
 }

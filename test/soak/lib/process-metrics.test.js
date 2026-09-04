@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseLeaksReport, runLeaks, captureCombined,
-  residentKb, residentKbAsync, footprintKb, footprintKbAsync } from './process-metrics.mjs';
+import {
+  captureCombined, footprintKb, footprintKbAsync, parseLeaksReport, powershellArgs, residentKb, residentKbAsync, runLeaks,
+} from './process-metrics.mjs';
 
 // On a host where the daemon isn't debuggable, real `leaks` splits its
 // output across two streams: the restriction notice on stderr, and a
@@ -206,4 +207,117 @@ test('footprintKbAsync falls back when vmmap output has no summary line', async 
     fallback: async () => 555,
   });
   assert.equal(result, 555);
+});
+
+// --- Windows -------------------------------------------------------------
+//
+// Windows has neither `ps` nor `vmmap`. It does expose both halves of the same
+// distinction macOS draws, so a soak there reads the leak-relevant number
+// rather than the noisy one.
+
+test('residentKb reads WorkingSet64 on Windows and converts bytes to KiB', () => {
+  const seen = [];
+  const value = residentKb(4242, { platform: 'win32', run: (pid) => { seen.push(pid); return '  268435456 \n'; } });
+  assert.equal(value, 262144);
+  assert.deepEqual(seen, [4242]);
+});
+
+// The whole point of the split: private bytes exclude shared pages the way
+// physical footprint does, so a leak shows there while the working set stays
+// noisy. Reporting the working set as "footprint" would be a present-but-
+// meaningless number, which is the failure mode this harness keeps designing
+// against.
+test('footprintKb reads private bytes on Windows, not the working set', () => {
+  const value = footprintKb(7, { platform: 'win32', run: () => '104857600' });
+  assert.equal(value, 102400);
+});
+
+test('footprintKb falls back to the resident reading when Windows gives no usable number', () => {
+  const value = footprintKb(7, {
+    platform: 'win32',
+    run: () => 'Get-Process : Cannot find a process with the process identifier 7.',
+    fallback: () => 999,
+  });
+  assert.equal(value, 999);
+});
+
+test('residentKbAsync works the same way on Windows', async () => {
+  const value = await residentKbAsync(9, { platform: 'win32', run: async () => '2048' });
+  assert.equal(value, 2);
+});
+
+test('footprintKbAsync reads private bytes on Windows', async () => {
+  const value = await footprintKbAsync(9, { platform: 'win32', run: async () => '1048576' });
+  assert.equal(value, 1024);
+});
+
+// A missing `leaks` binary must read as declared-absent evidence, never as a
+// clean scan and never as a crashed run.
+test('runLeaks reports no evidence on non-darwin instead of shelling out', () => {
+  let spawned = false;
+  const report = runLeaks(1, { platform: 'win32', run: () => { spawned = true; return 'x'; } });
+  assert.equal(spawned, false);
+  assert.equal(report.leaks, null);
+  assert.equal(report.bytes, null);
+  assert.match(report.raw, /macOS-only/);
+});
+
+// macOS behaviour must be untouched by all of the above.
+test('darwin still uses ps and vmmap', () => {
+  assert.equal(residentKb(1, { platform: 'darwin', run: () => ' 4096 ' }), 4096);
+  assert.equal(
+    footprintKb(1, { platform: 'darwin', run: () => 'Physical footprint:  12.5M' }),
+    12800);
+});
+
+// Every other test in this file injects the `run` seam, so none of them ever
+// reaches a real command — they would pass whether or not the command is
+// correct. This is the one thing that verifies the argv itself.
+test('the PowerShell command asks for the right property and pid', () => {
+  const args = powershellArgs('(Get-Process -Id %PID%).PrivateMemorySize64', 4242);
+  assert.deepEqual(args, [
+    '-NoProfile', '-NonInteractive', '-Command',
+    '(Get-Process -Id 4242).PrivateMemorySize64',
+  ]);
+});
+
+// -NoProfile is load-bearing, not decoration: a user profile that prints
+// anything lands in stdout and corrupts the number.
+test('the PowerShell command suppresses the user profile and interactivity', () => {
+  const args = powershellArgs('(Get-Process -Id %PID%).WorkingSet64', 1);
+  assert.ok(args.includes('-NoProfile'), '-NoProfile keeps profile output out of stdout');
+  assert.ok(args.includes('-NonInteractive'), '-NonInteractive stops it waiting on a prompt');
+});
+
+// Windows ships an MSYS `ps` via Git for Windows that EXISTS and rejects
+// `-o rss=`, so the resident read THROWS there rather than returning a number.
+// footprintKb's contract is to degrade to the coarser reading, so an unguarded
+// throw would escape a function that promises not to.
+test('footprintKb degrades rather than throwing when the Windows read fails', () => {
+  const value = footprintKb(3, {
+    platform: 'win32',
+    run: () => { throw new Error('powershell.exe not found'); },
+    fallback: () => 4096,
+  });
+  assert.equal(value, 4096);
+});
+
+test('footprintKbAsync degrades the same way', async () => {
+  const value = await footprintKbAsync(3, {
+    platform: 'win32',
+    run: async () => { throw new Error('powershell.exe not found'); },
+    fallback: async () => 8192,
+  });
+  assert.equal(value, 8192);
+});
+
+// The fallback must itself take the Windows path, or it lands back on `ps`.
+test('the Windows fallback is told the platform, so it does not shell out to ps', () => {
+  let fallbackOptions = null;
+  footprintKb(3, {
+    platform: 'win32',
+    run: () => 'not a number',
+    fallback: (pid, options) => { fallbackOptions = options; return 1; },
+  });
+  assert.equal(fallbackOptions?.platform, 'win32');
 });
