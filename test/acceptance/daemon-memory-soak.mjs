@@ -174,8 +174,12 @@ await new Promise((resolve) => setTimeout(resolve, SECONDS * 1000));
 stop = true;
 await streamer;
 clearInterval(sampler);
+// Taken AFTER the stream has stopped and before the daemon is signalled, so
+// this is the daemon at rest with its per-sender buffers legitimately released.
+// It is kept in the table because it is informative, but flagged so the growth
+// figure is not computed against it — see `warm` below.
 samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
-  footprint: footprintKb(daemon.pid), frames: sentFrames });
+  footprint: footprintKb(daemon.pid), frames: sentFrames, postStream: true });
 
 let leaksReport = null;
 if (CHECK_LEAKS) {
@@ -185,14 +189,22 @@ if (CHECK_LEAKS) {
 }
 
 daemon.kill('SIGTERM');
-const exitCode = await new Promise((resolve) => daemon.once('exit', resolve));
+const [exitCode, exitSignal] = await new Promise((resolve) =>
+  daemon.once('exit', (code, signal) => resolve([code, signal])));
 
 console.log('t(s)  footprint(KiB)  rss(KiB)  frames');
 for (const sample of samples) {
   console.log(`${String(sample.t).padStart(4)}  ${String(sample.footprint).padStart(14)}  ` +
     `${String(sample.rss).padStart(8)}  ${sample.frames}`);
 }
-const warm = samples.filter((sample) => sample.t >= Math.max(3, SECONDS * 0.25));
+// Growth is measured across the STREAMING window only. Including the
+// post-stream sample made the number incomparable between platforms: macOS
+// keeps freed pages in a process's physical footprint, so an idle final sample
+// reads about the same as a loaded one, while Windows' PrivateMemorySize64
+// decommits promptly — the same healthy run reported roughly zero growth on
+// macOS and -8352 KiB on Windows purely from where the last sample was taken.
+const warm = samples.filter((sample) =>
+  !sample.postStream && sample.t >= Math.max(3, SECONDS * 0.25));
 const first = warm[0];
 const last = warm[warm.length - 1];
 const peak = Math.max(...warm.map((sample) => sample.footprint));
@@ -208,7 +220,20 @@ if (leaksReport !== null) {
 }
 
 assert.equal(runError, null, runError?.stack);
-assert.equal(exitCode, 0, 'syncd exits cleanly on SIGTERM');
+// Windows has no POSIX signals: Node maps child.kill('SIGTERM') onto
+// TerminateProcess, so the child is force-killed and reports a signal with a
+// null exit code. Asserting exit 0 there can never pass, and asserting nothing
+// would quietly claim a clean shutdown that was never exercised. Say which
+// happened instead.
+if (process.platform === 'win32') {
+  assert.equal(exitSignal, 'SIGTERM',
+    `syncd was force-terminated on Windows (code=${exitCode}, signal=${exitSignal})`);
+  console.log('NOTE: on Windows the daemon is force-terminated via TerminateProcess, so this '
+    + 'run asserts NOTHING about graceful shutdown — that path is unexercised here and needs '
+    + 'a real control channel (a console control event or a management command) to test.');
+} else {
+  assert.equal(exitCode, 0, 'syncd exits cleanly on SIGTERM');
+}
 assert.ok(sentFrames > SECONDS * 2, 'the stream actually ran');
 assert.ok(cycles >= Math.floor(SECONDS / CYCLE_SECONDS), 'sender lifecycle cycled');
 if (leaksReport !== null) {

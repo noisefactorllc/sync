@@ -77,10 +77,17 @@ Process 87332: 0 leaks for 0 total leaked bytes.
 });
 
 test('runLeaks routes the injected run() output through the same parser', () => {
-  const result = runLeaks(87332, { run: (pid) => {
+  // Pinned to darwin AND asserting the seam actually ran. Off darwin runLeaks
+  // short-circuits without calling `run` at all, so both the pid assertion
+  // inside and the null result outside would hold vacuously — the test would
+  // report success while proving nothing.
+  let invoked = false;
+  const result = runLeaks(87332, { platform: 'darwin', run: (pid) => {
+    invoked = true;
     assert.equal(pid, 87332);
     return RESTRICTED_OUTPUT;
   } });
+  assert.equal(invoked, true, 'the injected run() must actually be reached');
   assert.equal(result.leaks, null);
 });
 
@@ -91,12 +98,23 @@ test('runLeaks routes the injected run() output through the same parser', () => 
 // it proves the parser is fine, and that the capture step is where the
 // restriction notice must survive.
 test('a seam fed only the stdout half fabricates a clean zero — the capture bug', () => {
-  const result = runLeaks(87332, { run: () => RESTRICTED_STDOUT });
+  // `platform` is explicit because runLeaks short-circuits off darwin: without
+  // it, this test silently stops reaching the parser it exists to exercise on
+  // any non-macOS host, and passes for no reason.
+  const result = runLeaks(87332, { platform: 'darwin', run: () => RESTRICTED_STDOUT });
   assert.equal(result.leaks, 0);
 });
 
 test('a seam fed both streams combined detects the restriction', () => {
-  const result = runLeaks(87332, { run: () => RESTRICTED_STDOUT + RESTRICTED_STDERR });
+  // Darwin-pinned: off darwin this returns null from the platform check, so it
+  // would pass without the restriction ever being detected — the exact thing
+  // it is meant to prove.
+  let invoked = false;
+  const result = runLeaks(87332, {
+    platform: 'darwin',
+    run: () => { invoked = true; return RESTRICTED_STDOUT + RESTRICTED_STDERR; },
+  });
+  assert.equal(invoked, true, 'the injected run() must actually be reached');
   assert.equal(result.leaks, null);
 });
 
@@ -118,15 +136,25 @@ test('captureCombined preserves both streams, not just stdout', () => {
 // directly, with no real `ps` invocation, and the sync/async forms are
 // asserted to agree on identical input.
 
+// `platform` is explicit throughout these seam tests. The platform branch is
+// evaluated BEFORE the injected `run`, so on Windows this ps output would be
+// fed to the bytes-to-KiB converter and come back as 24 rather than 24240.
+// Without the override the suite only goes green on darwin.
 test('residentKb parses ps rss output', () => {
-  const result = residentKb(12345, { run: () => '  24240\n' });
+  const result = residentKb(12345, { platform: 'darwin', run: () => '  24240\n' });
   assert.equal(result, 24240);
 });
 
+// This one was worse than a failure: on Windows both sides took the byte
+// conversion, both returned 24, and the assertion passed — asserting only that
+// two identically-wrong numbers agree. An equality test between two code paths
+// has to pin the value as well, or it cannot tell "both right" from "both
+// wrong".
 test('residentKbAsync parses the same ps output as residentKb', async () => {
-  const sync = residentKb(12345, { run: () => '  24240\n' });
-  const async_ = await residentKbAsync(12345, { run: async () => '  24240\n' });
+  const sync = residentKb(12345, { platform: 'darwin', run: () => '  24240\n' });
+  const async_ = await residentKbAsync(12345, { platform: 'darwin', run: async () => '  24240\n' });
   assert.equal(async_, sync);
+  assert.equal(async_, 24240);
 });
 
 // --- footprintKb / footprintKbAsync ---------------------------------------
