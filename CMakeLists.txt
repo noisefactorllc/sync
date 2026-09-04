@@ -758,6 +758,23 @@ elseif(WIN32)
   # The media source the frame server loads. A COM in-proc server: it owns the
   # shared ring, reads frames syncd writes into it, and converts them to
   # whatever the consumer negotiated.
+  # mfsensorgroup.dll provides MFCreateVirtualCamera, and that export exists
+  # only on Windows build 22000+. An ordinary import makes the loader resolve
+  # it at process start, so on any older Windows -- which Sync.iss still
+  # installs on, deliberately, with the camera line reading unavailable -- the
+  # process dies with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) before main,
+  # and the runtime floor check in windows_supports_virtual_cameras() never
+  # gets to run. Windows Server 2022 (build 20348) demonstrated exactly this
+  # in the release harness.
+  #
+  # Delay-loading defers the resolve to the first call, which only happens
+  # after that check has passed. sync_camera_delayload_tests asserts the
+  # result by reading the PE import tables, so this list cannot silently drift.
+  function(sync_delayload_virtual_camera target)
+    target_link_options(${target} PRIVATE /DELAYLOAD:mfsensorgroup.dll)
+    target_link_libraries(${target} PRIVATE delayimp)
+  endfunction()
+
   add_library(sync_camera_source SHARED
     native/src/platform/windows/camera_source/dll_main.cpp
     native/src/platform/windows/camera_source/media_source.cpp
@@ -1052,6 +1069,32 @@ elseif(WIN32)
     sync_pairing_prompt sync_spout_publisher
     sync_camera_publisher sync_mf_camera_sink sync_camera_registration user32
   )
+
+  # Every final binary that ends up importing mfsensorgroup, whether directly
+  # or through sync_mf_camera_sink / sync_camera_registration. Applied here
+  # rather than beside each target because syncd and sync_menu are defined
+  # after the camera block, and one list is easier to keep true than seven
+  # scattered calls. The delay-load test reads the built files, so a target
+  # missing from this list fails rather than shipping a Windows 10 crash.
+  foreach(sync_camera_binary
+      sync_camera_source syncd sync_menu
+      sync_camera_capability_probe sync_camera_feed_probe
+      sync_mf_camera_sink_tests sync_virtual_camera_e2e_tests)
+    sync_delayload_virtual_camera(${sync_camera_binary})
+  endforeach()
+
+  # Reads the built PE files rather than trusting the list above. Needs no
+  # camera and no Windows 11, so it gates on every Windows runner -- which is
+  # the point: the failure it prevents only reproduces on a Windows this
+  # project's CI cannot run.
+  add_executable(sync_camera_delayload_tests
+    native/test/windows/camera_delayload_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_delayload_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_delayload_tests PRIVATE native/test)
+  add_dependencies(sync_camera_delayload_tests syncd sync_menu sync_camera_source)
+  add_test(NAME sync_camera_delayload_tests COMMAND sync_camera_delayload_tests)
 
   # Both executables embed the version resource, so both need the icon to
   # exist before their RC compile runs.
