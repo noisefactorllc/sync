@@ -250,20 +250,56 @@ So branch 3 applies:
 - **Tier 2 is gated on the probe verdict.** Where an image can host a camera
   the end-to-end test runs and fails the job; where it cannot, the job records
   the per-step HRESULTs rather than failing for something the runner cannot
-  do. It runs today only on the developer machine.
-- **The ship gate therefore still needs a self-hosted Windows 11 runner**
-  labelled `[self-hosted, Windows, X64, sync-camera]`, mirroring the existing
+  do. On the hosted job it therefore never fails; the job that turns it into a
+  gate is the self-hosted one below.
+- **The ship gate is a self-hosted Windows 11 runner, and it now exists.**
+  LARGEBOI — Alienware Aurora R13, Windows 11 Home 26200, with `FrameServer`,
+  `FrameServerMonitor`, and `mfsensorgroup.dll` 10.0.26100.9278 — is
+  registered as `largeboi-sync-camera` with labels
+  `[self-hosted, Windows, X64, sync-camera]`, mirroring the existing
   `[self-hosted, macOS, ARM64, sync-performance]` job in Scaffold's
-  `build-sync-preview.yml`. LARGEBOI — Alienware Aurora R13, Windows 11 Home
-  26200, with `FrameServer`, `FrameServerMonitor`, and `mfsensorgroup.dll`
-  10.0.26100.9278 all present, and where the end-to-end test passes today — is
-  the candidate host, and the runbook entry belongs beside the other desk
-  machines in Scaffold's `docs/runbook/office-lan.md`. Registering it is an
-  operator action; until it exists, "green CI" does not mean the end-to-end
-  path was exercised.
+  `build-sync-preview.yml`. `.github/workflows/camera-e2e.yml` drives it. Host
+  setup is in Scaffold's `docs/runbook/office-lan.md`.
 
 Scaffold's `build-sync-preview.yml` builds Windows on `windows-2022`, which is
-build 20348 and below the floor. Whatever §6.3 concludes applies there too.
+build 20348 and below the floor. What §6.3 concludes applies there too.
+
+### 6.4 What a camera host has to be — measured 2026-09-03
+
+Standing up that runner turned up three more constraints, each of which
+presents as the *same* `E_ACCESSDENIED` from `MFCreateVirtualCamera` or
+`Start`. They are worth separating, because the single shared symptom makes
+them very easy to confuse for one another — and for a defect in the source.
+
+1. **The runner must not be a Windows service.** A service runs in session 0,
+   which is the same condition the hosted image is in, and produces the same
+   `virtualcamera_start_hr=0x80070005` above. Run in the interactive desktop
+   session, where the identical probe returns `0x00000000` for every call.
+   This is why the runner is not installed with `--runasservice`.
+2. **The registered DLL must live outside every user profile.** The frame
+   server runs as LOCAL SERVICE, which cannot read `C:\Users\<someone>`. A
+   source registered from a path under a profile loads for `syncd` — which is
+   why registration itself reports success — and then fails inside the frame
+   server, surfacing as `MFCreateVirtualCamera` returning `E_ACCESSDENIED`
+   with nothing else to distinguish it from constraint 1. Measured directly:
+   the same build registered from `C:\Users\aayar\platform\sync\build\Release`
+   fails, and from `C:\actions-runner-sync\...` passes, because the drive root
+   grants `BUILTIN\Users` read and LOCAL SERVICE is a member of Users.
+3. **The runner does not need to be elevated, and should not be.**
+   Registration writes `HKLM\SOFTWARE\Classes\CLSID\{2F8E7B14-…}` and its
+   `InprocServer32` child, and nothing else. Granting the runner account
+   `FullControl` on that one subtree lets an unelevated runner re-point the
+   registration at each build. The alternative — an elevated runner — would
+   run every workflow step as administrator to obtain two registry writes.
+   The grant confers nothing on an account that can already elevate; it must
+   not be widened to `Users`, and must not be applied to the parent `CLSID`
+   key, which would allow hijacking any COM class on the machine.
+
+The workflow re-points the registration at each build and restores the
+installed one in an `always()` step. It restores by re-registering the
+installed `syncd`, never by `--unregister-camera`: unregistering deletes the
+CLSID key, which would both break the Sync install on that desktop and destroy
+the ACL grant from constraint 3 along with it.
 
 ## 7. Packaging and documentation
 

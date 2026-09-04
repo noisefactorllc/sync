@@ -1,0 +1,161 @@
+name: Camera end-to-end
+
+# The Tier 2 gate for the Windows camera: the end-to-end path on a machine that
+# can actually host a virtual camera. ci.yml runs everything beneath this on
+# hosted runners and reports -- but cannot assert -- the end-to-end result,
+# because a hosted image refuses IMFVirtualCamera::Start. This workflow is the
+# gate that refusal made impossible there.
+#
+# WHY THIS IS A SEPARATE WORKFLOW, AND WHY IT HAS NO pull_request TRIGGER
+#
+# This repository is public. A self-hosted runner attached to a public
+# repository will execute whatever a pull request tells it to, on the physical
+# machine it runs on -- which is why GitHub's own guidance is to keep
+# self-hosted runners off public repositories. ci.yml triggers on
+# pull_request, so a self-hosted job added there would be reachable by anyone
+# who opens a fork PR.
+#
+# The protection is the absence of the trigger, not a condition inside a job.
+# `push` to main and `workflow_dispatch` both require write access; neither can
+# be initiated from a fork. Do not add `pull_request` here, and do not move
+# this job into ci.yml.
+#
+# WHAT THE RUNNER HOST HAS TO BE (all four were established by measurement)
+#
+#   1. Not a service. A Windows service runs in session 0, and the Frame
+#      Server will not start a virtual camera for it -- that is exactly what
+#      the hosted runner does, where every call up to and including
+#      MFCreateVirtualCamera succeeds and only Start returns E_ACCESSDENIED.
+#      The runner runs in the interactive desktop session, where the same
+#      probe returns 0 for every call.
+#   2. Not elevated. Registration writes HKLM, but the host grants the runner
+#      account write on Sync's one CLSID subtree instead, so the runner stays
+#      unelevated. An elevated runner would execute every workflow step as
+#      administrator, which is a far larger blast radius than one registry key.
+#   3. Workspace outside any user profile. The Frame Server runs as LOCAL
+#      SERVICE and cannot read C:\Users\<someone>, so a media source DLL
+#      registered from a profile path fails to load and MFCreateVirtualCamera
+#      returns E_ACCESSDENIED -- indistinguishable, from the outside, from the
+#      session-0 refusal above. The runner's work directory is off the drive
+#      root, where BUILTIN\Users read access is inherited.
+#   4. cmake/ctest and vcpkg on the runner account's PATH. Hosted images have
+#      them; a desktop does not.
+#
+# Host setup is recorded in scaffold's docs/runbook/office-lan.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One camera, one machine: two runs registering different builds of the media
+# source at once would each invalidate the other. Never cancel a run in
+# progress -- the restore step below is what puts the host back.
+concurrency:
+  group: sync-camera-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  camera:
+    name: Windows camera end-to-end
+    # A fork that copies this file has no runner carrying these labels, so its
+    # run would queue forever rather than execute; this fails it fast instead.
+    if: github.repository == 'noisefactorllc/sync'
+    runs-on: [self-hosted, Windows, X64, sync-camera]
+    timeout-minutes: 45
+    env:
+      BUILD_TYPE: Release
+      INSTALLED_SYNCD: C:\Program Files\Noise Factor\Sync\syncd.exe
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build --config $env:BUILD_TYPE --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      # syncd registers the SyncCamera.dll sitting beside itself, so this
+      # points the machine's CLSID at the build this commit just produced.
+      # Without it the Frame Server would load whatever Sync install is on the
+      # host and the job would prove nothing about the commit that triggered
+      # it. The restore step puts the installed one back.
+      - name: Register this commit's media source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "build/$env:BUILD_TYPE/syncd.exe" --register-camera
+          if ($LASTEXITCODE -ne 0) {
+            throw ("camera registration failed. If this is ERROR_ACCESS_DENIED " +
+                   "the host's grant on the CLSID key is gone -- see " +
+                   "office-lan.md; a Sync uninstall removes the key and the " +
+                   "grant with it.")
+          }
+
+      # Reported before it is judged, so a failure names the call that refused
+      # rather than just the test that could not run.
+      - name: Probe this host's camera support
+        id: camera_capability
+        shell: pwsh
+        run: |
+          & "build/$env:BUILD_TYPE/sync_camera_capability_probe.exe" |
+            Tee-Object -FilePath camera-capability.txt
+          "verdict=$LASTEXITCODE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Get-Content camera-capability.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          exit 0
+
+      # The gate. Unlike ci.yml's equivalent, an unsupported host fails here:
+      # this is the machine whose entire purpose is to be able to host the
+      # camera, so "cannot" is a regression, not a runner limitation.
+      - name: Run the end-to-end camera test
+        shell: pwsh
+        run: |
+          if ("${{ steps.camera_capability.outputs.verdict }}" -ne "0") {
+            throw ("this host could not create a virtual camera; the probe " +
+                   "output in the step summary names the call that refused")
+          }
+          ctest --test-dir build --build-config $env:BUILD_TYPE --output-on-failure `
+            --label-regex sync_camera_e2e
+          if ($LASTEXITCODE -ne 0) { throw "virtual camera end-to-end test failed" }
+
+      # always(), because a failed run must not leave the host's camera bound
+      # to a workspace that the next checkout overwrites. Deliberately a
+      # re-register of the installed build rather than --unregister-camera:
+      # unregistering deletes the CLSID key, which would both break the Sync
+      # install on this desktop and destroy the ACL grant that lets the runner
+      # register at all.
+      - name: Restore the installed media source
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path $env:INSTALLED_SYNCD) {
+            & $env:INSTALLED_SYNCD --register-camera
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to restore the installed camera registration on this host"
+            }
+          } else {
+            # No Sync installed: nothing to restore, but the CLSID would be
+            # left pointing at a workspace the next checkout overwrites, so
+            # drop it rather than leave a silently broken camera behind.
+            & "build/$env:BUILD_TYPE/syncd.exe" --unregister-camera
+            Write-Host ("No Sync install on this host, so the media source " +
+                        "was unregistered rather than restored.")
+          }
