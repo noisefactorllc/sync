@@ -107,7 +107,7 @@ SYNC_TEST(linux_control_json_strings_escape_terminal_control_bytes) {
   input.push_back('\x01');
   input.push_back('\n');
   SYNC_REQUIRE(linux_control::encode_linux_control_json_string(input) ==
-               R"("a\"\\\u0001\u000a")");
+               "\"a\\\"\\\\\\u0001\\u000a\"");
 }
 
 }  // namespace
