@@ -71,5 +71,18 @@ try {
     `reconnects=${result.reconnects} growth=${summary ? summary.growthKb : 'n/a'}KiB ` +
     `exit=${result.exitCode}\n`);
   if (outPath) await new Promise((resolve) => stream.end(resolve));
-  if (result.exitCode !== 0 || runError || result.reaped === false) process.exitCode = 1;
+  // Windows has no POSIX signals: Node maps kill('SIGTERM') onto
+  // TerminateProcess, so a daemon that stopped exactly as asked reports
+  // exitCode null with signalCode 'SIGTERM'. Checking `exitCode !== 0` alone
+  // failed EVERY healthy Windows run. On POSIX a signal here still means the
+  // daemon had to be forced and remains a failure, so the allowance is
+  // deliberately narrow rather than "any signal is fine".
+  const forcedTerminationOnWindows = process.platform === 'win32'
+    && result.exitCode === null && result.signalCode != null;
+  if (forcedTerminationOnWindows) {
+    process.stderr.write('protocol soak: the daemon was force-terminated via TerminateProcess '
+      + '(Windows has no POSIX signals), so this run asserts NOTHING about graceful shutdown\n');
+  }
+  const stoppedCleanly = result.exitCode === 0 || forcedTerminationOnWindows;
+  if (!stoppedCleanly || runError || result.reaped === false) process.exitCode = 1;
 }

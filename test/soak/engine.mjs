@@ -251,7 +251,8 @@ export class ProtocolSoak {
     // event fires, so a fresh `.once('exit', ...)` here would never resolve
     // — that event already happened. Short-circuit instead of hanging.
     if (this.daemon.exitCode !== null || this.daemon.signalCode !== null) {
-      return { ...this.state, exitCode: this.daemon.exitCode, reaped: true };
+      return { ...this.state, exitCode: this.daemon.exitCode,
+        signalCode: this.daemon.signalCode, reaped: true };
     }
     // stop() used to be reached only on the happy path, where an await with
     // no timeout was safe because the daemon was known-alive and responsive.
@@ -262,20 +263,29 @@ export class ProtocolSoak {
     // exists to guarantee. So: bound SIGTERM, escalate to a bounded SIGKILL,
     // and if the process still will not die, give up and say so rather than
     // block the caller forever.
+    // `signalCode` is reported alongside `exitCode` because on Windows they are
+    // the only way to tell the two apart: Node maps kill('SIGTERM') onto
+    // TerminateProcess, so a daemon that stopped exactly as asked reports
+    // exitCode null and signalCode 'SIGTERM'. A caller checking only
+    // `exitCode !== 0` would fail every healthy Windows run.
     this.daemon.kill('SIGTERM');
     let exitCode = await this._waitForExit(this.stopTermTimeoutMs);
-    if (exitCode !== ProtocolSoak.ABANDONED) return { ...this.state, exitCode, reaped: true };
+    if (exitCode !== ProtocolSoak.ABANDONED) {
+      return { ...this.state, exitCode, signalCode: this.daemon.signalCode, reaped: true };
+    }
 
     this.daemon.kill('SIGKILL');
     exitCode = await this._waitForExit(this.stopKillTimeoutMs);
-    if (exitCode !== ProtocolSoak.ABANDONED) return { ...this.state, exitCode, reaped: true };
+    if (exitCode !== ProtocolSoak.ABANDONED) {
+      return { ...this.state, exitCode, signalCode: this.daemon.signalCode, reaped: true };
+    }
 
     // Genuinely unkillable (or already reaped by something else out from
     // under us). The flush still happens — run.mjs writes the summary and
     // ends its stream from the result this returns — this only stops the
     // abandoned child from keeping that process alive afterward.
     this._abandonDaemon();
-    return { ...this.state, exitCode: null, reaped: false };
+    return { ...this.state, exitCode: null, signalCode: null, reaped: false };
   }
 }
 

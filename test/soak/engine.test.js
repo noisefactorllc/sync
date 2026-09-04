@@ -230,3 +230,29 @@ test('_waitForExit\'s pre-check catches signalCode alone, without exitCode also 
   assert.ok(elapsed < 10,
     `_waitForExit took ${elapsed}ms; the pre-check should resolve immediately, not wait out the 50ms bound`);
 });
+
+// Windows has no POSIX signals: Node maps kill('SIGTERM') onto
+// TerminateProcess, so a daemon that stopped exactly as asked reports exitCode
+// null and signalCode 'SIGTERM'. stop() must surface the signal, or a caller
+// checking only `exitCode !== 0` fails every healthy Windows run — which is
+// precisely what run.mjs was doing.
+test('stop() reports signalCode alongside exitCode for a signal-terminated daemon', async () => {
+  const soak = new ProtocolSoak({ daemonPath: '/nonexistent' });
+  soak.state = { sentFrames: 1, dropped: 0, reconnects: 0 };
+  // A daemon that has already gone, the way TerminateProcess leaves it.
+  soak.daemon = { exitCode: null, signalCode: 'SIGTERM', pid: 4242 };
+  const result = await soak.stop();
+  assert.equal(result.exitCode, null);
+  assert.equal(result.signalCode, 'SIGTERM');
+  assert.equal(result.reaped, true);
+});
+
+test('stop() reports a clean exit with no signal on the ordinary path', async () => {
+  const soak = new ProtocolSoak({ daemonPath: '/nonexistent' });
+  soak.state = { sentFrames: 1, dropped: 0, reconnects: 0 };
+  soak.daemon = { exitCode: 0, signalCode: null, pid: 4242 };
+  const result = await soak.stop();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.signalCode, null);
+  assert.equal(result.reaped, true);
+});
