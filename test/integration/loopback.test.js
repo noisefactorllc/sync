@@ -2383,14 +2383,12 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
     unknownControl.client.destroy();
   } finally {
     if (daemon) {
-      // Syphon's reason depends on what this machine has installed, so it is
-      // left open; NDI's is one literal on every platform, and pinning it
-      // covers a second provider's reason wiring.
+      // Syphon and camera reasons depend on what this machine has installed,
+      // so they stay open. The CI hosts intentionally omit the operator-owned
+      // NDI runtime, which pins that provider's absent-runtime diagnostic.
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
         expectedStderr: expectedProviderDiagnostics(reportedProviders, {
-          ndi: process.platform === "linux"
-            ? "the operator-installed NDI runtime was not found"
-            : "the NDI runtime did not load, or failed to initialize",
+          ndi: "the operator-installed NDI runtime was not found",
         }),
       });
     }
