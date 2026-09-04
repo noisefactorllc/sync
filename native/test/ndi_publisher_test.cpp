@@ -26,6 +26,7 @@
 namespace {
 
 using noisefactor::sync::NdiFramePublisher;
+using noisefactor::sync::NdiUnavailableReason;
 using noisefactor::sync::PublishResult;
 using noisefactor::sync::protocol::FrameView;
 
@@ -62,12 +63,33 @@ SYNC_TEST(ndi_publisher_with_bogus_explicit_runtime_path_reports_unavailable_wit
   NdiFramePublisher publisher(options);
 
   SYNC_REQUIRE(!publisher.available());
+  SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::LoadFailed);
   SYNC_REQUIRE(!publisher.poll_failure(0).has_value());
 }
 
 SYNC_TEST(ndi_publisher_default_construction_reports_unavailable_without_crashing) {
   NdiFramePublisher publisher;
   SYNC_REQUIRE(!publisher.available());
+  SYNC_REQUIRE(publisher.unavailable_reason() != NdiUnavailableReason::None);
+}
+
+SYNC_TEST(ndi_unavailability_reasons_are_distinct_and_non_secret) {
+  const std::array reasons = {
+      NdiUnavailableReason::RuntimeNotFound,
+      NdiUnavailableReason::LoadFailed,
+      NdiUnavailableReason::EntryPointMissing,
+      NdiUnavailableReason::InitializationFailed,
+      NdiUnavailableReason::UnsupportedCpu,
+  };
+  std::array<std::string_view, reasons.size()> descriptions{};
+  for (std::size_t index = 0; index < reasons.size(); ++index) {
+    descriptions[index] = noisefactor::sync::describe(reasons[index]);
+    SYNC_REQUIRE(!descriptions[index].empty());
+    SYNC_REQUIRE(descriptions[index].find("token") == std::string_view::npos);
+    for (std::size_t prior = 0; prior < index; ++prior) {
+      SYNC_REQUIRE(descriptions[index] != descriptions[prior]);
+    }
+  }
 }
 
 SYNC_TEST(ndi_publisher_unavailable_rejects_open_sender_fails_publish_and_no_ops_close) {

@@ -88,8 +88,12 @@ class TempDirectory {
     }
     SYNC_REQUIRE(created);
 #else
-    std::array<char, 256> pattern{};
-    const std::string seed = "/private/tmp/sync-pairing-test-XXXXXX";
+    std::array<char, PATH_MAX + 1> pattern{};
+    const std::string seed =
+        (std::filesystem::canonical(std::filesystem::temp_directory_path()) /
+         "sync-pairing-test-XXXXXX")
+            .string();
+    SYNC_REQUIRE(seed.size() < pattern.size());
     std::copy(seed.begin(), seed.end(), pattern.begin());
     char* made = ::mkdtemp(pattern.data());
     SYNC_REQUIRE(made != nullptr);

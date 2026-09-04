@@ -10,6 +10,18 @@
 
 namespace noisefactor::sync {
 
+enum class NdiUnavailableReason : std::uint8_t {
+  None,
+  RuntimeNotFound,
+  LoadFailed,
+  EntryPointMissing,
+  InitializationFailed,
+  UnsupportedCpu,
+};
+
+[[nodiscard]] auto describe(NdiUnavailableReason reason) noexcept
+    -> const char*;
+
 // Direct CPU-frame send provider for NDI. Available on every desktop
 // platform Sync targets; unlike MetalFramePublisher this class carries no
 // platform #error guard because the NDI runtime is discovered dynamically
@@ -43,6 +55,8 @@ class NdiFramePublisher final : public FramePublisher {
   // probe, or reported an unsupported CPU. Absence is never an error: a
   // caller simply does not offer this provider when available() is false.
   [[nodiscard]] auto available() const noexcept -> bool;
+  [[nodiscard]] auto unavailable_reason() const noexcept
+      -> NdiUnavailableReason;
 
   auto open_sender(std::string_view sender_id, std::string_view name) noexcept -> bool override;
   void close_sender(std::string_view sender_id) noexcept override;

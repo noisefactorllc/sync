@@ -45,6 +45,18 @@ Per-platform library file name:
 | macOS | `libndi.dylib` |
 | Linux | `libndi.so.5` |
 
+On Linux, install the vendor runtime so `libndi.so.5` is reachable through its
+documented runtime-directory environment variable or the system loader. Avahi
+is required for normal mDNS discovery between machines; `syncctl doctor`
+reports it separately because an NDI sender can initialize even when discovery
+is unavailable. PipeWire is unrelated to NDI and is not used by Sync's send
+path.
+
+The Linux provider is an optional compatibility path, not part of the virtual
+camera certification gate. Sync never bundles `libndi.so.5`, links against it,
+or claims certification by Vizrt; a missing runtime leaves the camera and
+control service fully operational.
+
 ## The exact ABI surface Sync depends on
 
 Sync resolves one exported C function, `NDIlib_v5_load`, which the SDK

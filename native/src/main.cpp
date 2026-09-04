@@ -32,8 +32,17 @@
 #include <cstdio>
 #endif
 
+#if defined(__linux__)
+#include <sync/daemon_metrics.hpp>
+#include <sync/platform/camera_publisher.hpp>
+#include <sync/platform/linux_camera_sink.hpp>
+#include <sync/platform/linux_control_service.hpp>
+#include <unistd.h>
+#endif
+
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <optional>
@@ -63,6 +72,29 @@ void pump_macos_events(void *) noexcept {
         break;
       }
     }
+  }
+}
+#endif
+
+#if defined(__linux__)
+void update_linux_camera_health(
+    void *context, bool healthy,
+    nfsync::camera::CameraSinkUnavailableReason reason,
+    std::int32_t status) noexcept {
+  auto *runtime_status =
+      static_cast<nfsync::linux_control::LinuxRuntimeStatus *>(context);
+  if (runtime_status == nullptr) return;
+  try {
+    const std::string text =
+        healthy ? "ready"
+                : nfsync::camera::describe_unavailability(reason, status);
+    // An initially unavailable sink is overwritten with available=false by
+    // the assembly below. Once a sink entered the hub, runtime loss keeps it
+    // available while healthy flips false during its bounded reopen loop.
+    runtime_status->set_provider("camera", true, true, healthy, text);
+  } catch (...) {
+    runtime_status->set_provider("camera", true, true, healthy,
+                                 "camera status unavailable");
   }
 }
 #endif
@@ -165,12 +197,16 @@ private:
 // Providers are stack-owned here because they must outlive run_server and must
 // be torn down in reverse construction order when it returns.
 int run_with_providers(nfsync::ServerOptions &options,
-                       const nfsync::cli::Options &command) {
+                       const nfsync::cli::Options &command
+#if defined(__linux__)
+                       , nfsync::linux_control::LinuxRuntimeStatus *runtime_status = nullptr
+#endif
+                       ) {
   // Decided once, above the platform blocks, because two places need the same
   // answer and they are far apart: on Windows this gates *construction* of the
   // sink, which has the side effect of registering a system-wide camera, and
   // it gates the offer two hundred lines below. Asking twice let them drift.
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
   const bool camera_selected = configured(command, "camera", true);
 #else
   const bool camera_selected = configured(command, "camera", false);
@@ -201,9 +237,25 @@ int run_with_providers(nfsync::ServerOptions &options,
     camera.emplace(*camera_sink);
   }
 #endif
+#if defined(__linux__)
+  std::optional<nfsync::camera::LinuxCameraSink> camera_sink;
+  std::optional<nfsync::camera::CameraFramePublisher> camera;
+  if (camera_selected) {
+    camera_sink.emplace(nfsync::camera::LinuxCameraSink::Options{
+        .device_path = command.camera_device_path,
+        .metrics = options.metrics,
+        .health_changed = runtime_status != nullptr
+                              ? update_linux_camera_health
+                              : nullptr,
+        .health_context = runtime_status,
+    });
+    camera.emplace(*camera_sink);
+  }
+#endif
   nfsync::NdiFramePublisher ndi({
       .runtime_path = command.ndi_runtime_path,
   });
+  const char *const ndi_reason = nfsync::describe(ndi.unavailable_reason());
 
   // Each provider is offered in a stable order with three facts: whether this
   // build implements it at all, whether it is part of this run, and whether
@@ -263,10 +315,48 @@ int run_with_providers(nfsync::ServerOptions &options,
                                                     camera_sink->unavailable_status())
           : std::string("the camera was not selected for this run");
   const char *const camera_reason = camera_reason_text.c_str();
+#elif defined(__linux__)
+  const bool camera_available = camera_sink.has_value() && camera->available();
+  nfsync::FramePublisher *const camera_publisher =
+      camera.has_value() ? &*camera : nullptr;
+  const std::string camera_reason_text =
+      camera_sink.has_value()
+          ? nfsync::camera::describe_unavailability(
+                camera_sink->unavailable_reason(),
+                camera_sink->unavailable_status())
+          : std::string("the camera was not selected for this run");
+  const char *const camera_reason = camera_reason_text.c_str();
 #else
   constexpr bool camera_available = false;
   nfsync::FramePublisher *const camera_publisher = nullptr;
   const char *const camera_reason = "this build does not implement camera on this platform";
+#endif
+
+#if defined(__linux__)
+  if (runtime_status != nullptr) {
+    const bool syphon_selected = configured(command, "syphon", kSyphonImplemented);
+    const bool spout_selected = configured(command, "spout", kSpoutImplemented);
+    const bool ndi_selected = configured(command, "ndi", true);
+    if (syphon_selected) {
+      runtime_status->set_provider("syphon", true, syphon_available,
+                                   syphon_available, syphon_reason);
+    }
+    if (spout_selected) {
+      runtime_status->set_provider("spout", true, spout_available,
+                                   spout_available, spout_reason);
+    }
+    if (ndi_selected) {
+      runtime_status->set_provider(
+          "ndi", true, ndi.available(), ndi.available(),
+          ndi.available() ? "ready" : ndi_reason);
+    }
+    if (camera_selected) {
+      runtime_status->set_provider("camera", true, camera_available,
+                                   camera_sink.has_value() &&
+                                       camera_sink->healthy(),
+                                   camera_available ? "ready" : camera_reason);
+    }
+  }
 #endif
 
   ProviderAssembly assembly;
@@ -275,7 +365,7 @@ int run_with_providers(nfsync::ServerOptions &options,
   assembly.offer("spout", configured(command, "spout", kSpoutImplemented),
                  spout_available, spout_publisher, spout_reason);
   assembly.offer("ndi", configured(command, "ndi", true), ndi.available(), &ndi,
-                 "the NDI runtime did not load, or failed to initialize");
+                 ndi_reason);
   assembly.offer("camera", camera_selected,
                  camera_available, camera_publisher, camera_reason);
 
@@ -290,7 +380,7 @@ int run_with_providers(nfsync::ServerOptions &options,
   return nfsync::run_server(options, &hub);
 }
 
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
 // A short, non-secret phrase for each way opening the store can fail. It never
 // names a token or a hash -- only which class of problem occurred, so the
 // message can be printed to stderr and pasted into a bug report safely.
@@ -372,12 +462,37 @@ int run_production(nfsync::ServerOptions &options,
   nfsync::pairing::StorePairingAuthority authority(store);
 #if defined(__APPLE__)
   nfsync::platform::MacPairingPrompt prompt;
-#else
-  nfsync::platform::WindowsPairingPrompt prompt;
-#endif
   options.pairing_authority = &authority;
   options.pairing_prompt = &prompt;
   return run_with_providers(options, command);
+#elif defined(_WIN32)
+  nfsync::platform::WindowsPairingPrompt prompt;
+  options.pairing_authority = &authority;
+  options.pairing_prompt = &prompt;
+  return run_with_providers(options, command);
+#else
+  const char *const runtime_directory = std::getenv("XDG_RUNTIME_DIR");
+  if (runtime_directory == nullptr || runtime_directory[0] != '/') {
+    std::cerr << "syncd: XDG_RUNTIME_DIR must be a nonempty absolute path\n";
+    return nfsync::cli::kFailureExit;
+  }
+  nfsync::DaemonMetrics metrics;
+  nfsync::linux_control::LinuxRuntimeStatus runtime_status(metrics);
+  nfsync::linux_control::LinuxControlService control({
+      .runtime_directory = runtime_directory,
+      .expected_uid = static_cast<std::uint32_t>(::geteuid()),
+      .management = &authority,
+      .status = &runtime_status,
+  });
+  if (!control.start()) {
+    std::cerr << "syncd: failed to create the owner-only control socket\n";
+    return nfsync::cli::kFailureExit;
+  }
+  options.pairing_authority = &authority;
+  options.pairing_prompt = &control;
+  options.metrics = &metrics;
+  return run_with_providers(options, command, &runtime_status);
+#endif
 }
 #endif
 
@@ -448,7 +563,7 @@ int main(int argc, char** argv) {
       return run_with_providers(options, command);
     }
 
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
     return run_production(options, command);
 #else
     std::cerr << "syncd: production mode requires macOS or Windows\n";

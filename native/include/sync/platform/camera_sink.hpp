@@ -39,6 +39,13 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
   // The section was opened but is not the size this build expects, which
   // means the media source and the daemon are different versions.
   SectionVersionMismatch,
+
+  // Linux. The v4l2loopback output device is a kernel-owned /dev/videoN;
+  // selection, permissions, format negotiation, and writes fail separately.
+  DevicePermissionDenied,
+  WrongDevice,
+  FormatRejected,
+  DeviceWriteFailed,
 };
 
 [[nodiscard]] constexpr auto describe(CameraSinkUnavailableReason reason) noexcept -> const char* {
@@ -46,7 +53,11 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
     case CameraSinkUnavailableReason::None:
       return "no error";
     case CameraSinkUnavailableReason::DeviceNotFound:
+#if defined(__linux__)
+      return "device_not_found: no validated Sync Camera v4l2loopback output is present";
+#else
       return "the Sync Camera extension is not installed, or has not been approved in System Settings";
+#endif
     case CameraSinkUnavailableReason::SinkStreamMissing:
       return "the Sync Camera extension is a different version than this Sync";
     case CameraSinkUnavailableReason::QueueNotProvided:
@@ -63,6 +74,14 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
       return "the Sync Camera source refused this account access to its frame buffer";
     case CameraSinkUnavailableReason::SectionVersionMismatch:
       return "the Sync Camera source is a different version than this Sync; reinstall Sync";
+    case CameraSinkUnavailableReason::DevicePermissionDenied:
+      return "permission to write the Sync Camera device was denied";
+    case CameraSinkUnavailableReason::WrongDevice:
+      return "the selected video node is not the Sync v4l2loopback output";
+    case CameraSinkUnavailableReason::FormatRejected:
+      return "the Sync Camera device rejected 1920x1080 NV12 output";
+    case CameraSinkUnavailableReason::DeviceWriteFailed:
+      return "the Sync Camera device could not accept frames";
   }
   return "unknown camera problem";
 }
@@ -81,6 +100,10 @@ enum class CameraSinkUnavailableReason : std::uint8_t {
     char buffer[32]{};
     std::snprintf(buffer, sizeof(buffer), " (HRESULT 0x%08X)", static_cast<unsigned>(status));
     text += buffer;
+#elif defined(__linux__)
+    text += " (errno ";
+    text += std::to_string(status);
+    text += ')';
 #else
     text += " (OSStatus ";
     text += std::to_string(status);

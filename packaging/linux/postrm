@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = purge ]; then
+  modprobe_file=/etc/modprobe.d/noisedeck-sync-camera.conf
+  if [ -f "$modprobe_file" ] && cmp -s "$modprobe_file" - <<'EOF'
+# Managed by Noisedeck Sync. Local edits make this file operator-owned.
+options v4l2loopback devices=1 card_label="Sync Camera" exclusive_caps=1
+EOF
+  then
+    rm -f "$modprobe_file"
+  elif [ -e "$modprobe_file" ]; then
+    echo "noisedeck-sync: preserving modified $modprobe_file" >&2
+  fi
+
+  modules_file=/etc/modules-load.d/noisedeck-sync-camera.conf
+  if [ -f "$modules_file" ] && cmp -s "$modules_file" - <<'EOF'
+# Managed by Noisedeck Sync. Local edits make this file operator-owned.
+v4l2loopback
+EOF
+  then
+    rm -f "$modules_file"
+  elif [ -e "$modules_file" ]; then
+    echo "noisedeck-sync: preserving modified $modules_file" >&2
+  fi
+fi
+
+exit 0

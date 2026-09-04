@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -99,6 +101,15 @@ public:
                std::string_view token) noexcept = 0;
 };
 
+class PairingManagement {
+public:
+  virtual ~PairingManagement() = default;
+  [[nodiscard]] virtual PairingListResult
+  list(std::span<NormalizedOrigin> output) noexcept = 0;
+  [[nodiscard]] virtual PairingRevocationResult
+  revoke(const NormalizedOrigin &origin) noexcept = 0;
+};
+
 inline constexpr std::size_t kMaximumAuthorityRequests = 64;
 inline constexpr std::size_t kMaximumAuthorityTokenBytes = 256;
 
@@ -149,7 +160,8 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-class StorePairingAuthority final : public PairingAuthority {
+class StorePairingAuthority final : public PairingAuthority,
+                                    public PairingManagement {
 public:
   explicit StorePairingAuthority(PairingStore &store) noexcept
       : store_(store) {}
@@ -158,9 +170,14 @@ public:
   [[nodiscard]] PairingAuthenticationResult
   authenticate(const NormalizedOrigin &origin,
                std::string_view token) noexcept override;
+  [[nodiscard]] PairingListResult
+  list(std::span<NormalizedOrigin> output) noexcept override;
+  [[nodiscard]] PairingRevocationResult
+  revoke(const NormalizedOrigin &origin) noexcept override;
 
 private:
   PairingStore &store_;
+  std::mutex store_mutex_;
 };
 
 } // namespace noisefactor::sync::pairing

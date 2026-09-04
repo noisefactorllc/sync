@@ -1,5 +1,7 @@
 #include <sync/server.hpp>
 
+#include <sync/daemon_metrics.hpp>
+
 #include <sync/control.hpp>
 #include <sync/frame_receiver.hpp>
 #include <sync/origin.hpp>
@@ -1755,6 +1757,9 @@ class Server {
     }
     if (poll_provider_failure(uv_now(&loop_))) return;
     const ReceiveResult result = receiver_.receive(sender.id, payload);
+    if (options_.metrics != nullptr) {
+      options_.metrics->note_receive(result.status);
+    }
     if (result.status == ReceiveStatus::RejectedMalformed ||
         result.status == ReceiveStatus::RejectedSender) {
       start_websocket_close(connection, 1002);

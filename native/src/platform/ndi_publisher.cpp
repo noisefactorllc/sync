@@ -532,6 +532,8 @@ struct NdiFramePublisher::Impl {
   native_module_handle module = kNullModule;
   const ndi_v5* api = nullptr;
   bool initialized = false;
+  NdiUnavailableReason unavailable_reason =
+      NdiUnavailableReason::RuntimeNotFound;
   std::size_t allocation_budget_bytes = kProductAllocationBudgetBytes;
   std::size_t allocated_bytes = 0;
   std::optional<ProviderFailure> latched_failure;
@@ -559,6 +561,9 @@ struct NdiFramePublisher::Impl {
         const std::string& candidate = candidates[index];
         native_module_handle handle = load_module(candidate, path_has_directory(candidate));
         if (handle == kNullModule) {
+          if (!runtime_path.empty() && index == 0) {
+            unavailable_reason = NdiUnavailableReason::LoadFailed;
+          }
           continue;
         }
         auto* loader = reinterpret_cast<ndi_v5_load_fn>(resolve_symbol(handle, "NDIlib_v5_load"));
@@ -567,6 +572,7 @@ struct NdiFramePublisher::Impl {
             candidate_api->is_supported_CPU == nullptr || candidate_api->send_create == nullptr ||
             candidate_api->send_destroy == nullptr || candidate_api->send_send_video_v2 == nullptr ||
             candidate_api->send_send_video_async_v2 == nullptr) {
+          unavailable_reason = NdiUnavailableReason::EntryPointMissing;
           unload_module(handle);
           continue;
         }
@@ -574,13 +580,20 @@ struct NdiFramePublisher::Impl {
         // initialize is never an error, it just means this provider is not
         // offered. Order matches the vendor's documented recommendation:
         // check CPU support before calling initialize().
-        if (!candidate_api->is_supported_CPU() || !candidate_api->initialize()) {
+        if (!candidate_api->is_supported_CPU()) {
+          unavailable_reason = NdiUnavailableReason::UnsupportedCpu;
+          unload_module(handle);
+          continue;
+        }
+        if (!candidate_api->initialize()) {
+          unavailable_reason = NdiUnavailableReason::InitializationFailed;
           unload_module(handle);
           continue;
         }
         module = handle;
         api = candidate_api;
         initialized = true;
+        unavailable_reason = NdiUnavailableReason::None;
         return;
       }
     } catch (const std::exception&) {
@@ -668,6 +681,24 @@ NdiFramePublisher::NdiFramePublisher(Options options) {
   }
 }
 
+auto describe(NdiUnavailableReason reason) noexcept -> const char* {
+  switch (reason) {
+    case NdiUnavailableReason::None:
+      return "ready";
+    case NdiUnavailableReason::RuntimeNotFound:
+      return "the operator-installed NDI runtime was not found";
+    case NdiUnavailableReason::LoadFailed:
+      return "the selected NDI runtime could not be loaded";
+    case NdiUnavailableReason::EntryPointMissing:
+      return "the NDI runtime is missing the required version-5 entry point";
+    case NdiUnavailableReason::InitializationFailed:
+      return "the NDI runtime refused initialization";
+    case NdiUnavailableReason::UnsupportedCpu:
+      return "the NDI runtime does not support this CPU";
+  }
+  return "the NDI runtime is unavailable";
+}
+
 NdiFramePublisher::~NdiFramePublisher() {
   if (impl_ == nullptr) {
     return;
@@ -687,6 +718,12 @@ NdiFramePublisher::~NdiFramePublisher() {
 auto NdiFramePublisher::available() const noexcept -> bool {
   return impl_ != nullptr && impl_->configuration_valid && impl_->module != kNullModule &&
          impl_->api != nullptr && impl_->initialized;
+}
+
+auto NdiFramePublisher::unavailable_reason() const noexcept
+    -> NdiUnavailableReason {
+  return impl_ == nullptr ? NdiUnavailableReason::RuntimeNotFound
+                          : impl_->unavailable_reason;
 }
 
 auto NdiFramePublisher::open_sender(std::string_view sender_id, std::string_view name) noexcept -> bool {

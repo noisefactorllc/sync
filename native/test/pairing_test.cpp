@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -108,6 +109,68 @@ class ImmediateAuthority final
             .authenticated = true};
   }
 };
+
+class TemporaryAuthorityStore {
+ public:
+  TemporaryAuthorityStore() {
+    static std::atomic<unsigned> counter{0};
+    directory_ = std::filesystem::temp_directory_path() /
+                 ("sync-authority-test-" +
+                  std::to_string(counter.fetch_add(1)));
+    std::error_code error;
+    std::filesystem::remove_all(directory_, error);
+    SYNC_REQUIRE(std::filesystem::create_directories(directory_, error));
+    directory_ = std::filesystem::canonical(directory_, error);
+    SYNC_REQUIRE(!error);
+    path_ = directory_ / "state" / "pairings.v1";
+  }
+
+  ~TemporaryAuthorityStore() {
+    std::error_code error;
+    std::filesystem::remove_all(directory_, error);
+  }
+
+  [[nodiscard]] std::string path() const { return path_.string(); }
+
+ private:
+  std::filesystem::path directory_;
+  std::filesystem::path path_;
+};
+
+class AuthorityCommitHook final
+    : public noisefactor::sync::PairingStoreCommitHook {
+ public:
+  void before_commit() noexcept override {
+    std::unique_lock lock(mutex_);
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [&] { return released_; });
+  }
+
+  [[nodiscard]] bool wait_until_entered() {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2),
+                               [&] { return entered_; });
+  }
+
+  void release() {
+    std::lock_guard lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool entered_ = false;
+  bool released_ = false;
+};
+
+noisefactor::sync::NormalizedOrigin normalized_origin(std::string_view text) {
+  const auto result = noisefactor::sync::normalize_origin(text);
+  SYNC_REQUIRE(result.ok());
+  return result.origin;
+}
 
 } // namespace
 
@@ -248,6 +311,76 @@ SYNC_TEST(pairing_prompt_values_are_fixed_and_generation_scoped) {
   SYNC_REQUIRE(!invalid.assign(1, normalized.origin, std::string("\xC2\x85")));
   SYNC_REQUIRE(
       !invalid.assign(1, normalized.origin, std::string("\xED\xA0\x80")));
+}
+
+SYNC_TEST(store_pairing_authority_lists_and_revokes_its_live_store) {
+  TemporaryAuthorityStore temporary;
+  noisefactor::sync::PairingStore store;
+  SYNC_REQUIRE(store.open({.path = temporary.path()}) ==
+               noisefactor::sync::PairingStoreError::None);
+  noisefactor::sync::pairing::StorePairingAuthority authority(store);
+  const auto first_origin = normalized_origin("https://one.example");
+  const auto second_origin = normalized_origin("https://two.example");
+  noisefactor::sync::PairingCommitGate first_gate;
+  noisefactor::sync::PairingCommitGate second_gate;
+  const auto first = authority.issue(first_origin, first_gate);
+  const auto second = authority.issue(second_origin, second_gate);
+  SYNC_REQUIRE(first.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(second.error == noisefactor::sync::PairingStoreError::None);
+
+  std::array<noisefactor::sync::NormalizedOrigin,
+             noisefactor::sync::kMaximumPairingOrigins>
+      origins{};
+  const auto listed = authority.list(origins);
+  SYNC_REQUIRE(listed.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(listed.count == 2);
+  SYNC_REQUIRE(origins[0] == first_origin);
+  SYNC_REQUIRE(origins[1] == second_origin);
+
+  const auto revoked = authority.revoke(first_origin);
+  SYNC_REQUIRE(revoked.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(revoked.revoked);
+  SYNC_REQUIRE(!authority.authenticate(first_origin, first.token.view())
+                    .authenticated);
+  SYNC_REQUIRE(authority.authenticate(second_origin, second.token.view())
+                   .authenticated);
+}
+
+SYNC_TEST(store_pairing_authority_serializes_management_with_issue_commit) {
+  TemporaryAuthorityStore temporary;
+  AuthorityCommitHook hook;
+  noisefactor::sync::PairingStore store;
+  SYNC_REQUIRE(store.open({.path = temporary.path(), .commit_hook = &hook}) ==
+               noisefactor::sync::PairingStoreError::None);
+  noisefactor::sync::pairing::StorePairingAuthority authority(store);
+  const auto deck = normalized_origin("https://deck.example");
+  noisefactor::sync::PairingCommitGate gate;
+  noisefactor::sync::PairingIssueResult issued;
+  std::thread issue([&] { issued = authority.issue(deck, gate); });
+  SYNC_REQUIRE(hook.wait_until_entered());
+
+  std::array<noisefactor::sync::NormalizedOrigin,
+             noisefactor::sync::kMaximumPairingOrigins>
+      origins{};
+  noisefactor::sync::PairingListResult listed;
+  std::atomic<bool> list_started = false;
+  std::atomic<bool> list_finished = false;
+  std::thread list([&] {
+    list_started.store(true);
+    listed = authority.list(origins);
+    list_finished.store(true);
+  });
+  while (!list_started.load()) std::this_thread::yield();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  SYNC_REQUIRE(!list_finished.load());
+
+  hook.release();
+  issue.join();
+  list.join();
+  SYNC_REQUIRE(issued.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(listed.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(listed.count == 1);
+  SYNC_REQUIRE(origins[0] == deck);
 }
 
 SYNC_TEST(

@@ -43,6 +43,21 @@ bool valid_runtime_path(std::string_view value) noexcept {
   return true;
 }
 
+bool valid_camera_device_path(std::string_view value) noexcept {
+  constexpr std::string_view prefix = "/dev/video";
+  if (value.size() <= prefix.size() || value.size() >= 64 ||
+      !value.starts_with(prefix)) {
+    return false;
+  }
+  for (const unsigned char byte : value.substr(prefix.size())) {
+    if (byte < static_cast<unsigned char>('0') ||
+        byte > static_cast<unsigned char>('9')) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool parse_port(std::string_view value, std::uint16_t& output) noexcept {
   if (value.empty() || (value.size() > 1 && value.front() == '0')) return false;
   unsigned int parsed = 0;
@@ -83,6 +98,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   bool saw_syphon_framework = false;
   bool saw_spout_library = false;
   bool saw_ndi_runtime = false;
+  bool saw_camera_device = false;
   bool saw_list = false;
   bool saw_revoke = false;
   bool saw_register_camera = false;
@@ -114,7 +130,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
     if (argument != "--port" && argument != "--test-origin" &&
         argument != "--test-token" && argument != "--publisher" &&
         argument != "--syphon-framework" && argument != "--spout-library" &&
-        argument != "--ndi-runtime" && argument != "--revoke-origin") {
+        argument != "--ndi-runtime" && argument != "--camera-device" &&
+        argument != "--revoke-origin") {
       return result;
     }
     if (++index >= arguments.size()) return result;
@@ -146,6 +163,10 @@ ParseResult parse(std::span<const std::string_view> arguments) {
                valid_runtime_path(value)) {
       saw_ndi_runtime = true;
       options.ndi_runtime_path.assign(value);
+    } else if (argument == "--camera-device" && !saw_camera_device &&
+               valid_camera_device_path(value)) {
+      saw_camera_device = true;
+      options.camera_device_path.assign(value);
     } else if (argument == "--revoke-origin" && !saw_revoke) {
       const auto normalized = normalize_origin(value);
       if (!normalized.ok()) return result;
@@ -166,6 +187,9 @@ ParseResult parse(std::span<const std::string_view> arguments) {
       (saw_syphon_framework && !options.selects_publisher("syphon")) ||
       (saw_spout_library && !options.selects_publisher("spout")) ||
       (saw_ndi_runtime && !options.selects_publisher("ndi"));
+  const bool camera_device_without_publisher =
+      saw_camera_device && saw_publisher &&
+      !options.selects_publisher("camera");
 
   // Each camera command is the whole command line. Combining them with each
   // other, with pairing management, or with any server argument is a usage
@@ -173,7 +197,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   const bool camera_management = saw_register_camera || saw_unregister_camera;
   if (camera_management) {
     if (saw_register_camera == saw_unregister_camera || saw_list || saw_revoke || saw_port ||
-        saw_origin || saw_token || saw_test_receiver || saw_publisher || saw_runtime_path) {
+        saw_origin || saw_token || saw_test_receiver || saw_publisher ||
+        saw_runtime_path || saw_camera_device) {
       return result;
     }
     options.mode = saw_register_camera ? Mode::RegisterCamera : Mode::UnregisterCamera;
@@ -185,7 +210,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   const bool test_shape = saw_origin || saw_token || saw_test_receiver;
   if (management) {
     if (saw_list == saw_revoke || saw_port || test_shape || saw_publisher ||
-        saw_runtime_path) {
+        saw_runtime_path || saw_camera_device) {
       return result;
     }
     options.mode = saw_list ? Mode::ListPairings : Mode::RevokeOrigin;
@@ -195,7 +220,9 @@ ParseResult parse(std::span<const std::string_view> arguments) {
 
   if (test_shape) {
     if (!saw_port || !saw_origin || !saw_token ||
-        saw_test_receiver == saw_publisher || runtime_path_without_publisher) {
+        saw_test_receiver == saw_publisher || runtime_path_without_publisher ||
+        camera_device_without_publisher ||
+        (saw_test_receiver && saw_camera_device)) {
       return result;
     }
     options.mode = Mode::StaticTest;
@@ -203,7 +230,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
     return result;
   }
 
-  if (runtime_path_without_publisher || options.port == 0) {
+  if (runtime_path_without_publisher || camera_device_without_publisher ||
+      options.port == 0) {
     return result;
   }
   options.mode = Mode::Production;
@@ -214,7 +242,7 @@ void print_usage(std::ostream& error) {
   error << "usage: syncd [--port <1-65535>]"
            " [--publisher <syphon|spout|ndi|camera>]..."
            " [--syphon-framework <path>] [--spout-library <path>]"
-           " [--ndi-runtime <path>]\n"
+           " [--ndi-runtime <path>] [--camera-device /dev/videoN]\n"
            "       syncd --port <0-65535> --test-origin <origin>"
            " --test-token <token>"
            " (--test-receiver | --publisher <syphon|spout|ndi|camera>...)\n"

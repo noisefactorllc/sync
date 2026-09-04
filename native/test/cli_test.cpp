@@ -121,6 +121,31 @@ SYNC_TEST(cli_production_port_and_publisher_selection_are_strict) {
   }
 }
 
+SYNC_TEST(cli_camera_device_requires_an_absolute_numeric_video_node_and_camera_selection) {
+  const auto automatic = parse({"--camera-device", "/dev/video12"});
+  SYNC_REQUIRE(automatic.ok());
+  SYNC_REQUIRE(automatic.options.camera_device_path == "/dev/video12");
+
+  SYNC_REQUIRE(
+      parse({"--publisher", "camera", "--camera-device", "/dev/video0"})
+          .ok());
+  SYNC_REQUIRE(
+      !parse({"--publisher", "ndi", "--camera-device", "/dev/video0"})
+           .ok());
+  SYNC_REQUIRE(!parse({"--camera-device", "video0"}).ok());
+  SYNC_REQUIRE(!parse({"--camera-device", "/dev/video"}).ok());
+  SYNC_REQUIRE(
+      !parse({"--camera-device", "/dev/video1/../video2"}).ok());
+  SYNC_REQUIRE(!parse({"--camera-device", "/dev/video1", "--camera-device",
+                       "/dev/video2"})
+                    .ok());
+
+  std::ostringstream usage;
+  cli::print_usage(usage);
+  SYNC_REQUIRE(usage.str().find("[--camera-device /dev/videoN]") !=
+               std::string::npos);
+}
+
 // The grammar is platform-neutral on purpose: a command line written for a
 // Windows machine still parses on macOS, where those providers simply
 // resolve to unavailable at startup rather than failing to parse.

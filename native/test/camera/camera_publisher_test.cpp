@@ -93,8 +93,13 @@ SYNC_TEST(camera_publisher_reports_sink_availability_and_reason) {
   CameraFramePublisher publisher(sink);
   SYNC_REQUIRE(!publisher.available());
   SYNC_REQUIRE(publisher.unavailable_reason() == CameraSinkUnavailableReason::DeviceNotFound);
+#if defined(__linux__)
+  SYNC_REQUIRE(std::string(describe(publisher.unavailable_reason())).find("device_not_found") !=
+               std::string::npos);
+#else
   SYNC_REQUIRE(std::string(describe(publisher.unavailable_reason())).find("System Settings") !=
                std::string::npos);
+#endif
 }
 
 SYNC_TEST(camera_publisher_never_declines_a_sender_and_the_oldest_drives) {
@@ -192,6 +197,11 @@ SYNC_TEST(camera_unavailability_phrases_are_distinct_and_carry_the_status) {
   SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::SectionAccessDenied, -67) ==
                std::string(describe(CameraSinkUnavailableReason::SectionAccessDenied)) +
                    " (HRESULT 0xFFFFFFBD)");
+#elif defined(__linux__)
+  SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::DevicePermissionDenied,
+                                       13) ==
+               std::string(describe(CameraSinkUnavailableReason::DevicePermissionDenied)) +
+                   " (errno 13)");
 #else
   SYNC_REQUIRE(describe_unavailability(CameraSinkUnavailableReason::StreamNotStarted, -67) ==
                std::string(describe(CameraSinkUnavailableReason::StreamNotStarted)) +

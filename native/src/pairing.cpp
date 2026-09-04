@@ -357,12 +357,24 @@ bool PromptRequest::assign(std::uint64_t value,
 PairingIssueResult
 StorePairingAuthority::issue(const NormalizedOrigin &origin,
                              PairingCommitGate &gate) noexcept {
+  std::lock_guard lock(store_mutex_);
   return store_.issue(origin, gate);
 }
 PairingAuthenticationResult
 StorePairingAuthority::authenticate(const NormalizedOrigin &origin,
                                     std::string_view token) noexcept {
+  std::lock_guard lock(store_mutex_);
   return store_.authenticate(origin, token);
+}
+PairingListResult
+StorePairingAuthority::list(std::span<NormalizedOrigin> output) noexcept {
+  std::lock_guard lock(store_mutex_);
+  return store_.list(output);
+}
+PairingRevocationResult
+StorePairingAuthority::revoke(const NormalizedOrigin &origin) noexcept {
+  std::lock_guard lock(store_mutex_);
+  return store_.revoke(origin);
 }
 
 } // namespace noisefactor::sync::pairing

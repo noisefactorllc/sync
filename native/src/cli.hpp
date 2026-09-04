@@ -55,6 +55,7 @@ struct Options {
   std::string syphon_framework_path;
   std::string spout_library_path;
   std::string ndi_runtime_path;
+  std::string camera_device_path;
   NormalizedOrigin revoke_origin{};
 
   [[nodiscard]] bool selects_publisher(std::string_view id) const noexcept;

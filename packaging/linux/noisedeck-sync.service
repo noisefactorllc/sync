@@ -1,0 +1,24 @@
+[Unit]
+Description=Noisedeck Sync browser-to-video daemon
+Documentation=https://sync.noisedeck.app/
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/syncd
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RuntimeDirectory=noisedeck-sync
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=noisefactor-sync
+ConfigurationDirectoryMode=0700
+ReadWritePaths=%h/.config/noisefactor-sync %t/noisedeck-sync
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

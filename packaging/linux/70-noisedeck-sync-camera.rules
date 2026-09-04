@@ -1,0 +1,1 @@
+SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", ATTR{name}=="Sync Camera", GROUP="noisedeck-sync", MODE="0660"

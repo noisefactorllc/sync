@@ -1,0 +1,9 @@
+Noisedeck Sync for Linux uses OpenSSL and libuv through their system-provided
+shared libraries. Their licenses and source information are provided by the
+Ubuntu packages installed on the system.
+
+The optional NDI runtime is discovered dynamically. It is not linked into or
+redistributed with Noisedeck Sync and remains subject to Vizrt's terms.
+
+The v4l2loopback kernel module and utilities are installed from Ubuntu's
+packages. Noisedeck Sync does not redistribute a kernel module or fork.

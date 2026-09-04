@@ -19,6 +19,7 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
@@ -157,7 +158,20 @@ PairingStoreError open_secure_directory(std::string_view directory, ScopedHandle
   if (directory.empty() || directory.front() != '/' || directory == "/") {
     return PairingStoreError::InvalidPath;
   }
-  ScopedHandle current(::open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+  int root_descriptor = ::open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+#if defined(__linux__)
+  // A per-user systemd service that creates a mount namespace (PrivateTmp,
+  // ProtectSystem, or ProtectHome) can deny a read-open of the namespace
+  // root even though normal traversal beneath it is allowed. O_PATH retains
+  // the fd-anchored, no-string-reresolution traversal this function requires
+  // without asking the namespace root for read access. Descendant directory
+  // handles are still opened O_RDONLY so ownership checks and durability
+  // fsyncs retain their existing behavior.
+  if (root_descriptor < 0 && errno == EACCES) {
+    root_descriptor = ::open("/", O_PATH | O_CLOEXEC | O_DIRECTORY);
+  }
+#endif
+  ScopedHandle current(root_descriptor);
   if (!current.valid()) return PairingStoreError::Io;
   std::size_t start = 1;
   while (start < directory.size()) {

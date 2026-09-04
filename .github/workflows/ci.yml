@@ -71,6 +71,115 @@ jobs:
       - name: Run real-daemon loopback tests
         run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
 
+  linux:
+    name: Ubuntu 24.04 x86_64 ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SYNC_VERSION: ${{ github.run_id }}.${{ github.run_attempt }}~ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            build_type: Release
+            cxx_flags: '-Wall -Wextra -Wpedantic -Werror'
+            sanitizer: false
+          - name: Warnings as errors
+            build_type: Debug
+            cxx_flags: '-Wall -Wextra -Wpedantic -Werror'
+            sanitizer: false
+          - name: Address and undefined sanitizers
+            build_type: Debug
+            cxx_flags: '-fsanitize=address,undefined -fno-omit-frame-pointer'
+            sanitizer: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev \
+            dpkg-dev file procps
+
+      - name: Configure and build
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+          EXTRA_CXX_FLAGS: ${{ matrix.cxx_flags }}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DSYNC_PRODUCT_VERSION="$SYNC_VERSION" \
+            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS"
+          cmake --build build --parallel 4
+
+      - name: Run native tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run browser and daemon tests
+        run: |
+          npm run test:browser
+          SYNC_DAEMON_PATH=build/syncd npm run test:integration
+          SYNC_DAEMON_PATH=build/syncd SYNC_CTL_PATH=build/syncctl \
+            npm run test:integration:linux
+
+      - name: Build and verify Debian package
+        if: matrix.name == 'Release'
+        run: |
+          cmake --build build --target sync_linux_deb --parallel 4
+          SYNC_PACKAGE_DIR=build/package npm run test:packaging:linux
+          scripts/verify-linux-package.sh \
+            "build/package/Sync-$SYNC_VERSION-linux-amd64.deb" "$SYNC_VERSION"
+          sudo scripts/smoke-linux-package.sh \
+            "$PWD/build/package/Sync-$SYNC_VERSION-linux-amd64.deb"
+
+      - name: Upload Debian package
+        if: matrix.name == 'Release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-linux-amd64
+          path: build/package/Sync-${{ env.SYNC_VERSION }}-linux-amd64.deb
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Ubuntu 24.04 ARM64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev
+
+      - name: Build and test the camera-free ARM64 surface
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS='-Wall -Wextra -Wpedantic -Werror'
+          cmake --build build --parallel 4
+          ctest --test-dir build --output-on-failure
+          npm run test:browser
+
   windows:
     name: Windows ${{ matrix.name }}
     runs-on: windows-latest

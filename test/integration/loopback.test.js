@@ -40,12 +40,13 @@ const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
 // both platforms because its send path takes a CPU frame and needs no
 // platform-specific GPU layer; Syphon and Spout are each platform-bound.
 // Naming no publisher selects every provider the platform implements. Both
-// platforms now offer the camera -- a system extension on macOS, a Media
-// Foundation virtual camera on Windows -- and it is unavailable on any
-// machine that has not approved or registered it, CI included.
+// Every platform offers a camera publisher, but the GPU-sharing providers are
+// native to their respective desktop OSes. Linux exposes camera and NDI only.
 const DEFAULT_PROVIDER_IDS = process.platform === "win32"
   ? ["spout", "ndi", "camera"]
-  : ["syphon", "ndi", "camera"];
+  : process.platform === "darwin"
+    ? ["syphon", "ndi", "camera"]
+    : ["ndi", "camera"];
 
 function withTimeout(promise, description, timeoutMs = TIMEOUT_MS) {
   let timer;
@@ -630,13 +631,14 @@ async function createTestSender(control, port, name) {
 const GRACEFUL_SHUTDOWN_IS_OBSERVABLE = process.platform !== "win32";
 
 // The default pairing store lives under $HOME on POSIX and %LOCALAPPDATA%
-// on Windows, so a test that wants an isolated store has to redirect
-// whichever one this platform actually reads. Setting only HOME would
-// silently let a Windows run touch the real user store.
+// on Windows. Linux production mode also owns a control socket under
+// $XDG_RUNTIME_DIR, so the same mode-0700 temporary directory isolates both.
+// Setting only HOME would silently let a Windows run touch the real user store.
 function isolatedStoreEnvironment(directory) {
   return process.platform === "win32"
     ? { ...process.env, LOCALAPPDATA: directory }
-    : { ...process.env, HOME: directory };
+    : { ...process.env, HOME: directory,
+        ...(process.platform === "linux" ? { XDG_RUNTIME_DIR: directory } : {}) };
 }
 
 function escapeForRegExp(value) {
@@ -2386,7 +2388,9 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
       // covers a second provider's reason wiring.
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
         expectedStderr: expectedProviderDiagnostics(reportedProviders, {
-          ndi: "the NDI runtime did not load, or failed to initialize",
+          ndi: process.platform === "linux"
+            ? "the operator-installed NDI runtime was not found"
+            : "the NDI runtime did not load, or failed to initialize",
         }),
       });
     }
@@ -2440,9 +2444,9 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
       // elsewhere every candidate path is absent.
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
         expectedStderr: expectedProviderDiagnostics(reportedProviders, {
-          syphon: process.platform === "win32"
-            ? "this build does not implement syphon on this platform"
-            : "no Syphon.framework was found in any searched location",
+          syphon: process.platform === "darwin"
+            ? "no Syphon.framework was found in any searched location"
+            : "this build does not implement syphon on this platform",
         }),
       });
     }
@@ -2458,7 +2462,9 @@ test("syncd management lists and revokes the isolated default store without open
     temporaryHome,
     ...(process.platform === "win32"
       ? ["Noisefactor Sync"]
-      : ["Library", "Application Support", "Noisefactor Sync"]),
+      : process.platform === "linux"
+        ? [".config", "noisefactor-sync"]
+        : ["Library", "Application Support", "Noisefactor Sync"]),
     "pairings.v1",
   );
   const managementOrigin = "https://management.example";

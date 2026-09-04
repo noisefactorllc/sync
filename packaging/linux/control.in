@@ -1,0 +1,11 @@
+Package: noisedeck-sync
+Version: @VERSION@
+Architecture: @ARCHITECTURE@
+Maintainer: Noisefactor LLC <support@noisefactor.io>
+Section: video
+Priority: optional
+Depends: libssl3t64, libuv1t64, v4l2loopback-dkms, v4l2loopback-utils
+Suggests: avahi-daemon, pipewire, wireplumber
+Description: Noisedeck browser-to-video bridge daemon
+ Sync receives authenticated browser frames and publishes them to native
+ video ecosystems, including a v4l2loopback virtual camera on Linux.

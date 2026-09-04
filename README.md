@@ -23,6 +23,8 @@ Sync is under active development. This source tree currently includes:
 - a macOS Metal publisher and dynamically discovered Syphon integration;
 - a Windows Spout publisher and a cross-platform NDI publisher, both
   dynamically discovered;
+- a generic Ubuntu 24.04 user daemon with an owner-only control socket and a
+  stock-v4l2loopback `Sync Camera` output;
 - an Apple Silicon menu-bar companion and a Windows tray companion, each with
   bounded helper supervision; and
 - native, browser, protocol, security-boundary, and real-loopback tests.
@@ -87,9 +89,10 @@ they support.
 | --- | --- | --- | --- |
 | Syphon | macOS | `Syphon.framework` | Yes — see [docs/dependencies/syphon.md](docs/dependencies/syphon.md) |
 | Spout | Windows | `SpoutLibrary.dll` | Yes — see [docs/dependencies/spout.md](docs/dependencies/spout.md) |
-| NDI | Windows, macOS | NDI Runtime | No — the SDK licence forbids redistribution; see [docs/dependencies/ndi.md](docs/dependencies/ndi.md) |
+| NDI | Windows, macOS, Linux | Operator-installed NDI Runtime (`libndi.so.5` on Linux) | No — the SDK licence forbids redistribution; see [docs/dependencies/ndi.md](docs/dependencies/ndi.md) |
 | Camera | macOS | Sync Camera extension, bundled in Sync.app | Yes — activated by Sync.app on first launch, approved once in System Settings |
 | Camera | Windows 11 | `SyncCamera.dll`, bundled with the installer | Yes — enabled once from the tray menu, which asks for administrator rights |
+| Camera | Ubuntu 24.04 x86_64 | Ubuntu `v4l2loopback` packages | No kernel module is bundled; one-time setup configures the stock module |
 
 The camera provider publishes a 1920×1080 stream, so any app that picks a
 camera can use it. While no sender is live the camera shows a dark card
@@ -113,6 +116,15 @@ afterwards, for the same reason it does on macOS.
 The Windows camera offers NV12 first and RGB32 second, and converts from the
 one BGRA canvas per consumer, so two applications can negotiate different
 formats against the same device.
+
+On **Ubuntu 24.04**, `syncd` is an unprivileged systemd user service and the
+camera appears as `Sync Camera`. The setup command installs a fixed
+`v4l2loopback` configuration and a group-scoped udev rule; ordinary daemon
+operation never needs root. Sync deliberately creates no `/dev` alias or udev
+symlink: it discovers and validates the kernel-owned `/dev/videoN` each time it
+opens the camera. PipeWire and WirePlumber are useful interoperability checks
+reported by `syncctl doctor`, but are not in the frame path. The daemon writes
+NV12 directly to V4L2.
 
 No provider is ever linked at build time. Each is discovered at run time
 through its documented public entry point, and a provider whose runtime is
@@ -185,6 +197,44 @@ runtime path for development builds:
 ```
 
 See the provider table above for each runtime and license boundary.
+
+### Ubuntu 24.04 daemon
+
+The supported Linux package is x86_64. The same `.deb` can be downloaded
+directly or indexed unchanged by a signed Noisefactor-hosted APT repository:
+
+```bash
+sudo apt install ./Sync-<version>-linux-amd64.deb
+sudo syncctl camera setup --user "$USER"
+# Log out and back in if setup added the group.
+systemctl --user enable --now noisedeck-sync.service
+syncctl pair
+syncctl doctor
+```
+
+If another `v4l2loopback` configuration or loaded instance already exists,
+setup refuses to merge or renumber it. Resolve that administrator-owned state
+explicitly and rerun setup. To select one already validated device, add a user
+unit drop-in with `systemctl --user edit noisedeck-sync.service`:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/syncd --camera-device /dev/video12
+```
+
+Safe removal stops and disables the user service first, removes the package,
+then purges only setup files whose complete contents still match Sync's
+templates:
+
+```bash
+systemctl --user disable --now noisedeck-sync.service
+sudo apt remove noisedeck-sync
+sudo apt purge noisedeck-sync
+```
+
+Locally modified module configuration is retained and named on stderr. Removal
+does not unload a live module or remove the `noisedeck-sync` group.
 
 ## Packaging the desktop previews
 

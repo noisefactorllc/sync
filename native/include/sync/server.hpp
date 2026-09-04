@@ -8,6 +8,8 @@
 
 namespace noisefactor::sync {
 
+class DaemonMetrics;
+
 namespace pairing {
 class PairingAuthority;
 class PairingPrompt;
@@ -42,6 +44,7 @@ struct ServerOptions {
   std::size_t provider_count = 0;
   pairing::PairingAuthority *pairing_authority = nullptr;
   pairing::PairingPrompt *pairing_prompt = nullptr;
+  DaemonMetrics *metrics = nullptr;
   void (*platform_event_pump)(void *context) noexcept = nullptr;
   void *platform_event_pump_context = nullptr;
 };

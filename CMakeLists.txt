@@ -75,6 +75,7 @@ endif()
 
 add_library(sync_protocol
   native/src/control.cpp
+  native/src/daemon_metrics.cpp
   native/src/frame_receiver.cpp
   native/src/origin.cpp
   native/src/pairing.cpp
@@ -152,6 +153,204 @@ add_executable(sync_cli_tests
 target_compile_features(sync_cli_tests PRIVATE cxx_std_20)
 target_link_libraries(sync_cli_tests PRIVATE sync_cli)
 add_test(NAME sync_cli_tests COMMAND sync_cli_tests)
+
+add_executable(sync_daemon_metrics_tests
+  native/test/linux/daemon_metrics_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_daemon_metrics_tests PRIVATE cxx_std_20)
+target_include_directories(sync_daemon_metrics_tests PRIVATE native/test)
+target_link_libraries(sync_daemon_metrics_tests PRIVATE sync_protocol)
+add_test(NAME sync_daemon_metrics_tests COMMAND sync_daemon_metrics_tests)
+
+add_library(sync_linux_control_protocol
+  native/src/platform/linux/control_protocol.cpp
+)
+target_compile_features(sync_linux_control_protocol PUBLIC cxx_std_20)
+target_include_directories(sync_linux_control_protocol PUBLIC native/include)
+target_link_libraries(sync_linux_control_protocol PUBLIC sync_protocol)
+
+add_executable(sync_linux_control_protocol_tests
+  native/test/linux/control_protocol_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_linux_control_protocol_tests PRIVATE cxx_std_20)
+target_include_directories(sync_linux_control_protocol_tests PRIVATE native/test)
+target_link_libraries(sync_linux_control_protocol_tests
+  PRIVATE sync_linux_control_protocol)
+add_test(NAME sync_linux_control_protocol_tests
+  COMMAND sync_linux_control_protocol_tests)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(sync_linux_control_service
+    native/src/platform/linux/control_service.cpp
+  )
+  target_compile_features(sync_linux_control_service PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_control_service PUBLIC native/include)
+  target_link_libraries(sync_linux_control_service
+    PUBLIC sync_linux_control_protocol sync_protocol Threads::Threads)
+  target_link_libraries(syncd PRIVATE sync_linux_control_service)
+
+  add_executable(sync_linux_control_service_tests
+    native/test/linux/control_service_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_control_service_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_control_service_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_control_service_tests
+    PRIVATE sync_linux_control_service)
+  add_test(NAME sync_linux_control_service_tests
+    COMMAND sync_linux_control_service_tests)
+
+  add_library(syncctl_cli
+    native/src/syncctl_cli.cpp
+  )
+  target_compile_features(syncctl_cli PUBLIC cxx_std_20)
+  target_include_directories(syncctl_cli PUBLIC native/src native/include)
+  target_link_libraries(syncctl_cli PUBLIC sync_linux_control_protocol)
+
+  add_executable(syncctl native/src/syncctl_main.cpp)
+  target_compile_features(syncctl PRIVATE cxx_std_20)
+  target_link_libraries(syncctl PRIVATE syncctl_cli)
+
+  add_executable(syncctl_cli_tests
+    native/test/linux/syncctl_cli_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(syncctl_cli_tests PRIVATE cxx_std_20)
+  target_include_directories(syncctl_cli_tests PRIVATE native/test)
+  target_link_libraries(syncctl_cli_tests PRIVATE syncctl_cli)
+  add_test(NAME syncctl_cli_tests COMMAND syncctl_cli_tests)
+
+  add_library(sync_linux_camera_device
+    native/src/platform/linux/camera_device.cpp
+  )
+  target_compile_features(sync_linux_camera_device PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_camera_device PUBLIC native/include)
+  target_link_libraries(sync_linux_camera_device PUBLIC sync_camera_nv12)
+
+  add_executable(sync_linux_camera_device_tests
+    native/test/linux/camera_device_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_camera_device_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_camera_device_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_camera_device_tests
+    PRIVATE sync_linux_camera_device)
+  add_test(NAME sync_linux_camera_device_tests
+    COMMAND sync_linux_camera_device_tests)
+
+  add_executable(sync_camera_fitter_tests
+    native/test/camera/frame_fitter_test.cpp
+    native/test/camera/camera_publisher_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_camera_fitter_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_fitter_tests PRIVATE native/test)
+  target_link_libraries(sync_camera_fitter_tests PRIVATE
+    sync_camera_publisher sync_camera_fitter)
+  add_test(NAME sync_camera_fitter_tests COMMAND sync_camera_fitter_tests)
+
+  add_library(sync_linux_camera_idle_card
+    native/src/platform/linux/camera_idle_card.cpp
+  )
+  target_compile_features(sync_linux_camera_idle_card PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_camera_idle_card PUBLIC native/include)
+
+  add_executable(sync_linux_camera_idle_card_tests
+    native/test/linux/camera_idle_card_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_camera_idle_card_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_camera_idle_card_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_camera_idle_card_tests PRIVATE
+    sync_linux_camera_idle_card sync_camera_nv12)
+  add_test(NAME sync_linux_camera_idle_card_tests
+    COMMAND sync_linux_camera_idle_card_tests)
+
+  add_library(sync_linux_camera_sink
+    native/src/platform/linux/camera_sink.cpp
+  )
+  target_compile_features(sync_linux_camera_sink PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_camera_sink PUBLIC native/include)
+  target_link_libraries(sync_linux_camera_sink PUBLIC
+    sync_linux_camera_device sync_linux_camera_idle_card sync_camera_nv12
+    sync_camera_relay_policy sync_protocol Threads::Threads)
+
+  add_executable(sync_linux_camera_sink_tests
+    native/test/linux/camera_sink_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_camera_sink_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_camera_sink_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_camera_sink_tests PRIVATE
+    sync_linux_camera_sink)
+  add_test(NAME sync_linux_camera_sink_tests COMMAND sync_linux_camera_sink_tests)
+  target_link_libraries(syncd PRIVATE
+    sync_linux_camera_sink sync_camera_publisher)
+
+  add_library(sync_linux_diagnostics
+    native/src/platform/linux/diagnostics.cpp
+  )
+  target_compile_features(sync_linux_diagnostics PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_diagnostics PUBLIC native/include)
+  target_link_libraries(sync_linux_diagnostics PUBLIC
+    sync_linux_camera_device sync_ndi_publisher)
+  target_link_libraries(syncctl PRIVATE sync_linux_diagnostics)
+
+  add_executable(sync_linux_diagnostics_tests
+    native/test/linux/diagnostics_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_diagnostics_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_diagnostics_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_diagnostics_tests PRIVATE
+    sync_linux_diagnostics)
+  add_test(NAME sync_linux_diagnostics_tests COMMAND sync_linux_diagnostics_tests)
+
+  add_library(sync_linux_camera_setup
+    native/src/platform/linux/camera_setup.cpp
+  )
+  target_compile_features(sync_linux_camera_setup PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_camera_setup PUBLIC native/include)
+  target_link_libraries(sync_linux_camera_setup PUBLIC sync_linux_camera_device)
+  target_link_libraries(syncctl PRIVATE sync_linux_camera_setup)
+
+  add_executable(sync_linux_camera_setup_tests
+    native/test/linux/camera_setup_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_linux_camera_setup_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_linux_camera_setup_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_camera_setup_tests PRIVATE
+    sync_linux_camera_setup)
+  add_test(NAME sync_linux_camera_setup_tests COMMAND sync_linux_camera_setup_tests)
+
+  add_executable(sync_v4l2_receiver_probe
+    native/test/linux/v4l2_receiver_probe.cpp
+  )
+  target_compile_features(sync_v4l2_receiver_probe PRIVATE cxx_std_20)
+  target_include_directories(sync_v4l2_receiver_probe PRIVATE native/include)
+
+  add_executable(sync_v4l2_receiver_probe_unit
+    native/test/linux/v4l2_receiver_probe.cpp
+    native/test/linux/v4l2_receiver_probe_test.cpp
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_v4l2_receiver_probe_unit PRIVATE cxx_std_20)
+  target_compile_definitions(sync_v4l2_receiver_probe_unit PRIVATE
+    SYNC_V4L2_PROBE_NO_MAIN=1)
+  target_include_directories(sync_v4l2_receiver_probe_unit PRIVATE
+    native/include native/test)
+  add_test(NAME v4l2_receiver_probe_unit COMMAND sync_v4l2_receiver_probe_unit)
+
+  add_custom_target(sync_linux_deb
+    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-linux.sh"
+            "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${SYNC_PRODUCT_VERSION}" amd64
+    DEPENDS syncd syncctl
+    VERBATIM)
+endif()
 
 add_executable(sync_pairing_test_server
   native/test/pairing_server_main.cpp

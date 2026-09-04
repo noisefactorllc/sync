@@ -1,0 +1,2 @@
+# Managed by Noisedeck Sync. Local edits make this file operator-owned.
+options v4l2loopback devices=1 card_label="Sync Camera" exclusive_caps=1
