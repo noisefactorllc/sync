@@ -16,6 +16,8 @@
     "test:packaging": "node --test --test-timeout=30000 test/packaging/*.test.js",
     "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js",
     "test:linux:containers": "scripts/test-linux-containers.sh",
-    "test:soak": "node test/acceptance/daemon-memory-soak.mjs"
+    "test:soak": "node test/acceptance/daemon-memory-soak.mjs",
+    "test:soak:unit": "node --test --test-timeout=30000 test/soak/lib/*.test.js",
+    "test:soak:long": "node test/soak/run.mjs"
   }
 }
