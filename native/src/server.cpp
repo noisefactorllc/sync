@@ -574,7 +574,38 @@ class Server {
       remove_owned_senders(connection, false);
     } else if (connection.role == ConnectionRole::Data && connection.sender_slot.has_value()) {
       Sender& sender = senders_[*connection.sender_slot];
-      if (sender.occupied && sender.data == &connection) sender.data = nullptr;
+      if (sender.occupied && sender.data == &connection) {
+        // REAP THE SENDER. Nulling the pointer left it occupied and still
+        // registered with every publisher, and the sender could never be used
+        // again anyway: the ticket is cleared the moment a data socket
+        // attaches, so no second data socket can ever bind to this slot.
+        //
+        // Leaving it registered is not inert. The camera publisher drives from
+        // the occupied entry with the LOWEST opened_at, and a non-driving
+        // sender's frames are accepted and dropped by design. So a stranded
+        // dead entry keeps driving forever, and the REPLACEMENT sender — which
+        // opens later and therefore sorts after it — publishes into a
+        // publisher that ignores it. Every frame returns Accepted and is
+        // discarded, the sender's own counters climb normally, and the
+        // consumer's picture freezes permanently while everything reports
+        // healthy.
+        //
+        // Measured on spare.lan: a transport close, a replacement sender three
+        // seconds later, five seconds of the old delivery draining, then 954
+        // seconds frozen on one frame with the new sender reporting 24.6 fps
+        // and its counter climbing 28 -> 102 -> 163.
+        //
+        // The reap was previously reachable only from a CONTROL teardown or an
+        // explicit closeSender message — and the SDK fires that message
+        // unawaited with its errors swallowed, so the daemon's only route to
+        // learning its sender had gone was one it could not rely on. It now
+        // learns from the socket it owns.
+        //
+        // graceful_data_close is false: this connection is already closing,
+        // remove_sender's own guard skips it, and there is nothing to close
+        // gracefully.
+        remove_sender(*connection.sender_slot, false);
+      }
     }
 
     uv_close(reinterpret_cast<uv_handle_t*>(&connection.handle), [](uv_handle_t* handle) {

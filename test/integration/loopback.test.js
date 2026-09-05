@@ -1867,9 +1867,16 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     assert.equal((await control.client.nextFrame("control under exhaustion")).opcode,
                  0xa);
 
+    // The offender's DATA socket was closed by the daemon for exhausting the
+    // inbound budget, and a dead data socket now reaps its sender. So the
+    // capacity this test is about is reclaimed by the daemon itself rather
+    // than by the test's own cleanup — which is the stronger claim, and the
+    // one the test name actually makes.
     control.client.sendJson({ type: "closeSender", senderId: second.created.id });
-    assert.equal((await control.client.nextJson("budget offender cleanup")).type,
-                 "senderClosed");
+    const offenderCleanup = await control.client.nextJson("budget offender cleanup");
+    assert.equal(offenderCleanup.type, "error");
+    assert.equal(offenderCleanup.code, "sender_not_found",
+                 "the offender's slot must already be reclaimed, not waiting on a control message");
     control.client.sendJson({ type: "closeSender", senderId: first.created.id });
     assert.equal((await control.client.nextJson("budget holder cleanup")).type,
                  "senderClosed");
@@ -1893,9 +1900,14 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     replacement.data.destroy();
     await replacement.data.waitClosed();
     sockets.delete(replacement.data);
+    // The test destroyed this data socket itself two lines up, and a dead data
+    // socket reaps its sender, so the slot is already released. Asserting that
+    // is stronger than asserting a control message can still close it: it is
+    // the property the surrounding test is about.
     control.client.sendJson({ type: "closeSender", senderId: replacement.created.id });
-    assert.equal((await control.client.nextJson("budget replacement cleanup")).type,
-                 "senderClosed");
+    const replacementCleanup = await control.client.nextJson("budget replacement cleanup");
+    assert.equal(replacementCleanup.type, "error");
+    assert.equal(replacementCleanup.code, "sender_not_found");
 
     control.client.send(0x8, Buffer.from([0x03, 0xe8]));
     assert.equal((await control.client.nextFrame("budget control close")).opcode, 0x8);
@@ -1948,9 +1960,14 @@ test("an incomplete data message times out without expiring an idle sender", asy
     assert.equal((await idle.data.nextFrame("idle data pong after timeout")).opcode,
                  0xa);
 
+    // Same reason as the budget test: the daemon closed this data socket for an
+    // incomplete frame, and a dead data socket reaps its sender. The point of
+    // this test — that the IDLE sender survives — is asserted below and is
+    // unaffected.
     control.client.sendJson({ type: "closeSender", senderId: partial.created.id });
-    assert.equal((await control.client.nextJson("partial sender cleanup")).type,
-                 "senderClosed");
+    const partialCleanup = await control.client.nextJson("partial sender cleanup");
+    assert.equal(partialCleanup.type, "error");
+    assert.equal(partialCleanup.code, "sender_not_found");
     control.client.sendJson({ type: "closeSender", senderId: idle.created.id });
     assert.equal((await control.client.nextJson("idle sender cleanup")).type,
                  "senderClosed");
@@ -2642,5 +2659,61 @@ test("syncd management preserves authentication in a running pairing daemon", as
     for (const client of clients) client.destroy();
     if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
     await rm(temporaryHome, { recursive: true, force: true });
+  }
+});
+
+// A sender whose DATA socket dies must be unregistered from the publishers,
+// not merely disconnected from them.
+//
+// Nulling the pointer left the entry occupied and still registered, and the
+// slot could never be reused anyway — the ticket is cleared the moment a data
+// socket attaches, so no second data socket can bind to it. Leaving it
+// registered is not inert: the camera publisher drives from the occupied entry
+// with the lowest opened_at, and a non-driving sender's frames are accepted
+// and dropped by design. A stranded dead entry therefore keeps driving
+// forever, and the replacement sender publishes into a publisher that ignores
+// it — every frame Accepted and discarded, the sender's own counters climbing
+// normally, the consumer's picture frozen while everything reports healthy.
+//
+// Measured on spare.lan before the fix: a transport close, a replacement
+// sender three seconds later, five seconds of the old delivery draining, then
+// 954 seconds frozen on one frame with the new sender reporting 24.6 fps.
+//
+// The reap used to be reachable only from a control teardown or an explicit
+// closeSender — and the SDK fires that message unawaited with its errors
+// swallowed, so the daemon's only route to learning was one it could not rely
+// on. Asserted through the control protocol: a reaped sender is gone, so
+// closing it by id reports sender_not_found.
+test("a dead data socket unregisters its sender rather than stranding it", async () => {
+  const daemon = await spawnDaemon();
+  try {
+    const control = await authenticateControl(daemon.ready, ORIGIN, TOKEN);
+    assert.equal((await control.client.nextJson("welcome")).type, "welcome");
+
+    const first = await createTestSender(control.client, daemon.ready.port, "Stranded sender");
+    // Kill the DATA socket only. The control connection stays up, which is
+    // exactly the case the daemon could not previously observe.
+    first.data.destroy();
+    await first.data.waitClosed().catch(() => {});
+
+    // A second sender, opened after the first died, is the one that must end
+    // up driving. Creating it proves the slot was released as well.
+    const second = await createTestSender(control.client, daemon.ready.port, "Replacement sender");
+    assert.notEqual(second.created.id, first.created.id);
+
+    // The reaped sender is gone: closing it by id is not found. Before the fix
+    // this returned senderClosed, because the entry was still occupied.
+    control.client.sendJson({ type: "closeSender", senderId: first.created.id });
+    const closed = await control.client.nextJson("stranded sender close");
+    assert.equal(closed.type, "error", `expected the reaped sender to be gone, got ${closed.type}`);
+    assert.equal(closed.code, "sender_not_found");
+
+    // And the replacement is genuinely live — it closes normally.
+    control.client.sendJson({ type: "closeSender", senderId: second.created.id });
+    assert.equal((await control.client.nextJson("replacement close")).type, "senderClosed");
+    second.data.destroy();
+    control.client.destroy();
+  } finally {
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
 });
