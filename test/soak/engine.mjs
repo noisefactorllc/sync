@@ -71,11 +71,37 @@ export function summarise(samples, { warmupFraction = 0.25 } = {}) {
 export class ProtocolSoak {
   constructor({ daemonPath, origin, token, width = 1920, height = 1080,
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
-                stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000 }) {
+                stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000,
+                geometries = null, geometryEveryMs = 0 }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
-                          leaksEveryMs, onSample, stopTermTimeoutMs, stopKillTimeoutMs });
-    this.frame = createFrameBuffer({ width, height });
-    this.maxBuffered = 3 * this.frame.length;
+                          leaksEveryMs, onSample, stopTermTimeoutMs, stopKillTimeoutMs,
+                          geometryEveryMs });
+    // GEOMETRY CHURN ON THE PROTOCOL PLANE.
+    //
+    // The browser soak's format leg rotates the canvas and a 4.2x throughput
+    // collapse followed it. Whether that lives in the daemon or above it
+    // cannot be answered from a browser host: both have a renderer, a camera
+    // sink and a GL readback in the path. This plane has none of those, so if
+    // the daemon's accept rate degrades under the same rotation, the fault is
+    // in the daemon and platform-independent — and if it does not, the daemon
+    // is exonerated and the search moves upward. Neither answer is reachable
+    // any other way.
+    //
+    // Frame buffers are built once per geometry and reused, so the rotation
+    // costs an allocation per distinct size rather than one per change: the
+    // measurement is of the daemon, and a harness that reallocated 8 MB every
+    // ninety seconds would be measuring itself.
+    this.geometries = Array.isArray(geometries) && geometries.length > 0
+      ? geometries.map(([w, h]) => ({ width: w, height: h }))
+      : [{ width, height }];
+    this._frames = new Map();
+    this._geometryIndex = 0;
+    this.frame = this._frameFor(this.geometries[0]);
+    // Sized by the LARGEST geometry in the rotation, not by whichever happens
+    // to be current. A budget that shrank with the frame would throttle the
+    // small geometries differently from the large ones, and the rotation would
+    // then be measuring the harness's own backpressure policy.
+    this.maxBuffered = 3 * Math.max(...this.geometries.map((g) => this._frameFor(g).length));
     this.state = { sentFrames: 0, cycles: 0, accepted: 0, dropped: 0,
                    sequence: 0, reconnects: 0, stderr: '' };
     this.stopped = false;
@@ -84,6 +110,26 @@ export class ProtocolSoak {
 
   get port() {
     return this._port;
+  }
+
+  get geometry() {
+    return this.geometries[this._geometryIndex];
+  }
+
+  _frameFor({ width, height }) {
+    const key = `${width}x${height}`;
+    if (!this._frames.has(key)) this._frames.set(key, createFrameBuffer({ width, height }));
+    return this._frames.get(key);
+  }
+
+  // Advances to the next geometry in the rotation. Returns the one now in use
+  // so a caller can record WHEN each change happened — a rate that changes
+  // shape needs its changes on the same timeline as the samples, or the two
+  // cannot be lined up afterwards.
+  advanceGeometry() {
+    this._geometryIndex = (this._geometryIndex + 1) % this.geometries.length;
+    this.frame = this._frameFor(this.geometry);
+    return this.geometry;
   }
 
   async start() {
@@ -161,9 +207,21 @@ export class ProtocolSoak {
     let lastCycle = started;
     let lastSample = 0;
     let lastLeaks = started;
+    let lastGeometry = started;
     await this._openSession();
     while (!this.stopped && Date.now() - started < durationMs) {
       const now = Date.now();
+      // Geometry changes on its own clock, independent of the session cycle,
+      // so a rotation cadence can be chosen without also changing how often
+      // senders are torn down — the browser run varies those separately and
+      // conflating them here would make the planes incomparable.
+      if (this.geometryEveryMs > 0 && this.geometries.length > 1
+          && now - lastGeometry >= this.geometryEveryMs) {
+        const geometry = this.advanceGeometry();
+        lastGeometry = now;
+        this.state.geometryChanges = (this.state.geometryChanges ?? 0) + 1;
+        this.state.geometry = `${geometry.width}x${geometry.height}`;
+      }
       if (now - lastCycle >= this.cycleMs) {
         await this._stats();
         await this._closeSession();

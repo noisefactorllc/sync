@@ -28,6 +28,23 @@ const outPath = process.env.SYNC_SOAK_OUT || '';
 const stream = outPath ? fs.createWriteStream(outPath, { flags: 'a' }) : process.stdout;
 const samples = [];
 
+// "1280x720,1920x1080" -> [[1280,720],[1920,1080]]. Refuses anything it cannot
+// parse rather than silently falling back to a single geometry: a churn run
+// that quietly did not churn would look like a clean result.
+function parseGeometries(spec) {
+  if (!spec) return null;
+  const parsed = spec.split(',').map((entry) => {
+    const match = /^\s*(\d+)\s*x\s*(\d+)\s*$/.exec(entry);
+    if (!match) throw new Error(`SYNC_SOAK_GEOMETRIES: cannot parse "${entry}" (want WIDTHxHEIGHT)`);
+    return [Number(match[1]), Number(match[2])];
+  });
+  if (parsed.length < 2) {
+    throw new Error('SYNC_SOAK_GEOMETRIES needs at least two geometries to rotate between; '
+      + 'for a fixed size use SYNC_SOAK_WIDTH/SYNC_SOAK_HEIGHT');
+  }
+  return parsed;
+}
+
 const soak = new ProtocolSoak({
   daemonPath,
   origin: process.env.SYNC_SOAK_ORIGIN || 'https://soak.example',
@@ -36,6 +53,12 @@ const soak = new ProtocolSoak({
   height: Number(process.env.SYNC_SOAK_HEIGHT || 1080),
   cycleMs: Number(process.env.SYNC_SOAK_CYCLE || 60) * 1000,
   leaksEveryMs: Number(process.env.SYNC_SOAK_LEAKS_EVERY || 900) * 1000,
+  // SYNC_SOAK_GEOMETRIES=1280x720,1920x1080,2560x1440 rotates the frame size
+  // every SYNC_SOAK_GEOMETRY_EVERY seconds, mirroring the browser format leg
+  // on a plane with no renderer, no camera sink and no GL readback. Unset,
+  // nothing changes and the run behaves exactly as it always has.
+  geometries: parseGeometries(process.env.SYNC_SOAK_GEOMETRIES),
+  geometryEveryMs: Number(process.env.SYNC_SOAK_GEOMETRY_EVERY || 0) * 1000,
   onSample(sample) {
     samples.push(sample);
     stream.write(`${JSON.stringify(sample)}\n`);
@@ -63,6 +86,8 @@ try {
   }
   stream.write(`${JSON.stringify({ plane: 'protocol', type: 'summary', ...result,
     growthKb: summary ? summary.growthKb : null, peakKb: summary ? summary.peak : null,
+    geometryChanges: soak.state.geometryChanges ?? 0,
+    finalGeometry: soak.state.geometry ?? `${soak.geometry.width}x${soak.geometry.height}`,
     // The two endpoint medians growthKb is the difference of, so a surprising
     // growth number can be checked without re-reading the whole series.
     firstKb: summary ? summary.firstKb : null, lastKb: summary ? summary.lastKb : null,

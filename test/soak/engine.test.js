@@ -279,3 +279,48 @@ test('stop() reports a clean exit with no signal on the ordinary path', async ()
   assert.equal(result.signalCode, null);
   assert.equal(result.reaped, true);
 });
+
+// Geometry churn on the protocol plane. The browser soak's format leg rotates
+// the canvas and a 4.2x throughput collapse followed it; whether that lives in
+// the daemon or above it cannot be answered from a browser host, because both
+// have a renderer, a camera sink and a GL readback in the path. This plane has
+// none of those.
+test('ProtocolSoak rotates geometry and reuses one buffer per size', () => {
+  const soak = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't',
+    geometries: [[1280, 720], [1920, 1080], [2560, 1440]], geometryEveryMs: 90_000,
+  });
+  assert.deepEqual(soak.geometry, { width: 1280, height: 720 });
+  const first = soak.frame;
+  assert.deepEqual(soak.advanceGeometry(), { width: 1920, height: 1080 });
+  assert.notEqual(soak.frame, first, 'a different size gets a different buffer');
+  soak.advanceGeometry();
+  assert.deepEqual(soak.advanceGeometry(), { width: 1280, height: 720 }, 'wraps');
+  assert.equal(soak.frame, first, 'and returns the SAME buffer, not a fresh allocation');
+});
+
+// A budget that shrank with the current frame would throttle the small
+// geometries differently from the large ones, and the rotation would then be
+// measuring the harness's own backpressure policy rather than the daemon.
+test('ProtocolSoak sizes its buffer budget by the largest geometry in the rotation', () => {
+  const soak = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't',
+    geometries: [[1280, 720], [2560, 1440]], geometryEveryMs: 1000,
+  });
+  const largest = soak._frameFor({ width: 2560, height: 1440 }).length;
+  assert.equal(soak.maxBuffered, 3 * largest);
+  soak.advanceGeometry();
+  assert.equal(soak.maxBuffered, 3 * largest, 'and it does not move when geometry does');
+});
+
+test('ProtocolSoak without a rotation behaves exactly as it always did', () => {
+  const soak = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't',
+    width: 1920, height: 1080,
+  });
+  assert.deepEqual(soak.geometry, { width: 1920, height: 1080 });
+  assert.equal(soak.maxBuffered, 3 * soak.frame.length);
+  // advanceGeometry on a single-entry rotation is a no-op, not a crash: the
+  // run loop guards on length > 1, and the method must agree with that guard.
+  assert.deepEqual(soak.advanceGeometry(), { width: 1920, height: 1080 });
+});
