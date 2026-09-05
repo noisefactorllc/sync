@@ -40,7 +40,8 @@ class DeviceOps final : public camera::LinuxCameraDeviceOps {
   DeviceOps() {
     std::copy_n("v4l2 loopback", 13, capabilities.driver);
     std::copy_n("Sync Camera", 11, capabilities.card);
-    capabilities.capabilities = V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE;
+    capabilities.capabilities = V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE |
+                                V4L2_CAP_EXT_PIX_FORMAT;
   }
 
   auto enumerate(std::span<std::array<char, 64>> output) noexcept

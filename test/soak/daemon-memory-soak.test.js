@@ -8,6 +8,9 @@ import test from 'node:test';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const DAEMON = path.resolve(ROOT, process.env.SYNC_DAEMON_PATH || 'build/syncd');
 const SCRIPT = path.join(ROOT, 'test/acceptance/daemon-memory-soak.mjs');
+if (process.env.SYNC_DAEMON_PATH) {
+  assert.ok(existsSync(DAEMON), `SYNC_DAEMON_PATH does not exist: ${DAEMON}`);
+}
 const requiresDaemon = { skip: !existsSync(DAEMON), timeout: 20_000 };
 
 async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {

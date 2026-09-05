@@ -70,7 +70,32 @@ LinuxCameraDeviceError identity_error(const v4l2_capability& capabilities,
       (flags & V4L2_CAP_READWRITE) == 0) {
     return LinuxCameraDeviceError::MissingOutputCapability;
   }
+  // sRGB transfer with a 709 YCbCr matrix requires the extended fields.
+  // The supported Linux V4L2 core advertises this capability on loopback
+  // devices; without it there is no truthful format for our encoded bytes.
+  if (require_output && (flags & V4L2_CAP_EXT_PIX_FORMAT) == 0) {
+    return LinuxCameraDeviceError::FormatRejected;
+  }
   return LinuxCameraDeviceError::None;
+}
+
+bool valid_color_format(const v4l2_pix_format& format) noexcept {
+  if (format.priv != V4L2_PIX_FMT_PRIV_MAGIC ||
+      (format.colorspace != V4L2_COLORSPACE_REC709 &&
+       format.colorspace != V4L2_COLORSPACE_SRGB)) {
+    return false;
+  }
+  const auto encoding = format.ycbcr_enc == V4L2_YCBCR_ENC_DEFAULT
+                            ? static_cast<std::uint32_t>(
+                                  V4L2_MAP_YCBCR_ENC_DEFAULT(format.colorspace))
+                            : format.ycbcr_enc;
+  const auto transfer = format.xfer_func == V4L2_XFER_FUNC_DEFAULT
+                            ? static_cast<std::uint32_t>(
+                                  V4L2_MAP_XFER_FUNC_DEFAULT(format.colorspace))
+                            : format.xfer_func;
+  return encoding == V4L2_YCBCR_ENC_709 && transfer == V4L2_XFER_FUNC_SRGB &&
+         (format.quantization == V4L2_QUANTIZATION_DEFAULT ||
+          format.quantization == V4L2_QUANTIZATION_LIM_RANGE);
 }
 
 LinuxCameraOpenResult negotiate(int descriptor, std::string_view path,
@@ -81,16 +106,22 @@ LinuxCameraOpenResult negotiate(int descriptor, std::string_view path,
   format.fmt.pix.height = kCanvas.height;
   format.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
   format.fmt.pix.field = V4L2_FIELD_NONE;
-  // bgra_to_nv12 encodes BT.709 limited-range YCbCr. Leaving this at DEFAULT
-  // lets v4l2loopback choose sRGB, whose default YCbCr matrix is BT.601.
+  // bgra_to_nv12 applies the BT.709 limited-range matrix to sRGB-encoded
+  // channels without changing their transfer curve. Declare each component:
+  // REC709 alone would default to the 709 transfer curve and shift brightness.
   format.fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+  format.fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+  format.fmt.pix.ycbcr_enc = V4L2_YCBCR_ENC_709;
+  format.fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+  format.fmt.pix.xfer_func = V4L2_XFER_FUNC_SRGB;
   if (operations.set_nv12_format(descriptor, format) != 0) {
     const int saved_error = errno;
     operations.close_descriptor(descriptor);
     return {.error = LinuxCameraDeviceError::FormatRejected,
             .native_error = saved_error};
   }
-  if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_NV12) {
+  if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_NV12 ||
+      !valid_color_format(format.fmt.pix)) {
     operations.close_descriptor(descriptor);
     return {.error = LinuxCameraDeviceError::FormatRejected};
   }

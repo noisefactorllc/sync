@@ -58,6 +58,12 @@ class DeviceOps final : public camera::LinuxCameraDeviceOps {
     format.fmt.pix.bytesperline = returned_stride;
     format.fmt.pix.sizeimage = returned_size;
     format.fmt.pix.pixelformat = returned_pixel_format;
+    if (replace_color_metadata) {
+      format.fmt.pix.colorspace = returned_colors.colorspace;
+      format.fmt.pix.ycbcr_enc = returned_colors.ycbcr_enc;
+      format.fmt.pix.quantization = returned_colors.quantization;
+      format.fmt.pix.xfer_func = returned_colors.xfer_func;
+    }
     return 0;
   }
 
@@ -79,7 +85,8 @@ class DeviceOps final : public camera::LinuxCameraDeviceOps {
     capabilities = {};
     std::copy_n("v4l2 loopback", 13, capabilities.driver);
     std::copy(card.begin(), card.end(), capabilities.card);
-    capabilities.capabilities = V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE;
+    capabilities.capabilities = V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE |
+                                V4L2_CAP_EXT_PIX_FORMAT;
     returned_width = 1920;
     returned_height = 1080;
     returned_stride = 1920;
@@ -105,6 +112,8 @@ class DeviceOps final : public camera::LinuxCameraDeviceOps {
   std::uint32_t returned_stride = 1920;
   std::uint32_t returned_size = 1920 * 1080 * 3 / 2;
   std::uint32_t returned_pixel_format = V4L2_PIX_FMT_NV12;
+  bool replace_color_metadata = false;
+  v4l2_pix_format returned_colors{};
   int rate_result = 0;
   v4l2_format requested_format{};
   v4l2_streamparm requested_rate{};
@@ -162,37 +171,88 @@ SYNC_TEST(linux_camera_color_metadata_decodes_the_nv12_encoder_without_color_shi
   SYNC_REQUIRE(camera::open_linux_camera("/dev/video8", operations).error ==
                camera::LinuxCameraDeviceError::None);
 
-  // v4l2loopback resolves an unspecified colorspace to sRGB, whose default
-  // YCbCr matrix is 601. Decode the actual encoder output using the format
-  // sent to the driver, so a missing declaration produces a visible error.
+  // Decode real encoder bytes as a color-managed receiver would: negotiated
+  // range and matrix, inverse transfer, then sRGB display encoding. Missing
+  // priv magic makes extended fields undefined, so only their defaults apply.
   const auto& format = operations.requested_format.fmt.pix;
   const auto colorspace = format.colorspace == V4L2_COLORSPACE_DEFAULT
                               ? static_cast<std::uint32_t>(V4L2_COLORSPACE_SRGB)
                               : format.colorspace;
-  const auto encoding = format.ycbcr_enc == V4L2_YCBCR_ENC_DEFAULT
+  const bool extended = format.priv == V4L2_PIX_FMT_PRIV_MAGIC;
+  const auto encoding = !extended || format.ycbcr_enc == V4L2_YCBCR_ENC_DEFAULT
                             ? static_cast<std::uint32_t>(
                                   V4L2_MAP_YCBCR_ENC_DEFAULT(colorspace))
                             : format.ycbcr_enc;
+  const auto transfer = !extended || format.xfer_func == V4L2_XFER_FUNC_DEFAULT
+                            ? static_cast<std::uint32_t>(
+                                  V4L2_MAP_XFER_FUNC_DEFAULT(colorspace))
+                            : format.xfer_func;
+  const bool full_range = extended && format.quantization == V4L2_QUANTIZATION_FULL_RANGE;
   const double kr = encoding == V4L2_YCBCR_ENC_709 ? 0.2126 : 0.299;
   const double kb = encoding == V4L2_YCBCR_ENC_709 ? 0.0722 : 0.114;
-  std::array<std::byte, 16> bgra{};
-  for (std::size_t pixel = 0; pixel < 4; ++pixel) {
-    bgra[pixel * 4] = std::byte{64};
-    bgra[pixel * 4 + 1] = std::byte{192};
-    bgra[pixel * 4 + 2] = std::byte{96};
-    bgra[pixel * 4 + 3] = std::byte{255};
+  const auto display_byte = [transfer](double value) {
+    const double encoded = std::clamp(value / 255.0, 0.0, 1.0);
+    const double linear = transfer == V4L2_XFER_FUNC_SRGB
+                              ? (encoded <= 0.04045 ? encoded / 12.92
+                                   : std::pow((encoded + 0.055) / 1.055, 2.4))
+                              : (encoded < 0.081 ? encoded / 4.5
+                                   : std::pow((encoded + 0.099) / 1.099, 1.0 / 0.45));
+    return 255.0 * (linear <= 0.0031308 ? 12.92 * linear
+                     : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055);
+  };
+  for (const std::array<int, 3> rgb : {std::array{96, 192, 64},
+       std::array{128, 128, 128}, std::array{16, 16, 16},
+       std::array{0, 0, 0}, std::array{255, 255, 255}}) {
+    std::array<std::byte, 16> bgra{};
+    for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+      bgra[pixel * 4] = static_cast<std::byte>(rgb[2]);
+      bgra[pixel * 4 + 1] = static_cast<std::byte>(rgb[1]);
+      bgra[pixel * 4 + 2] = static_cast<std::byte>(rgb[0]);
+      bgra[pixel * 4 + 3] = std::byte{255};
+    }
+    std::array<std::byte, 6> nv12{};
+    SYNC_REQUIRE(camera::bgra_to_nv12(bgra, 8, 2, 2, nv12, 2));
+    const double y = (std::to_integer<int>(nv12[0]) - (full_range ? 0 : 16)) *
+                     255.0 / (full_range ? 255.0 : 219.0);
+    const double u = (std::to_integer<int>(nv12[4]) - 128) *
+                     255.0 / (full_range ? 255.0 : 224.0);
+    const double v = (std::to_integer<int>(nv12[5]) - 128) *
+                     255.0 / (full_range ? 255.0 : 224.0);
+    const double r = y + 2.0 * (1.0 - kr) * v;
+    const double b = y + 2.0 * (1.0 - kb) * u;
+    const double g = (y - kr * r - kb * b) / (1.0 - kr - kb);
+    SYNC_REQUIRE(std::abs(display_byte(r) - rgb[0]) <= 2.0);
+    SYNC_REQUIRE(std::abs(display_byte(g) - rgb[1]) <= 2.0);
+    SYNC_REQUIRE(std::abs(display_byte(b) - rgb[2]) <= 2.0);
   }
-  std::array<std::byte, 6> nv12{};
-  SYNC_REQUIRE(camera::bgra_to_nv12(bgra, 8, 2, 2, nv12, 2));
-  const double y = (std::to_integer<int>(nv12[0]) - 16) * 255.0 / 219.0;
-  const double u = (std::to_integer<int>(nv12[4]) - 128) * 255.0 / 224.0;
-  const double v = (std::to_integer<int>(nv12[5]) - 128) * 255.0 / 224.0;
-  const double r = y + 2.0 * (1.0 - kr) * v;
-  const double b = y + 2.0 * (1.0 - kb) * u;
-  const double g = (y - kr * r - kb * b) / (1.0 - kr - kb);
-  SYNC_REQUIRE(std::abs(r - 96.0) <= 2.0);
-  SYNC_REQUIRE(std::abs(g - 192.0) <= 2.0);
-  SYNC_REQUIRE(std::abs(b - 64.0) <= 2.0);
+}
+
+SYNC_TEST(linux_camera_rejects_devices_without_extended_color_metadata) {
+  DeviceOps operations;
+  operations.compatible();
+  operations.capabilities.capabilities &= ~V4L2_CAP_EXT_PIX_FORMAT;
+  SYNC_REQUIRE(camera::open_linux_camera("/dev/video8", operations).error ==
+               camera::LinuxCameraDeviceError::FormatRejected);
+  SYNC_REQUIRE(operations.format_calls == 0);
+  SYNC_REQUIRE(operations.closed == std::vector<int>{7});
+}
+
+SYNC_TEST(linux_camera_rejects_negotiated_color_metadata_that_changes_pixels) {
+  for (const auto mismatch : {0, 1, 2}) {
+    DeviceOps operations;
+    operations.compatible();
+    operations.replace_color_metadata = true;
+    operations.returned_colors.colorspace = V4L2_COLORSPACE_REC709;
+    operations.returned_colors.ycbcr_enc = V4L2_YCBCR_ENC_709;
+    operations.returned_colors.xfer_func = V4L2_XFER_FUNC_SRGB;
+    operations.returned_colors.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+    if (mismatch == 0) operations.returned_colors.xfer_func = V4L2_XFER_FUNC_709;
+    if (mismatch == 1) operations.returned_colors.ycbcr_enc = V4L2_YCBCR_ENC_601;
+    if (mismatch == 2) operations.returned_colors.quantization = V4L2_QUANTIZATION_FULL_RANGE;
+    SYNC_REQUIRE(camera::open_linux_camera("/dev/video8", operations).error ==
+                 camera::LinuxCameraDeviceError::FormatRejected);
+    SYNC_REQUIRE(operations.closed == std::vector<int>{7});
+  }
 }
 
 SYNC_TEST(linux_camera_probe_accepts_an_exclusive_camera_while_the_daemon_owns_output) {
