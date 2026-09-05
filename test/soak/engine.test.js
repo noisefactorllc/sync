@@ -375,13 +375,24 @@ test('ProtocolSoak rotates geometry and reuses one buffer per size', () => {
     daemonPath: 'unused', origin: 'https://soak.example', token: 't',
     geometries: [[1280, 720], [1920, 1080], [2560, 1440]], geometryEveryMs: 90_000,
   });
-  assert.deepEqual(soak.geometry, { width: 1280, height: 720 });
+  // A run STARTS at its declared width/height, not at geometries[0]. Starting
+  // at the head of the rotation made the opening frame size depend on list
+  // order: a phased experiment whose baseline ran before any rotation streamed
+  // 1280x720 while its cooldown streamed 1920x1080, so the two phases it
+  // existed to compare differed in frame size rather than in churn. Caught by a
+  // smoke test, and only because someone wrote one.
+  assert.deepEqual(soak.geometry, { width: 1920, height: 1080 });
+  const base = soak.frame;
+  assert.deepEqual(soak.advanceGeometry(), { width: 1280, height: 720 });
   const first = soak.frame;
+  assert.notEqual(soak.frame, base, 'a different size gets a different buffer');
   assert.deepEqual(soak.advanceGeometry(), { width: 1920, height: 1080 });
-  assert.notEqual(soak.frame, first, 'a different size gets a different buffer');
   soak.advanceGeometry();
   assert.deepEqual(soak.advanceGeometry(), { width: 1280, height: 720 }, 'wraps');
   assert.equal(soak.frame, first, 'and returns the SAME buffer, not a fresh allocation');
+  // And a phased caller can always get back to the base without knowing the list.
+  assert.deepEqual(soak.resetGeometry(), { width: 1920, height: 1080 });
+  assert.equal(soak.frame, base);
 });
 
 // A budget that shrank with the current frame would throttle the small
@@ -408,4 +419,18 @@ test('ProtocolSoak without a rotation behaves exactly as it always did', () => {
   // advanceGeometry on a single-entry rotation is a no-op, not a crash: the
   // run loop guards on length > 1, and the method must agree with that guard.
   assert.deepEqual(soak.advanceGeometry(), { width: 1920, height: 1080 });
+});
+
+// The base geometry must be in the buffered-write budget even when it is not in
+// the rotation, or a run streaming at its declared size would be throttled by a
+// budget computed for sizes it never sends.
+test('ProtocolSoak includes its base geometry in the buffer budget', () => {
+  const soak = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't',
+    width: 2560, height: 1440,
+    geometries: [[640, 480], [1280, 720]], geometryEveryMs: 1000,
+  });
+  const base = soak._frameFor({ width: 2560, height: 1440 }).length;
+  assert.equal(soak.maxBuffered, 3 * base,
+    'the largest size the run can send is its own base, not the rotation head');
 });

@@ -106,13 +106,27 @@ export class ProtocolSoak {
       ? geometries.map(([w, h]) => ({ width: w, height: h }))
       : [{ width, height }];
     this._frames = new Map();
-    this._geometryIndex = 0;
-    this.frame = this._frameFor(this.geometries[0]);
+    this._geometryIndex = -1;
+    // A RUN STARTS AT ITS DECLARED width/height, not at geometries[0].
+    //
+    // Starting at the first entry of the rotation made the opening frame size
+    // depend on list order, which is a trap: a phased experiment whose baseline
+    // phase runs before any rotation would stream 1280x720 while its cooldown
+    // phase streamed 1920x1080, and the two phases it exists to compare would
+    // differ in frame size rather than in churn. That was caught by a smoke
+    // test rather than by the run, and only because someone wrote one.
+    //
+    // The base is therefore always the starting geometry and resetGeometry()
+    // returns to it, so a caller driving phases never has to remember which
+    // entry happened to be first.
+    this.baseGeometry = { width, height };
+    this.frame = this._frameFor(this.baseGeometry);
     // Sized by the LARGEST geometry in the rotation, not by whichever happens
     // to be current. A budget that shrank with the frame would throttle the
     // small geometries differently from the large ones, and the rotation would
     // then be measuring the harness's own backpressure policy.
-    this.maxBuffered = 3 * Math.max(...this.geometries.map((g) => this._frameFor(g).length));
+    this.maxBuffered = 3 * Math.max(
+      ...[this.baseGeometry, ...this.geometries].map((g) => this._frameFor(g).length));
     this.state = { sentFrames: 0, cycles: 0, accepted: 0, dropped: 0,
                    sequence: 0, reconnects: 0, stderr: '' };
     this.stopped = false;
@@ -124,7 +138,17 @@ export class ProtocolSoak {
   }
 
   get geometry() {
-    return this.geometries[this._geometryIndex];
+    return this._geometryIndex < 0 ? this.baseGeometry : this.geometries[this._geometryIndex];
+  }
+
+  // Back to the declared width/height. A phased caller needs this between
+  // phases so a baseline and a cooldown are compared at the same frame size —
+  // otherwise the comparison measures geometry rather than recovery.
+  resetGeometry() {
+    this._geometryIndex = -1;
+    this.frame = this._frameFor(this.baseGeometry);
+    this.state.geometry = `${this.baseGeometry.width}x${this.baseGeometry.height}`;
+    return this.baseGeometry;
   }
 
   _frameFor({ width, height }) {
@@ -138,7 +162,8 @@ export class ProtocolSoak {
   // shape needs its changes on the same timeline as the samples, or the two
   // cannot be lined up afterwards.
   advanceGeometry() {
-    this._geometryIndex = (this._geometryIndex + 1) % this.geometries.length;
+    this._geometryIndex = (this._geometryIndex + 1 + this.geometries.length)
+      % this.geometries.length;
     this.frame = this._frameFor(this.geometry);
     return this.geometry;
   }
