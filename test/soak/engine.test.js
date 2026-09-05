@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { summarise, ProtocolSoak } from './engine.mjs';
@@ -10,10 +10,15 @@ const sample = (t, footprint) => ({ t, footprint, rss: footprint, frames: t * 60
 
 async function startupFixture(t, body) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'sync-startup-test-'));
-  const executable = path.join(directory, 'daemon');
-  await writeFile(executable, `#!${process.execPath}\n${body}\n`);
-  await chmod(executable, 0o700);
-  const soak = new ProtocolSoak({ daemonPath: executable, width: 8, height: 8,
+  // A plain script run by THIS node, not a shebang file with an exec bit.
+  // Windows honours neither, which is why these tests used to be skipped
+  // there — and startup-cleanup behaviour is exactly what should not be
+  // skipped on the platform with the different process model. Spawning
+  // node explicitly is uniform across platforms and drops the chmod entirely.
+  const script = path.join(directory, 'daemon.mjs');
+  await writeFile(script, `${body}\n`);
+  const soak = new ProtocolSoak({ daemonPath: process.execPath, daemonArgs: [script],
+    width: 8, height: 8,
     startupTimeoutMs: 1000, stopTermTimeoutMs: 200, stopKillTimeoutMs: 200 });
   t.after(async () => {
     if (soak.daemon) await soak.stop();
@@ -47,7 +52,7 @@ for (const [name, body, expected] of [
   ['oversized readiness', "process.stdout.write('x'.repeat(70 * 1024)); setInterval(() => {}, 1000)", /readiness.*too large/i],
   ['invalid port', "process.stdout.write(JSON.stringify({type:'ready',port:0})+'\\n'); setInterval(() => {}, 1000)", /invalid syncd readiness/i],
 ]) {
-  test(`startup cleans up ${name} before rejecting`, { skip: process.platform === 'win32' }, async (t) => {
+  test(`startup cleans up ${name} before rejecting`, async (t) => {
     const soak = await startupFixture(t, body);
     await assert.rejects(boundedStart(soak), expected);
     assert.ok(soak.daemon.exitCode !== null || soak.daemon.signalCode !== null,
@@ -55,8 +60,7 @@ for (const [name, body, expected] of [
   });
 }
 
-test('startup accepts fragmented readiness and drains later stdout',
-  { skip: process.platform === 'win32' }, async (t) => {
+test('startup accepts fragmented readiness and drains later stdout', async (t) => {
     const soak = await startupFixture(t,
       `process.stdout.write('{"type":"ready",');
        setTimeout(() => process.stdout.write('"port":12345}\\n'), 10);

@@ -28,6 +28,14 @@ import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
 // Five is enough to outvote the at most one gap sample a cycle can produce,
 // and short enough to stay a genuine endpoint over a multi-hour window.
 const ENDPOINT_WINDOW = 5;
+
+// `daemonArgs` prefixes the daemon's own arguments. Production passes nothing;
+// it exists so a test can drive a SCRIPT rather than a binary — spawn the node
+// executable with the script path in front of the daemon flags — without
+// depending on a shebang and an exec bit, neither of which Windows honours.
+// That dependency is why the startup-cleanup tests were skipped on win32, and
+// skipping process-lifecycle tests on the one platform with a different process
+// model is the wrong way round.
 const FRAMES_PER_TURN = 64;
 
 function median(values) {
@@ -73,11 +81,11 @@ export function summarise(samples, { warmupFraction = 0.25 } = {}) {
 export class ProtocolSoak {
   constructor({ daemonPath, origin, token, width = 1920, height = 1080,
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
-                startupTimeoutMs = 5_000,
+                startupTimeoutMs = 5_000, daemonArgs = [],
                 stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000,
                 geometries = null, geometryEveryMs = 0 }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
-                          leaksEveryMs, onSample, startupTimeoutMs,
+                          leaksEveryMs, onSample, startupTimeoutMs, daemonArgs,
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
     // GEOMETRY CHURN ON THE PROTOCOL PLANE.
     //
@@ -137,7 +145,8 @@ export class ProtocolSoak {
 
   async start() {
     this.daemon = spawn(this.daemonPath,
-      ['--port', '0', '--test-origin', this.origin, '--test-token', this.token,
+      [...this.daemonArgs,
+       '--port', '0', '--test-origin', this.origin, '--test-token', this.token,
        '--test-receiver'], { stdio: ['ignore', 'pipe', 'pipe'] });
     this.daemon.stderr.setEncoding('utf8');
     this.daemon.stderr.on('data', (chunk) => {

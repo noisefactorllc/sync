@@ -6,7 +6,23 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const DAEMON = path.resolve(ROOT, process.env.SYNC_DAEMON_PATH || 'build/syncd');
+// The daemon's built location is generator-dependent, not just
+// platform-dependent: Ninja and Make put it at build/syncd, the Visual Studio
+// generator at build/Release/syncd.exe. Checking only the first meant both
+// tests SKIPPED on Windows and the run reported "skipped 2" — which reads as
+// deliberate, so nobody looks. They pass there when actually pointed at a
+// build. A path-shape assumption wearing a platform guard's clothes.
+const DAEMON_CANDIDATES = ['build/syncd', 'build/syncd.exe',
+  'build/Release/syncd.exe', 'build/Debug/syncd.exe'];
+function resolveDaemon() {
+  if (process.env.SYNC_DAEMON_PATH) return path.resolve(ROOT, process.env.SYNC_DAEMON_PATH);
+  for (const candidate of DAEMON_CANDIDATES) {
+    const resolved = path.resolve(ROOT, candidate);
+    if (existsSync(resolved)) return resolved;
+  }
+  return path.resolve(ROOT, DAEMON_CANDIDATES[0]);
+}
+const DAEMON = resolveDaemon();
 const SCRIPT = path.join(ROOT, 'test/acceptance/daemon-memory-soak.mjs');
 if (process.env.SYNC_DAEMON_PATH) {
   assert.ok(existsSync(DAEMON), `SYNC_DAEMON_PATH does not exist: ${DAEMON}`);
