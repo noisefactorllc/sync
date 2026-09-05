@@ -25,11 +25,12 @@
 // the frame path. A /health probe and a getStats round trip run every second.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { upgrade } from '../soak/lib/ws.mjs';
-import { createFrameBuffer, stampFrame } from '../soak/lib/frame.mjs';
+import { stampFrame } from '../soak/lib/frame.mjs';
+import { ProtocolSoak } from '../soak/engine.mjs';
 import { residentKb, footprintKb, runLeaks } from '../soak/lib/process-metrics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -45,6 +46,7 @@ const CHECK_LEAKS = process.env.SYNC_SOAK_LEAKS === '1';
 const ORIGIN = 'https://soak.example';
 const TOKEN = 'soak-token-123';
 const MAX_BUFFERED = 3 * (64 + WIDTH * HEIGHT * 4);
+const FRAMES_PER_TURN = 64;
 
 for (const [name, value] of [['seconds', SECONDS], ['cycle', CYCLE_SECONDS],
   ['width', WIDTH], ['height', HEIGHT], ['growth', GROWTH_KB]]) {
@@ -55,6 +57,7 @@ assert.ok(SECONDS >= 5, 'a run shorter than five seconds has no post-warm-up win
 async function health(port) {
   const response = await fetch(`http://127.0.0.1:${port}/health`, {
     headers: { Origin: ORIGIN },
+    signal: AbortSignal.timeout(2000),
   });
   assert.equal(response.status, 200);
   await response.arrayBuffer();
@@ -63,27 +66,13 @@ async function health(port) {
 // One frame buffer for the run: the header's sequence and timestamp and one
 // payload byte change per frame, so the sender side does no per-frame
 // allocation and the daemon, not this script, sets the pace.
-const FRAME = createFrameBuffer({ width: WIDTH, height: HEIGHT });
+const lifecycle = new ProtocolSoak({ daemonPath: SYNCD, origin: ORIGIN,
+  token: TOKEN, width: WIDTH, height: HEIGHT });
+const FRAME = lifecycle.frame;
 
-// --- run ------------------------------------------------------------------
-
-const daemon = spawn(SYNCD, ['--port', '0', '--test-origin', ORIGIN, '--test-token', TOKEN,
-  '--test-receiver'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-let stderr = '';
-daemon.stderr.setEncoding('utf8');
-daemon.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4096); });
-const ready = await new Promise((resolve, reject) => {
-  let stdout = '';
-  daemon.stdout.setEncoding('utf8');
-  daemon.stdout.on('data', (chunk) => {
-    stdout += chunk;
-    const newline = stdout.indexOf('\n');
-    if (newline >= 0) resolve(JSON.parse(stdout.slice(0, newline)));
-  });
-  daemon.once('exit', (code) => reject(new Error(`syncd exited early with ${code}: ${stderr}`)));
-});
-assert.equal(ready.type, 'ready');
-const port = ready.port;
+// Share the bounded readiness and child cleanup used by the long soak.
+const port = await lifecycle.start();
+const daemon = lifecycle.daemon;
 console.log(`syncd pid=${daemon.pid} port=${port}`);
 
 const samples = [];
@@ -134,63 +123,82 @@ async function stats() {
   }
 }
 
-const streamer = (async () => {
-  try {
-    await openSession();
-    let lastCycle = Date.now();
-    while (!stop) {
-      if (Date.now() - lastCycle >= CYCLE_SECONDS * 1000) {
-        await stats();
-        await closeSession();
-        await openSession();
-        lastCycle = Date.now();
-      }
-      if (data.socket.writableLength > MAX_BUFFERED) {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        continue;
-      }
-      sequence += 1;
-      await data.sendBinary(stampFrame(FRAME, sequence, BigInt(Date.now()) * 1000n));
-      sentFrames += 1;
-    }
-    await stats();
-    await closeSession();
-  } catch (error) {
-    runError = error;
-  }
-})();
-
-const sampler = setInterval(() => {
-  try {
-    samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
-      footprint: footprintKb(daemon.pid), frames: sentFrames });
-  } catch (error) {
-    runError ??= error;
-  }
-  health(port).catch((error) => { runError ??= error; });
-}, 1000);
-
-await new Promise((resolve) => setTimeout(resolve, SECONDS * 1000));
-stop = true;
-await streamer;
-clearInterval(sampler);
-// Taken AFTER the stream has stopped and before the daemon is signalled, so
-// this is the daemon at rest with its per-sender buffers legitimately released.
-// It is kept in the table because it is informative, but flagged so the growth
-// figure is not computed against it — see `warm` below.
-samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
-  footprint: footprintKb(daemon.pid), frames: sentFrames, postStream: true });
-
+let sampler;
+const pendingHealth = new Set();
 let leaksReport = null;
-if (CHECK_LEAKS) {
-  // `leaks` walks the live heap for blocks nothing references. It tells a
-  // true leak apart from memory the allocator merely keeps cached.
-  leaksReport = runLeaks(daemon.pid);
-}
+let exitCode;
+let exitSignal;
+let reaped;
+try {
+  const streamer = (async () => {
+    try {
+      await openSession();
+      let lastCycle = Date.now();
+      while (!stop && Date.now() - started < SECONDS * 1000) {
+        if (Date.now() - lastCycle >= CYCLE_SECONDS * 1000) {
+          await stats();
+          await closeSession();
+          await openSession();
+          lastCycle = Date.now();
+        }
+        if (data.socket.writableLength > MAX_BUFFERED) {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          continue;
+        }
+        sequence += 1;
+        await data.sendBinary(stampFrame(FRAME, sequence, BigInt(Date.now()) * 1000n));
+        sentFrames += 1;
+        // Writable callbacks can continuously replenish nextTick for tiny
+        // frames; periodically let sampling and the stop timer run.
+        if (sentFrames % FRAMES_PER_TURN === 0) await yieldToEventLoop();
+      }
+      await stats();
+      await closeSession();
+    } catch (error) {
+      runError = error;
+    }
+  })();
 
-daemon.kill('SIGTERM');
-const [exitCode, exitSignal] = await new Promise((resolve) =>
-  daemon.once('exit', (code, signal) => resolve([code, signal])));
+  sampler = setInterval(() => {
+    try {
+      samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
+        footprint: footprintKb(daemon.pid), frames: sentFrames });
+    } catch (error) {
+      runError ??= error;
+    }
+    const check = health(port).catch((error) => { runError ??= error; })
+      .finally(() => pendingHealth.delete(check));
+    pendingHealth.add(check);
+  }, 1000);
+
+  await new Promise((resolve) => setTimeout(resolve, SECONDS * 1000));
+  stop = true;
+  await streamer;
+  clearInterval(sampler);
+  await Promise.all(pendingHealth);
+  // Taken AFTER the stream has stopped and before the daemon is signalled, so
+  // this is the daemon at rest with its per-sender buffers legitimately released.
+  // It is kept in the table because it is informative, but flagged so the growth
+  // figure is not computed against it — see `warm` below.
+  samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
+    footprint: footprintKb(daemon.pid), frames: sentFrames, postStream: true });
+
+  if (CHECK_LEAKS) {
+    // `leaks` walks the live heap for blocks nothing references. It tells a
+    // true leak apart from memory the allocator merely keeps cached.
+    leaksReport = runLeaks(daemon.pid);
+  }
+
+} finally {
+  stop = true;
+  clearInterval(sampler);
+  // Every issued probe contributes to the verdict while the daemon is still
+  // alive. Its own timeout bounds this wait on an unresponsive daemon.
+  await Promise.all(pendingHealth);
+  control?.socket.destroy();
+  data?.socket.destroy();
+  ({ exitCode, signalCode: exitSignal, reaped } = await lifecycle.stop());
+}
 
 console.log('t(s)  footprint(KiB)  rss(KiB)  frames');
 for (const sample of samples) {
@@ -213,13 +221,14 @@ console.log(`cycles=${cycles} sent=${sentFrames} fps=${(sentFrames / SECONDS).to
   `accepted=${acceptedFrames} dropped=${droppedFrames} ` +
   `footprint_after_warmup=${first.footprint}KiB footprint_end=${last.footprint}KiB ` +
   `footprint_peak=${peak}KiB growth=${growth}KiB rss_end=${last.rss}KiB exit=${exitCode}`);
-if (stderr.trim()) console.log(`syncd stderr:\n${stderr}`);
+if (lifecycle.state.stderr.trim()) console.log(`syncd stderr:\n${lifecycle.state.stderr}`);
 if (leaksReport !== null) {
   const summary = leaksReport.raw.split('\n').find((line) => /leaks for .* total leaked bytes/.test(line));
   console.log(summary ?? leaksReport.raw.trim().split('\n').slice(-3).join('\n'));
 }
 
 assert.equal(runError, null, runError?.stack);
+assert.equal(reaped, true, 'the daemon was reaped after shutdown');
 // Windows has no POSIX signals: Node maps child.kill('SIGTERM') onto
 // TerminateProcess, so the child is force-killed and reports a signal with a
 // null exit code. Asserting exit 0 there can never pass, and asserting nothing

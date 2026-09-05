@@ -56,14 +56,15 @@ jobs:
           set -euo pipefail
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS"
+            -DCMAKE_CXX_FLAGS="$EXTRA_CXX_FLAGS" \
+            -DCMAKE_OBJCXX_FLAGS="$EXTRA_CXX_FLAGS"
           cmake --build build --parallel 4
 
       - name: Run native tests
         run: ctest --test-dir build --output-on-failure
 
-      - name: Run browser SDK tests
-        run: npm run test:browser
+      - name: Run JavaScript unit tests and test coverage guard
+        run: npm run test:unit
 
       - name: Run packaging tests
         run: npm run test:packaging
@@ -129,7 +130,7 @@ jobs:
 
       - name: Run browser and daemon tests
         run: |
-          npm run test:browser
+          npm run test:unit
           SYNC_DAEMON_PATH=build/syncd npm run test:integration
           SYNC_DAEMON_PATH=build/syncd SYNC_CTL_PATH=build/syncctl \
             npm run test:integration:linux
@@ -178,7 +179,7 @@ jobs:
             -DCMAKE_CXX_FLAGS='-Wall -Wextra -Wpedantic -Werror'
           cmake --build build --parallel 4
           ctest --test-dir build --output-on-failure
-          npm run test:browser
+          npm run test:unit
 
   windows:
     name: Windows ${{ matrix.name }}
@@ -324,8 +325,10 @@ jobs:
           & "build/$env:BUILD_TYPE/syncd.exe" --unregister-camera
           exit 0
 
-      - name: Run browser SDK tests
-        run: npm run test:browser
+      - name: Run JavaScript unit tests and test coverage guard
+        env:
+          SYNC_DAEMON_PATH: build/${{ env.BUILD_TYPE }}/syncd.exe
+        run: npm run test:unit
 
       - name: Run packaging tests
         run: npm run test:packaging

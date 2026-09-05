@@ -1,9 +1,90 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { summarise, ProtocolSoak } from './engine.mjs';
 
 const sample = (t, footprint) => ({ t, footprint, rss: footprint, frames: t * 60 });
+
+async function startupFixture(t, body) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'sync-startup-test-'));
+  const executable = path.join(directory, 'daemon');
+  await writeFile(executable, `#!${process.execPath}\n${body}\n`);
+  await chmod(executable, 0o700);
+  const soak = new ProtocolSoak({ daemonPath: executable, width: 8, height: 8,
+    startupTimeoutMs: 1000, stopTermTimeoutMs: 200, stopKillTimeoutMs: 200 });
+  t.after(async () => {
+    if (soak.daemon) await soak.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  return soak;
+}
+
+// These fixtures execute real children. The outer deadline makes a broken
+// readiness wait fail here rather than wedging the test runner itself.
+async function boundedStart(soak) {
+  let timer;
+  try {
+    return await Promise.race([soak.start(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('outer test deadline')), 4000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test('startup rejects a missing executable through its promise', async () => {
+  const soak = new ProtocolSoak({ daemonPath: path.join(os.tmpdir(),
+    'sync-nonexistent-directory', 'syncd'), width: 8, height: 8 });
+  await assert.rejects(boundedStart(soak), /ENOENT/);
+});
+
+for (const [name, body, expected] of [
+  ['malformed readiness', "process.stdout.write('not json\\n'); setInterval(() => {}, 1000)", /invalid syncd readiness/i],
+  ['silent daemon', 'setInterval(() => {}, 1000)', /readiness.*timed out/i],
+  ['oversized readiness', "process.stdout.write('x'.repeat(70 * 1024)); setInterval(() => {}, 1000)", /readiness.*too large/i],
+  ['invalid port', "process.stdout.write(JSON.stringify({type:'ready',port:0})+'\\n'); setInterval(() => {}, 1000)", /invalid syncd readiness/i],
+]) {
+  test(`startup cleans up ${name} before rejecting`, { skip: process.platform === 'win32' }, async (t) => {
+    const soak = await startupFixture(t, body);
+    await assert.rejects(boundedStart(soak), expected);
+    assert.ok(soak.daemon.exitCode !== null || soak.daemon.signalCode !== null,
+      'readiness failure must reap the child before the caller continues');
+  });
+}
+
+test('startup accepts fragmented readiness and drains later stdout',
+  { skip: process.platform === 'win32' }, async (t) => {
+    const soak = await startupFixture(t,
+      `process.stdout.write('{"type":"ready",');
+       setTimeout(() => process.stdout.write('"port":12345}\\n'), 10);
+       setInterval(() => process.stdout.write('diagnostic\\n'), 10);`);
+    assert.equal(await boundedStart(soak), 12345);
+    assert.equal(soak.port, 12345);
+    assert.equal(soak.daemon.listenerCount('error'), 0);
+  });
+
+test('fast completed writes yield so a queued stop can interrupt streaming', async (t) => {
+  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8 });
+  soak.data = { closed: false, socket: { writableLength: 0, destroyed: false },
+    sendBinary: async () => {} };
+  soak._openSession = async () => {};
+  soak._closeSession = async () => {};
+  soak._stats = async () => {};
+  // Keep the loop bound independent of host load, and queue the stop before
+  // the loop's own setImmediate so one event-loop turn suffices to observe it.
+  let clockReads = 0;
+  t.mock.method(Date, 'now', () => Math.floor(clockReads++ / 16));
+  const stop = setImmediate(() => { soak.stopped = true; });
+  t.after(() => clearImmediate(stop));
+
+  await soak.run(100);
+
+  assert.equal(soak.stopped, true, 'the queued stop must run before the streaming loop completes');
+  assert.ok(soak.state.sentFrames > 0);
+});
 
 test('summarise ignores the warm-up window when measuring growth', () => {
   const samples = [sample(0, 50_000), sample(1, 90_000), sample(2, 20_000),

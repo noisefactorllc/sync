@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <new>
+#include <utility>
 
 #include <sync/camera/frame_ring.hpp>
 #include <sync/camera/nv12.hpp>
@@ -27,7 +28,7 @@ constexpr std::size_t kCanvasBytes = kCanvasStride * kCanvas.height;
 // 100ns units, the unit every Media Foundation timestamp uses.
 constexpr std::uint64_t kFrameDuration100ns = 10'000'000ULL / kMaximumFramesPerSecond;
 
-// One media type. NV12 and RGB32 differ only in subtype and default stride.
+// Both output types describe the same canvas with their own storage and range.
 [[nodiscard]] auto MakeMediaType(const GUID& subtype) -> ComPtr<IMFMediaType> {
   ComPtr<IMFMediaType> type;
   if (FAILED(::MFCreateMediaType(&type))) return nullptr;
@@ -42,7 +43,10 @@ constexpr std::uint64_t kFrameDuration100ns = 10'000'000ULL / kMaximumFramesPerS
   // the ones that guess from the frame size on the same answer, and an
   // encoder change here fails loudly instead of shifting everyone's colour.
   type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
-  type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+  type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE,
+                  ::IsEqualGUID(subtype, MFVideoFormat_NV12)
+                      ? MFNominalRange_16_235
+                      : MFNominalRange_0_255);
   ::MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, kCanvas.width, kCanvas.height);
   ::MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, kMaximumFramesPerSecond, 1);
   ::MFSetAttributeRatio(type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -708,10 +712,7 @@ auto SyncCameraActivator::Initialize() -> HRESULT {
   // then fails the camera with MF_E_ATTRIBUTENOTFOUND looking for a list that
   // a purely synthetic source has no reason to have.
 
-  source_ = new (std::nothrow) SyncCameraSource();
-  if (!source_) return E_OUTOFMEMORY;
-  source_->Release();  // the ComPtr is the only owner
-  return source_->Initialize(this);
+  return S_OK;
 }
 
 auto SyncCameraActivator::QueryInterface(REFIID riid, void** object) -> HRESULT {
@@ -736,14 +737,41 @@ auto SyncCameraActivator::Release() -> ULONG {
 auto SyncCameraActivator::ActivateObject(REFIID riid, void** object) -> HRESULT {
   if (object == nullptr) return E_POINTER;
   *object = nullptr;
-  if (!source_) return MF_E_SHUTDOWN;
+  std::lock_guard<std::mutex> guard(mutex_);
+  if (!source_) {
+    ComPtr<SyncCameraSource> candidate;
+    candidate.Attach(new (std::nothrow) SyncCameraSource());
+    if (!candidate) return E_OUTOFMEMORY;
+    const HRESULT initialized = candidate->Initialize(this);
+    if (FAILED(initialized)) {
+      candidate->Shutdown();
+      return initialized;
+    }
+    source_ = std::move(candidate);
+  }
   return source_->QueryInterface(riid, object);
 }
 
-auto SyncCameraActivator::ShutdownObject() -> HRESULT { return S_OK; }
+auto SyncCameraActivator::ShutdownObject() -> HRESULT {
+  ComPtr<SyncCameraSource> source;
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    source = std::move(source_);
+  }
+  if (!source) return S_OK;
+  // Release the cached instance even if its caller already shut it down.
+  // A later activation must receive a fresh, usable source.
+  const HRESULT result = source->Shutdown();
+  return result == MF_E_SHUTDOWN ? S_OK : result;
+}
 
 auto SyncCameraActivator::DetachObject() -> HRESULT {
-  source_.Reset();
+  ComPtr<SyncCameraSource> source;
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    source = std::move(source_);
+  }
+  // The caller takes over shutdown responsibility for a detached source.
   return S_OK;
 }
 

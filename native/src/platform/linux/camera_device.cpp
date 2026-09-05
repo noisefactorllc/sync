@@ -81,6 +81,9 @@ LinuxCameraOpenResult negotiate(int descriptor, std::string_view path,
   format.fmt.pix.height = kCanvas.height;
   format.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
   format.fmt.pix.field = V4L2_FIELD_NONE;
+  // bgra_to_nv12 encodes BT.709 limited-range YCbCr. Leaving this at DEFAULT
+  // lets v4l2loopback choose sRGB, whose default YCbCr matrix is BT.601.
+  format.fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
   if (operations.set_nv12_format(descriptor, format) != 0) {
     const int saved_error = errno;
     operations.close_descriptor(descriptor);

@@ -1,0 +1,108 @@
+# Sync review — 2026-09-05
+
+Reviewed the separate checkout from baseline `7ca2dae` on `main`. Repairs are
+contained in Sync; sibling Noisemaker, Noisedeck, and Scaffold sources were
+consulted for interoperability and release behavior. The installed companion
+was left running. No release or remote workflow was started.
+
+## Findings addressed
+
+| Area | Failure | Repair and evidence |
+| --- | --- | --- |
+| Browser export resources | A data-socket failure was treated as GPU backend destruction. Noisemaker then abandoned live export slots without destroying their textures, buffers, or fences. | Transport failures now use ordinary resource cleanup. Close/error regressions failed with zero slots destroyed before the fix and pass with all three destroyed once. Explicit backend loss still abandons resources as intended. Also checked against the actual sibling Noisemaker export queue. |
+| macOS companion lifetime | Destruction after helper exit changed immutable NSTask stdio properties and raised an exception. Once that was removed, an already queued termination callback dereferenced freed supervisor state, confirmed by ASan. | Queued callbacks use a weak ownership record, destruction disarms callbacks, and post-launch stdio mutation is removed. Tests cover destruction before queue drain, destruction from an exit callback, and queued termination with no helper. Existing terminate/relaunch ordering tests still pass. |
+| NDI alpha | Premultiplied pixels were copied unchanged into NDI's straight-alpha RGBA format; opaque mode also preserved an ignored alpha byte. | Normalize into the existing owned buffer. Four production-conversion tests cover packed/padded rows, straight and opaque modes, zero/full/tiny alpha, rounding, saturation, unchanged input, and destination bounds. Three failed before normalization. No new frame allocations. |
+| Linux camera colors | NV12 bytes use BT.709, but an unspecified V4L2 colorspace lets v4l2loopback choose sRGB and its default BT.601 YCbCr interpretation. | Declare REC709. The regression encodes a colored patch through the real NV12 converter and decodes it using the requested driver metadata; it failed before the fix. |
+| Windows RGB camera levels | RGB32 copied full-range BGRA bytes while declaring limited range. | Advertise full range for RGB32 and retain limited range for NV12. Added a media-type regression. **Windows execution pending.** |
+| Windows camera activation | ShutdownObject did nothing; after DetachObject, ActivateObject permanently failed. | Serialize cached-source ownership, create sources lazily, shut down and release on ShutdownObject, and detach without shutting down the caller's source. Regressions check fresh usable activation after both operations. **Windows execution pending.** |
+| Soak process lifecycle | Missing executables, malformed/oversized readiness, invalid ports, or silent children could escape promise handling or leave the caller waiting indefinitely. | Bound and validate readiness; stop the child before rejecting. Both soak programs share this lifecycle. The long runner emits an error plus final JSONL summary even when startup fails. Real-child regressions demonstrated failures before the repair. |
+| Soak WebSocket lifecycle | Closed/silent/failed upgrades and stalled writes could hang; failed upgrades retained sockets; fragmented headers accumulated listeners; coalesced first messages were not drained. | Bound connection/upgrade/write waits and header size, clean up failed sockets and temporary listeners, and drain handshake remainder immediately. Ten real TCP tests cover failure and successful wire-byte behavior; eight reproduced original failures. |
+| Soak scheduling and verdict | Tiny frames could starve timers: a five-second run lasted until a sixty-second sender cycle. A final pending health failure could arrive after a successful verdict. | Periodically yield to the event loop, enforce the short run's elapsed-time bound, and join issued health checks before shutdown/verdict. Real-daemon regressions cover duration and delayed health failure. |
+| CI coverage | Meta, soak, and acceptance unit suites were not invoked by CI. Objective-C++ compilation did not receive the macOS warning/sanitizer matrix flags. | Add a combined unit script to each platform job, pass the Windows daemon path to native subprocess tests, and apply the macOS flags to Objective-C++. |
+| Local verification and documentation | Two loopback cases assumed the installed companion's port was free. The README claimed CLI management breaks a live pairing store, which current code no longer does. | Preserve a running local companion, explicitly skip only the occupied default-port case outside CI, and retain strict CI behavior. Added a live-daemon regression proving repeated listing and selective revocation preserve other pairings. Removed the stale warning and corrected the CMake prerequisite. |
+
+## Review coverage
+
+Examined browser discovery, permissions, pairing, session cancellation, sender
+recovery, frame encoding, resource ownership, and backpressure; native
+WebSocket/control/frame parsing, authentication, origin normalization, pairing
+storage and locks, authority cancellation, payload budgets, callbacks, and
+publisher ownership; camera, NDI, Spout, Metal/Syphon and companion lifecycle
+paths; CMake, platform packaging, CI/release routing, and soak/acceptance gates.
+
+No additional reproducible native transport/authentication defect was
+established. That is a review result, not a formal security certification.
+
+## Verification
+
+Local build directories and detailed logs are ignored build artifacts, retained
+under `build-review*`. The final evidence logs are in `build-review/review-logs`.
+
+- macOS C++ and Objective-C++ with `-Wall -Wextra -Wpedantic -Werror`: all
+  21 CTest suites passed.
+- macOS with address and undefined-behavior sanitizers on both languages:
+  all 21 CTest suites passed, including the companion lifetime regressions.
+- Ubuntu 24.04 ARM64 warning-clean build: all 18 CTest suites passed.
+- Ubuntu 24.04 x86_64 warning-clean Release build: all 18 CTest suites passed.
+- Ubuntu ARM64 ASan/UBSan with leak detection: all 18 CTest suites passed;
+  the final NDI conversion change additionally passed its rebuilt sanitizer
+  suite.
+- Real loopback: 23/23 passed in isolated Linux. On macOS, 22 passed and the
+  default-port case was explicitly skipped because the installed companion
+  owns port 53979. Linux `syncctl` daemon-control integration also passed.
+- Node 22: all 187 combined meta/browser/soak/acceptance unit tests passed on
+  both macOS and isolated Linux, including native subprocess regressions.
+- Packaging source checks: 14 passed; seven artifact/platform-specific cases
+  are explicitly skipped without their required artifacts. The separate real
+  Linux package test passed against the built `.deb`.
+- Built an x86_64 `.deb`, verified its contents and architecture, and ran its
+  install/remove/purge smoke test in a disposable container. This intentionally
+  does not install or exercise a kernel camera driver.
+- ShellCheck, shell syntax, actionlint, and whitespace checks passed. The
+  actionlint invocation allows the existing custom `sync-camera` runner label.
+- Short real-daemon runs exercised lifecycle cycling, memory sampling, healthy
+  shutdown, tiny-frame timer fairness, and delayed health failure. These are
+  bounded functional checks, not a new multi-hour soak certification.
+
+Representative reproduction commands, from the checkout root:
+
+```sh
+cmake -S . -B build-review -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS='-Wall -Wextra -Wpedantic -Werror' \
+  -DCMAKE_OBJCXX_FLAGS='-Wall -Wextra -Wpedantic -Werror'
+cmake --build build-review --parallel 4
+ctest --test-dir build-review --output-on-failure
+SYNC_DAEMON_PATH=build-review/syncd npm run test:unit
+SYNC_DAEMON_PATH=build-review/syncd npm run test:integration
+npm run test:packaging
+SYNC_DAEMON_PATH=build-review/syncd SYNC_SOAK_SECONDS=10 \
+  SYNC_SOAK_CYCLE=2 npm run test:soak
+shellcheck --severity=warning scripts/*.sh packaging/linux/postrm
+actionlint -ignore 'label "sync-camera" is unknown' .github/workflows/*.yml
+```
+
+## Remaining acceptance boundaries
+
+Windows camera changes have source review and regression coverage, but no
+Windows compiler/runtime was available here. Before release, run the native
+Windows build and tests, packaging/lifecycle gates, and real receiver checks.
+No signed/notarized macOS bundle or physical Spout, NDI, or V4L2 receiver
+certification was performed. NDI normalization tests verify production copy
+bytes without loading the vendor runtime.
+
+A push to public `main` can request a preview release through Scaffold after
+green CI. This review does not authorize that push or publication.
+
+## External contracts checked
+
+- [NDI frame types](https://docs.ndi.video/all/developing-with-ndi/sdk/frame-types):
+  RGBA uses straight alpha.
+- [V4L2 colorspace defaults](https://kernel.org/doc/html/v6.15/userspace-api/media/v4l/colorspaces-details.html)
+  and [v4l2loopback source](https://github.com/v4l2loopback/v4l2loopback/blob/v0.13.2/v4l2loopback.c):
+  declared colorspace controls the default YCbCr matrix.
+- [Media Foundation nominal range](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/ne-mfobjects-mfnominalrange):
+  full and limited range have distinct numeric interpretations.
+- [ShutdownObject](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfactivate-shutdownobject)
+  and [DetachObject](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfactivate-detachobject):
+  both release the activator's cached reference and allow fresh activation;
+  only shutdown stops the existing object.

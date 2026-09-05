@@ -2321,7 +2321,7 @@ test("syncd rejects every invalid publisher-mode CLI shape without a ready recor
   }
 });
 
-test("syncd no-argument production mode uses the default port and dynamic pairing", async () => {
+test("syncd no-argument production mode uses the default port and dynamic pairing", async (t) => {
   const temporaryHome = await realpath(await mkdtemp(
     path.join(os.tmpdir(), "sync-production-home-"),
   ));
@@ -2333,8 +2333,17 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
   // diagnostic per missing provider here -- not silence.
   let reportedProviders = [];
   try {
-    ipv4Guard = await listenGuard("127.0.0.1", 53979);
-    ipv6Guard = await listenGuard("::1", 53979);
+    try {
+      ipv4Guard = await listenGuard("127.0.0.1", 53979);
+      ipv6Guard = await listenGuard("::1", 53979);
+    } catch (error) {
+      // A developer may be using the installed companion. This one case
+      // needs its well-known port; never stop or probe that live instance.
+      // CI must still exercise the default-port path on an isolated host.
+      if (error.code !== "EADDRINUSE" || process.env.CI) throw error;
+      t.skip("default Sync port is occupied; requires an isolated host");
+      return;
+    }
     await closeGuard(ipv6Guard);
     ipv6Guard = undefined;
     await closeGuard(ipv4Guard);
@@ -2476,8 +2485,17 @@ test("syncd management lists and revokes the isolated default store without open
     await stopDaemon(seedDaemon.child, seedDaemon.stderr, seedDaemon.stdout, seedDaemon.ready);
     seedDaemon = undefined;
 
-    ipv4Guard = await listenGuard("127.0.0.1", 53979);
-    ipv6Guard = await listenGuard("::1", 53979);
+    // An existing listener is already a guard against accidental server
+    // startup. Management uses only the isolated credential store below.
+    for (const host of ["127.0.0.1", "::1"]) {
+      try {
+        const guard = await listenGuard(host, 53979);
+        if (host === "127.0.0.1") ipv4Guard = guard;
+        else ipv6Guard = guard;
+      } catch (error) {
+        if (error.code !== "EADDRINUSE") throw error;
+      }
+    }
     const isolatedEnvironment = isolatedStoreEnvironment(temporaryHome);
     const listed = await runToExit(SYNCD, ["--list-pairings"], {
       env: isolatedEnvironment,
@@ -2545,5 +2563,84 @@ test("syncd rejects production, static-test, and management mode mixtures", asyn
     assert.equal(result.code, 2, `${arguments_.join(" ")}: ${result.stderr}`);
     assert.equal(result.stdout, "");
     assert.match(result.stderr, /^usage: syncd /);
+  }
+});
+
+test("syncd management preserves authentication in a running pairing daemon", async () => {
+  const temporaryHome = await realpath(await mkdtemp(
+    path.join(os.tmpdir(), "sync-live-management-"),
+  ));
+  const storePath = path.join(
+    temporaryHome,
+    ...(process.platform === "win32"
+      ? ["Noisefactor Sync"]
+      : process.platform === "linux"
+        ? [".config", "noisefactor-sync"]
+        : ["Library", "Application Support", "Noisefactor Sync"]),
+    "pairings.v1",
+  );
+  const isolatedEnvironment = isolatedStoreEnvironment(temporaryHome);
+  const revokedOrigin = "https://live-management-revoked.example";
+  const retainedOrigin = "https://live-management-retained.example";
+  const clients = new Set();
+  let daemon;
+  const expectAuthentication = async (origin, token, expectedType) => {
+    const control = await authenticateControl(daemon.ready, origin, token);
+    clients.add(control.client);
+    const response = await control.client.nextJson("live management authentication");
+    assert.equal(response.type, expectedType);
+    if (expectedType === "error") assert.equal(response.code, "authentication_failed");
+    control.client.destroy();
+    clients.delete(control.client);
+  };
+  try {
+    daemon = await spawnPairingDaemon(storePath, "approve");
+    const revokedPairing = await pairWithDaemon(daemon.ready, revokedOrigin);
+    assert.equal(revokedPairing.type, "paired");
+    // The test server uses a one-second global pairing cooldown.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const retainedPairing = await pairWithDaemon(daemon.ready, retainedOrigin);
+    assert.equal(retainedPairing.type, "paired");
+    await expectAuthentication(revokedOrigin, revokedPairing.token, "welcome");
+    await expectAuthentication(retainedOrigin, retainedPairing.token, "welcome");
+
+    for (let attempt = 0; attempt < 3; ++attempt) {
+      const listed = await runToExit(SYNCD, ["--list-pairings"], {
+        env: isolatedEnvironment,
+      });
+      assert.equal(listed.code, 0, listed.stderr);
+      assert.deepEqual(JSON.parse(listed.stdout), {
+        type: "pairings",
+        origins: [revokedOrigin, retainedOrigin],
+      });
+      await expectAuthentication(revokedOrigin, revokedPairing.token, "welcome");
+      await expectAuthentication(retainedOrigin, retainedPairing.token, "welcome");
+    }
+
+    const revoked = await runToExit(SYNCD, ["--revoke-origin", revokedOrigin], {
+      env: isolatedEnvironment,
+    });
+    assert.equal(revoked.code, 0, revoked.stderr);
+    assert.deepEqual(JSON.parse(revoked.stdout), {
+      type: "revocation",
+      origin: revokedOrigin,
+      status: "revoked",
+    });
+    await expectAuthentication(revokedOrigin, revokedPairing.token, "error");
+    await expectAuthentication(retainedOrigin, retainedPairing.token, "welcome");
+    const listed = await runToExit(SYNCD, ["--list-pairings"], {
+      env: isolatedEnvironment,
+    });
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.deepEqual(JSON.parse(listed.stdout), {
+      type: "pairings",
+      origins: [retainedOrigin],
+    });
+    await expectAuthentication(retainedOrigin, retainedPairing.token, "welcome");
+    assert.equal(daemon.child.exitCode, null, "the original daemon stays running");
+  } finally {
+    for (const client of clients) client.destroy();
+    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+    await rm(temporaryHome, { recursive: true, force: true });
   }
 });

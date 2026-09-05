@@ -388,6 +388,73 @@ SYNC_TEST(companion_process_sequences_exit_before_restart_completion) {
                               "replacement exit"}));
 }
 
+SYNC_TEST(companion_process_destruction_disarms_queued_helper_callbacks) {
+  TemporaryFixture fixture;
+  fixture.write_helper("printf 'pending stderr\\n' >&2\nexit 17\n");
+  auto process = std::make_unique<CompanionProcess>(CompanionProcessOptions{
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+  });
+  int callbacks = 0;
+  std::string error;
+  SYNC_REQUIRE(process->start(
+      [&](std::string_view) { ++callbacks; },
+      [&](int) { ++callbacks; }, error));
+
+  // Hold the main queue while Foundation observes the child exit and queues
+  // its notifications. The supervisor must remain safe to destroy before
+  // those notifications run, and none may call back into its former owner.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (process->owned_pid().has_value() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  SYNC_REQUIRE(!process->owned_pid().has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  process->terminate([&] { ++callbacks; });
+  SYNC_REQUIRE(callbacks == 0);
+  process.reset();
+
+  const auto drained = std::make_shared<bool>(false);
+  dispatch_async(dispatch_get_main_queue(), ^{ *drained = true; });
+  SYNC_REQUIRE(wait_until([&] { return *drained; }));
+  SYNC_REQUIRE(callbacks == 0);
+}
+
+SYNC_TEST(companion_process_exit_callback_can_destroy_the_supervisor) {
+  TemporaryFixture fixture;
+  fixture.write_helper("exit 17\n");
+  auto process = std::make_unique<CompanionProcess>(CompanionProcessOptions{
+      .helper_path = fixture.helper_path(),
+      .framework_path = "/tmp/Syphon.framework",
+  });
+  bool exited = false;
+  int completions = 0;
+  std::string error;
+  SYNC_REQUIRE(process->start(
+      [](std::string_view) {},
+      [&](int) {
+        process.reset();
+        exited = true;
+      }, error));
+  process->terminate([&] { ++completions; });
+  SYNC_REQUIRE(wait_until([&] { return exited; }));
+  SYNC_REQUIRE(process == nullptr);
+  SYNC_REQUIRE(completions == 0);
+}
+
+SYNC_TEST(companion_process_destruction_disarms_queued_idle_termination) {
+  int completions = 0;
+  {
+    CompanionProcess process({});
+    process.terminate([&] { ++completions; });
+  }
+  const auto drained = std::make_shared<bool>(false);
+  dispatch_async(dispatch_get_main_queue(), ^{ *drained = true; });
+  SYNC_REQUIRE(wait_until([&] { return *drained; }));
+  SYNC_REQUIRE(completions == 0);
+}
+
 SYNC_TEST(companion_process_releases_an_unexpected_exit_before_relaunch) {
   TemporaryFixture fixture;
   fixture.write_helper("exit 17\n");

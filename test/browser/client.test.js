@@ -176,6 +176,26 @@ class ExportQueue {
   }
 }
 
+class ResourceExportQueue extends ExportQueue {
+  constructor() {
+    super();
+    this.resources = [];
+  }
+
+  configure() {
+    this.resources = Array.from({ length: 3 }, () => ({ destroyCalls: 0 }));
+  }
+
+  close(options) {
+    super.close(options);
+    // Noisemaker abandons GPU handles when the renderer backend is lost;
+    // ordinary closure must explicitly destroy every allocated export slot.
+    if (options?.backendLost !== true) {
+      for (const resource of this.resources) resource.destroyCalls += 1;
+    }
+  }
+}
+
 function client(options = {}) {
   return new SyncBridgeClient({
     endpoint: ENDPOINT,
@@ -1500,10 +1520,39 @@ test('unexpected data close rejects once with a bounded typed loss descriptor', 
     return true;
   });
 
-  assert.deepEqual(exportQueue.closeOptions, [{ backendLost: true }]);
+  assert.deepEqual(exportQueue.closeOptions, [undefined]);
   assert.equal(data.closeCalls, 1);
   assert.equal(commands.filter(({ type }) => type === 'closeSender').length, 1);
   bridge.close();
+});
+
+test('data transport loss destroys live export resources exactly once', async (t) => {
+  for (const event of ['close', 'error']) {
+    await t.test(event, async () => {
+      scriptedControl();
+      const exportQueue = new ResourceExportQueue();
+      const bridge = client();
+      t.after(() => bridge.close());
+      const sender = await bridge.createSender('Sender', {
+        exportQueue, maxBufferedFrames: 1, clock: { timeOrigin: 0 },
+      });
+      sender.configure({
+        width: 2, height: 2, format: 'rgba8unorm',
+        colorSpace: 'srgb', alphaMode: 'premultiplied', fps: 60,
+      });
+      const data = FakeWebSocket.instances[1];
+
+      if (event === 'error') data.fail();
+      data.remoteClose(1013, 'inbound_budget_exhausted');
+      await assert.rejects(sender.closed, SyncSenderLostError);
+      sender.close();
+      bridge.close();
+
+      assert.equal(exportQueue.closeCalls, 1);
+      assert.equal(exportQueue.resources.length, 3);
+      assert.deepEqual(exportQueue.resources.map(({ destroyCalls }) => destroyCalls), [1, 1, 1]);
+    });
+  }
 });
 
 test('incomplete-frame policy close preserves its exact bounded recovery descriptor', async () => {
@@ -1672,11 +1721,15 @@ test('sender close is synchronous and idempotent while closed waits for the matc
 test('sender backendLost close forwards loss locally and still completes one control/data teardown', async () => {
   const commands = [];
   scriptedControl({ onControl: (message) => commands.push(message) });
-  const exportQueue = new ExportQueue();
+  const exportQueue = new ResourceExportQueue();
   const bridge = client();
   await bridge.connect();
   const sender = await bridge.createSender('Sender', {
     exportQueue, maxBufferedBytes: 1024, clock: { timeOrigin: 0 },
+  });
+  sender.configure({
+    width: 2, height: 2, format: 'rgba8unorm',
+    colorSpace: 'srgb', alphaMode: 'premultiplied', fps: 60,
   });
   const data = FakeWebSocket.instances[1];
   const options = { backendLost: true };
@@ -1686,6 +1739,7 @@ test('sender backendLost close forwards loss locally and still completes one con
   await sender.closed;
 
   assert.deepEqual(exportQueue.closeOptions, [options]);
+  assert.deepEqual(exportQueue.resources.map(({ destroyCalls }) => destroyCalls), [0, 0, 0]);
   assert.equal(data.closeCalls, 1);
   assert.deepEqual(commands.map(({ type }) => type), [
     'hello', 'createSender', 'closeSender',

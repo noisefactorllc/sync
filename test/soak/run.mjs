@@ -42,13 +42,13 @@ const soak = new ProtocolSoak({
   },
 });
 
-const port = await soak.start();
-process.stderr.write(`protocol soak pid=${soak.daemon.pid} port=${port}\n`);
 const shutdown = () => { soak.stopped = true; };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 let runError = null;
 try {
+  const port = await soak.start();
+  process.stderr.write(`protocol soak pid=${soak.daemon.pid} port=${port}\n`);
   await soak.run(seconds * 1000);
 } catch (error) {
   runError = error;

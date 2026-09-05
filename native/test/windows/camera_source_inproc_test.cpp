@@ -49,7 +49,7 @@ struct Environment {
 // comes from ActivateObject. This is the whole point of the in-process test --
 // no frame server, no registration, no elevation, so it runs on any Windows
 // runner.
-[[nodiscard]] auto CreateSource() -> ComPtr<IMFMediaSource> {
+[[nodiscard]] auto CreateActivator() -> ComPtr<IMFActivate> {
   Environment& env = environment();
   SYNC_REQUIRE(env.module != nullptr);
   auto entry =
@@ -59,6 +59,11 @@ struct Environment {
   SYNC_REQUIRE(SUCCEEDED(entry(kSyncCameraSourceClsid, IID_PPV_ARGS(&factory))));
   ComPtr<IMFActivate> activator;
   SYNC_REQUIRE(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&activator))));
+  return activator;
+}
+
+[[nodiscard]] auto CreateSource() -> ComPtr<IMFMediaSource> {
+  auto activator = CreateActivator();
   ComPtr<IMFMediaSource> source;
   SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&source))));
   return source;
@@ -141,6 +146,65 @@ SYNC_TEST(the_source_advertises_nv12_first_then_rgb32) {
     SYNC_REQUIRE(SUCCEEDED(::MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &width, &height)));
     SYNC_REQUIRE(width == kCanvas.width && height == kCanvas.height);
   }
+}
+
+SYNC_TEST(the_source_declares_the_range_of_each_output_format) {
+  auto source = CreateSource();
+  ComPtr<IMFMediaTypeHandler> handler;
+  SYNC_REQUIRE(SUCCEEDED(StreamDescriptorOf(source)->GetMediaTypeHandler(&handler)));
+  for (DWORD index = 0; index < 2; ++index) {
+    ComPtr<IMFMediaType> type;
+    SYNC_REQUIRE(SUCCEEDED(handler->GetMediaTypeByIndex(index, &type)));
+    GUID subtype{};
+    SYNC_REQUIRE(SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype)));
+    UINT32 range = MFNominalRange_Unknown;
+    SYNC_REQUIRE(SUCCEEDED(type->GetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, &range)));
+    // NV12 is studio-range YCbCr; RGB32 copies the full-range BGRA canvas.
+    // A shared limited-range tag makes a receiver stretch RGB levels twice.
+    if (::IsEqualGUID(subtype, MFVideoFormat_NV12)) {
+      SYNC_REQUIRE(range == MFNominalRange_16_235);
+    } else {
+      SYNC_REQUIRE(::IsEqualGUID(subtype, MFVideoFormat_RGB32));
+      SYNC_REQUIRE(range == MFNominalRange_0_255);
+    }
+  }
+  SYNC_REQUIRE(SUCCEEDED(source->Shutdown()));
+}
+
+SYNC_TEST(the_activator_shuts_down_its_source_and_can_activate_a_fresh_one) {
+  auto activator = CreateActivator();
+  ComPtr<IMFMediaSource> first;
+  ComPtr<IMFMediaSource> repeated;
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&first))));
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&repeated))));
+  SYNC_REQUIRE(first.Get() == repeated.Get());
+  SYNC_REQUIRE(SUCCEEDED(activator->ShutdownObject()));
+  DWORD characteristics = 0;
+  SYNC_REQUIRE(first->GetCharacteristics(&characteristics) == MF_E_SHUTDOWN);
+  SYNC_REQUIRE(SUCCEEDED(activator->ShutdownObject()));
+
+  ComPtr<IMFMediaSource> replacement;
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&replacement))));
+  SYNC_REQUIRE(replacement.Get() != first.Get());
+  SYNC_REQUIRE(SUCCEEDED(replacement->GetCharacteristics(&characteristics)));
+  SYNC_REQUIRE(SUCCEEDED(activator->ShutdownObject()));
+}
+
+SYNC_TEST(the_activator_detaches_without_stopping_the_source_and_can_activate_again) {
+  auto activator = CreateActivator();
+  ComPtr<IMFMediaSource> detached;
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&detached))));
+  SYNC_REQUIRE(SUCCEEDED(activator->DetachObject()));
+  DWORD characteristics = 0;
+  SYNC_REQUIRE(SUCCEEDED(detached->GetCharacteristics(&characteristics)));
+
+  ComPtr<IMFMediaSource> replacement;
+  SYNC_REQUIRE(SUCCEEDED(activator->ActivateObject(IID_PPV_ARGS(&replacement))));
+  SYNC_REQUIRE(replacement.Get() != detached.Get());
+  SYNC_REQUIRE(SUCCEEDED(replacement->GetCharacteristics(&characteristics)));
+  SYNC_REQUIRE(SUCCEEDED(activator->ShutdownObject()));
+  SYNC_REQUIRE(SUCCEEDED(detached->GetCharacteristics(&characteristics)));
+  SYNC_REQUIRE(SUCCEEDED(detached->Shutdown()));
 }
 
 SYNC_TEST(the_source_reports_a_sixty_fps_frame_rate) {

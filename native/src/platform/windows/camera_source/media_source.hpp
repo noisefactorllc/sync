@@ -223,6 +223,7 @@ class SyncCameraActivator final : public AttributeStore<IMFActivate> {
 
   ModuleReference module_reference_;
   std::atomic<ULONG> references_{1};
+  std::mutex mutex_;
   Microsoft::WRL::ComPtr<SyncCameraSource> source_;
 };
 

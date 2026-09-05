@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -153,6 +154,45 @@ SYNC_TEST(linux_camera_device_validates_descriptor_and_exact_format) {
   SYNC_REQUIRE(operations.requested_rate.parm.output.timeperframe.numerator == 1);
   SYNC_REQUIRE(operations.requested_rate.parm.output.timeperframe.denominator ==
                60);
+}
+
+SYNC_TEST(linux_camera_color_metadata_decodes_the_nv12_encoder_without_color_shift) {
+  DeviceOps operations;
+  operations.compatible();
+  SYNC_REQUIRE(camera::open_linux_camera("/dev/video8", operations).error ==
+               camera::LinuxCameraDeviceError::None);
+
+  // v4l2loopback resolves an unspecified colorspace to sRGB, whose default
+  // YCbCr matrix is 601. Decode the actual encoder output using the format
+  // sent to the driver, so a missing declaration produces a visible error.
+  const auto& format = operations.requested_format.fmt.pix;
+  const auto colorspace = format.colorspace == V4L2_COLORSPACE_DEFAULT
+                              ? static_cast<std::uint32_t>(V4L2_COLORSPACE_SRGB)
+                              : format.colorspace;
+  const auto encoding = format.ycbcr_enc == V4L2_YCBCR_ENC_DEFAULT
+                            ? static_cast<std::uint32_t>(
+                                  V4L2_MAP_YCBCR_ENC_DEFAULT(colorspace))
+                            : format.ycbcr_enc;
+  const double kr = encoding == V4L2_YCBCR_ENC_709 ? 0.2126 : 0.299;
+  const double kb = encoding == V4L2_YCBCR_ENC_709 ? 0.0722 : 0.114;
+  std::array<std::byte, 16> bgra{};
+  for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+    bgra[pixel * 4] = std::byte{64};
+    bgra[pixel * 4 + 1] = std::byte{192};
+    bgra[pixel * 4 + 2] = std::byte{96};
+    bgra[pixel * 4 + 3] = std::byte{255};
+  }
+  std::array<std::byte, 6> nv12{};
+  SYNC_REQUIRE(camera::bgra_to_nv12(bgra, 8, 2, 2, nv12, 2));
+  const double y = (std::to_integer<int>(nv12[0]) - 16) * 255.0 / 219.0;
+  const double u = (std::to_integer<int>(nv12[4]) - 128) * 255.0 / 224.0;
+  const double v = (std::to_integer<int>(nv12[5]) - 128) * 255.0 / 224.0;
+  const double r = y + 2.0 * (1.0 - kr) * v;
+  const double b = y + 2.0 * (1.0 - kb) * u;
+  const double g = (y - kr * r - kb * b) / (1.0 - kr - kb);
+  SYNC_REQUIRE(std::abs(r - 96.0) <= 2.0);
+  SYNC_REQUIRE(std::abs(g - 192.0) <= 2.0);
+  SYNC_REQUIRE(std::abs(b - 64.0) <= 2.0);
 }
 
 SYNC_TEST(linux_camera_probe_accepts_an_exclusive_camera_while_the_daemon_owns_output) {

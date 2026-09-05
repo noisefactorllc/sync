@@ -659,7 +659,9 @@ class SyncSenderSink {
       closeCode: event?.code,
       closeReason: event?.reason,
     });
-    try { this._closeLocal({ backendLost: true }); } catch {}
+    // A transport failure leaves the renderer backend alive. Destroy its
+    // export resources normally; only renderer-driven close may abandon them.
+    try { this._closeLocal(); } catch {}
     this._completion.reject(error);
     try {
       this._client._requestSenderClose(this).catch(() => {});

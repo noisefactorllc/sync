@@ -1,5 +1,6 @@
 #include <sync/platform/ndi_publisher.hpp>
 
+#include "../ndi_frame_copy.hpp"
 #include "../replacement_budget.hpp"
 
 #include <array>
@@ -825,14 +826,7 @@ auto NdiFramePublisher::publish(std::string_view sender_id, const protocol::Fram
   }
 
   std::byte* destination = buffer.storage.get();
-  if (static_cast<std::size_t>(frame.row_stride) == packed_row_bytes) {
-    std::memcpy(destination, frame.payload.data(), frame.payload.size());
-  } else {
-    for (std::uint32_t row = 0; row < frame.height; ++row) {
-      std::memcpy(destination + static_cast<std::size_t>(row) * packed_row_bytes,
-                  frame.payload.data() + static_cast<std::size_t>(row) * frame.row_stride, packed_row_bytes);
-    }
-  }
+  ndi::copy_rgba_frame(frame, destination);
 
   std::int64_t timecode = 0;
   if (!checked_timecode(frame.presentation_time_us, timecode)) {

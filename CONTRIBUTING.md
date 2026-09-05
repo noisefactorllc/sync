@@ -4,7 +4,7 @@ Thanks for your interest in contributing.
 
 ## Getting set up
 
-Sync requires CMake 3.20 or newer, a C++20 compiler, OpenSSL 3, libuv, and
+Sync requires CMake 3.21 or newer, a C++20 compiler, OpenSSL 3, libuv, and
 pkg-config. On macOS, the native publisher also uses the system Foundation and
 Metal frameworks.
 
@@ -12,7 +12,7 @@ Metal frameworks.
 cmake -S . -B build
 cmake --build build -j4
 ctest --test-dir build --output-on-failure
-npm run test:browser
+npm run test:unit
 SYNC_DAEMON_PATH=build/syncd npm run test:integration
 ```
 

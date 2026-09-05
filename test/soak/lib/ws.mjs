@@ -4,6 +4,15 @@ import { createHash, randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 
+const DEFAULT_TIMEOUT_MS = 5000;
+const MAX_UPGRADE_BYTES = 16_384;
+
+function validateTimeout(timeoutMs) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
+    throw new RangeError('timeoutMs must be a positive timer-safe integer');
+  }
+}
+
 function maskedFrame(opcode, payload) {
   // A zero mask key is a valid key and leaves the payload bytes unchanged, so
   // a multi-megabyte frame needs no per-byte work here.
@@ -41,6 +50,7 @@ export class RawWebSocket {
       for (const waiter of this.waiters.splice(0)) waiter.reject(new Error('socket closed'));
     });
     socket.on('error', () => {});
+    this.drain();
   }
 
   drain() {
@@ -94,19 +104,41 @@ export class RawWebSocket {
     this.socket.write(Buffer.concat([header, payload]));
   }
 
-  sendBinary(payload) {
+  sendBinary(payload, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    validateTimeout(timeoutMs);
     const [header] = maskedFrame(0x2, payload);
     // A write to a reset or destroyed socket must not look like success: the
     // callback carries the error, and a soak caller relies on the rejection
     // to notice the connection is dead rather than counting a phantom frame.
     return new Promise((resolve, reject) => {
-      this.socket.write(header, (headerError) => {
-        if (headerError) { reject(headerError); return; }
-        this.socket.write(payload, (payloadError) => {
-          if (payloadError) reject(payloadError);
-          else resolve();
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.socket.removeListener('error', failed);
+        this.socket.removeListener('close', closed);
+        if (error) {
+          // A partial frame cannot be retried on this stream.
+          this.socket.destroy();
+          reject(error);
+        } else resolve();
+      };
+      const failed = (error) => finish(error);
+      const closed = () => finish(new Error('socket closed during binary write'));
+      const timer = setTimeout(() => finish(new Error('binary write timed out')), timeoutMs);
+      this.socket.once('error', failed);
+      this.socket.once('close', closed);
+      if (this.closed || this.socket.destroyed) { closed(); return; }
+      try {
+        this.socket.write(header, (headerError) => {
+          if (settled) return;
+          if (headerError) { finish(headerError); return; }
+          try {
+            this.socket.write(payload, finish);
+          } catch (error) { finish(error); }
         });
-      });
+      } catch (error) { finish(error); }
     });
   }
 
@@ -122,38 +154,96 @@ export class RawWebSocket {
   }
 }
 
-export function connect(port) {
+export function connect(port, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  validateTimeout(timeoutMs);
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host: '127.0.0.1', port }, () => resolve(socket));
+    const socket = net.connect({ host: '127.0.0.1', port });
     socket.setNoDelay(true);
-    socket.once('error', reject);
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener('connect', connected);
+      socket.removeListener('error', failed);
+      socket.removeListener('close', closed);
+      if (error) {
+        socket.destroy();
+        reject(error);
+      } else resolve(socket);
+    };
+    const connected = () => finish();
+    const failed = (error) => finish(error);
+    const closed = () => finish(new Error('socket closed while connecting'));
+    const timer = setTimeout(() => finish(new Error('socket connection timed out')), timeoutMs);
+    socket.once('connect', connected);
+    socket.once('error', failed);
+    socket.once('close', closed);
   });
 }
 
-export async function upgrade(port, route, { origin, subprotocol } = {}) {
-  const socket = await connect(port);
+export async function upgrade(port, route, {
+  origin, subprotocol, timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
+  validateTimeout(timeoutMs);
+  const deadline = performance.now() + timeoutMs;
+  const socket = await connect(port, { timeoutMs });
   const key = randomBytes(16).toString('base64');
-  socket.write(
-    `GET ${route} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\n` +
-    `Connection: Upgrade\r\nOrigin: ${origin}\r\nSec-WebSocket-Version: 13\r\n` +
-    `Sec-WebSocket-Key: ${key}\r\n` +
-    (subprotocol ? `Sec-WebSocket-Protocol: ${subprotocol}\r\n` : '') + '\r\n',
-  );
-  let bytes = Buffer.alloc(0);
-  for (;;) {
-    const chunk = await new Promise((resolve, reject) => {
-      socket.once('data', resolve);
-      socket.once('error', reject);
-    });
-    bytes = Buffer.concat([bytes, chunk]);
-    const marker = bytes.indexOf('\r\n\r\n');
-    if (marker >= 0) {
-      const head = bytes.subarray(0, marker).toString('latin1');
-      assert.match(head, /^HTTP\/1\.1 101 /, `upgrade ${route}: ${head.split('\r\n')[0]}`);
-      const expected = createHash('sha1')
-        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-      assert.ok(head.includes(`Sec-WebSocket-Accept: ${expected}`), 'accept key');
-      return new RawWebSocket(socket, bytes.subarray(marker + 4));
+  return new Promise((resolve, reject) => {
+    let bytes = Buffer.alloc(0);
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeListener('data', received);
+      socket.removeListener('error', failed);
+      socket.removeListener('close', closed);
+      socket.removeListener('end', closed);
+    };
+    const failed = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const closed = () => failed(new Error(`socket closed during upgrade ${route}`));
+    const received = (chunk) => {
+      try {
+        bytes = Buffer.concat([bytes, chunk]);
+        const marker = bytes.indexOf('\r\n\r\n');
+        if ((marker < 0 ? bytes.length : marker + 4) > MAX_UPGRADE_BYTES) {
+          throw new Error(`upgrade ${route} exceeds the header size limit`);
+        }
+        if (marker < 0) return;
+        const head = bytes.subarray(0, marker).toString('latin1');
+        assert.match(head, /^HTTP\/1\.1 101 /, `upgrade ${route}: ${head.split('\r\n')[0]}`);
+        const expected = createHash('sha1')
+          .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+        assert.ok(head.includes(`Sec-WebSocket-Accept: ${expected}`), 'accept key');
+        const ws = new RawWebSocket(socket, bytes.subarray(marker + 4));
+        settled = true;
+        cleanup();
+        resolve(ws);
+      } catch (error) { failed(error); }
+    };
+    const timer = setTimeout(() => failed(new Error(`upgrade ${route} timed out`)),
+      Math.max(1, Math.ceil(deadline - performance.now())));
+    socket.on('data', received);
+    socket.once('error', failed);
+    socket.once('close', closed);
+    socket.once('end', closed);
+    if (socket.destroyed || socket.readableEnded) { closed(); return; }
+    if (performance.now() >= deadline) {
+      failed(new Error(`upgrade ${route} timed out`));
+      return;
     }
-  }
+    try {
+      socket.write(
+        `GET ${route} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\n` +
+        `Connection: Upgrade\r\nOrigin: ${origin}\r\nSec-WebSocket-Version: 13\r\n` +
+        `Sec-WebSocket-Key: ${key}\r\n` +
+        (subprotocol ? `Sec-WebSocket-Protocol: ${subprotocol}\r\n` : '') + '\r\n',
+      );
+    } catch (error) { failed(error); }
+  });
 }

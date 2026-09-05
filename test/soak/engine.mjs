@@ -7,6 +7,7 @@
 // an in-memory array, and leaks run periodically rather than once at exit.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { upgrade } from './lib/ws.mjs';
 import { createFrameBuffer, stampFrame } from './lib/frame.mjs';
 import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
@@ -27,6 +28,7 @@ import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
 // Five is enough to outvote the at most one gap sample a cycle can produce,
 // and short enough to stay a genuine endpoint over a multi-hour window.
 const ENDPOINT_WINDOW = 5;
+const FRAMES_PER_TURN = 64;
 
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -71,9 +73,11 @@ export function summarise(samples, { warmupFraction = 0.25 } = {}) {
 export class ProtocolSoak {
   constructor({ daemonPath, origin, token, width = 1920, height = 1080,
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
+                startupTimeoutMs = 5_000,
                 stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000 }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
-                          leaksEveryMs, onSample, stopTermTimeoutMs, stopKillTimeoutMs });
+                          leaksEveryMs, onSample, startupTimeoutMs,
+                          stopTermTimeoutMs, stopKillTimeoutMs });
     this.frame = createFrameBuffer({ width, height });
     this.maxBuffered = 3 * this.frame.length;
     this.state = { sentFrames: 0, cycles: 0, accepted: 0, dropped: 0,
@@ -94,27 +98,60 @@ export class ProtocolSoak {
     this.daemon.stderr.on('data', (chunk) => {
       this.state.stderr = (this.state.stderr + chunk).slice(-8192);
     });
-    const ready = await new Promise((resolve, reject) => {
-      let stdout = '';
-      this.daemon.stdout.setEncoding('utf8');
-      // Detached once the ready line lands: this stream otherwise has no
-      // reader again for the run's whole eight hours, so leaving it attached
-      // would grow `stdout` forever if the daemon ever writes more.
-      const onStdout = (chunk) => {
-        stdout += chunk;
-        const newline = stdout.indexOf('\n');
-        if (newline >= 0) {
+    try {
+      const ready = await new Promise((resolve, reject) => {
+        let stdout = '';
+        const finish = (error, record) => {
+          clearTimeout(timer);
           this.daemon.stdout.off('data', onStdout);
-          resolve(JSON.parse(stdout.slice(0, newline)));
-        }
-      };
-      this.daemon.stdout.on('data', onStdout);
-      this.daemon.once('exit', (code) =>
-        reject(new Error(`syncd exited early with ${code}: ${this.state.stderr}`)));
-    });
-    assert.equal(ready.type, 'ready');
-    this._port = ready.port;
-    return this._port;
+          this.daemon.stdout.off('end', onEnd);
+          this.daemon.off('exit', onExit);
+          this.daemon.off('error', onError);
+          // Continue draining diagnostics without retaining them after ready.
+          this.daemon.stdout.resume();
+          if (error) reject(error);
+          else resolve(record);
+        };
+        const onStdout = (chunk) => {
+          stdout += chunk;
+          const newline = stdout.indexOf('\n');
+          const line = newline < 0 ? stdout : stdout.slice(0, newline);
+          if (Buffer.byteLength(line) > 64 * 1024) {
+            finish(new Error('syncd readiness record is too large'));
+            return;
+          }
+          if (newline < 0) return;
+          try {
+            const record = JSON.parse(line);
+            if (record?.type !== 'ready' || !Number.isInteger(record.port)
+                || record.port < 1 || record.port > 65535) {
+              throw new Error('invalid type or port');
+            }
+            finish(null, record);
+          } catch (error) {
+            finish(new Error(`invalid syncd readiness: ${error.message}`));
+          }
+        };
+        const onError = (error) => finish(error);
+        const onExit = (code) => finish(new Error(
+          `syncd exited before readiness with ${code}: ${this.state.stderr}`));
+        const onEnd = () => finish(new Error('syncd stdout ended before readiness'));
+        const timer = setTimeout(() => finish(new Error('syncd readiness timed out')),
+          this.startupTimeoutMs);
+        this.daemon.stdout.setEncoding('utf8');
+        this.daemon.stdout.on('data', onStdout);
+        this.daemon.stdout.once('end', onEnd);
+        this.daemon.once('exit', onExit);
+        this.daemon.once('error', onError);
+      });
+      this._port = ready.port;
+      return this._port;
+    } catch (error) {
+      // Failure must settle only after the spawned child is stopped; callers
+      // cannot otherwise clean up malformed output or a failed exec reliably.
+      await this.stop();
+      throw error;
+    }
   }
 
   async _openSession() {
@@ -210,6 +247,9 @@ export class ProtocolSoak {
         await this.data.sendBinary(
           stampFrame(this.frame, this.state.sequence, BigInt(Date.now()) * 1000n));
         this.state.sentFrames += 1;
+        // Small writes may complete entirely through nextTick callbacks.
+        // Give timers and shutdown signals a turn even without backpressure.
+        if (this.state.sentFrames % FRAMES_PER_TURN === 0) await yieldToEventLoop();
       } catch {
         // The write callback reported an error (e.g. ECONNRESET) after the
         // proactive check above passed — the socket died mid-send. Recycle
@@ -284,6 +324,9 @@ export class ProtocolSoak {
 
   async stop() {
     this.stopped = true;
+    if (!this.daemon) {
+      return { ...this.state, exitCode: null, signalCode: null, reaped: true };
+    }
     // If the daemon already exited (e.g. it crashed and that is why run()
     // threw), `exitCode`/`signalCode` are set synchronously when the 'exit'
     // event fires, so a fresh `.once('exit', ...)` here would never resolve

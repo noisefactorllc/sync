@@ -1,5 +1,7 @@
 #include "test_harness.hpp"
 
+#include "../src/ndi_frame_copy.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -11,17 +13,9 @@
 #include <sync/frame_receiver.hpp>
 #include <sync/platform/ndi_publisher.hpp>
 
-// These tests run on machines with no NDI runtime installed (the project's
-// own CI included), so every one of them must pass in that state: the
-// publisher's discovery must fail gracefully and `available()` must be
-// false throughout. open_sender/publish check input shape (sender id,
-// name, frame) before ever touching runtime state, so the boundary tests
-// below genuinely exercise that validation code even though the provider
-// itself is never available here — the *reason* every case returns false
-// still cannot be distinguished from outside the class (invalid input and
-// an unavailable runtime both just read as "false"), but the validation
-// and copy paths themselves are exercised and proven not to crash or
-// read/write out of bounds.
+// Discovery and validation tests use an unavailable runtime. The pixel tests
+// exercise the row-copy helper used by publish(), so they verify the submitted
+// RGBA layout and alpha conversion without installing the vendor's runtime.
 
 namespace {
 
@@ -56,7 +50,62 @@ using noisefactor::sync::protocol::FrameView;
   return std::string(length, fill);
 }
 
+void require_copied_pixels(std::uint16_t alpha_mode,
+                           const std::array<std::uint8_t, 16>& pixels,
+                           const std::array<std::uint8_t, 16>& expected) {
+  // Exercise both tightly packed input and input with padding after each row.
+  for (const std::uint32_t stride : {8U, 12U}) {
+    std::array<std::uint8_t, 24> source{};
+    source.fill(0xde);
+    for (std::size_t row = 0; row < 2; ++row) {
+      for (std::size_t column = 0; column < 8; ++column) {
+        source[row * stride + column] = pixels[row * 8 + column];
+      }
+    }
+    const auto original_source = source;
+    FrameView frame = make_valid_frame(std::as_bytes(std::span(source)).first(stride * 2U));
+    frame.alpha_mode = alpha_mode;
+    frame.row_stride = stride;
+    frame.payload_bytes = stride * 2U;
+
+    // Guard both ends of the exact packed destination and preserve the source.
+    std::array<std::byte, 18> destination{};
+    destination.fill(std::byte{0xac});
+    noisefactor::sync::ndi::copy_rgba_frame(frame, destination.data() + 1);
+    SYNC_REQUIRE(destination.front() == std::byte{0xac});
+    SYNC_REQUIRE(destination.back() == std::byte{0xac});
+    SYNC_REQUIRE(source == original_source);
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+      SYNC_REQUIRE(std::to_integer<std::uint8_t>(destination[index + 1]) == expected[index]);
+    }
+  }
+}
+
 }  // namespace
+
+SYNC_TEST(ndi_publisher_copies_straight_alpha_without_changing_rgb_or_alpha) {
+  const std::array<std::uint8_t, 16> pixels = {
+      255, 0, 0, 128, 3, 111, 249, 1, 10, 20, 30, 0, 11, 203, 99, 255};
+  require_copied_pixels(2, pixels, pixels);
+}
+
+SYNC_TEST(ndi_publisher_converts_premultiplied_pixels_to_straight_alpha) {
+  require_copied_pixels(3,
+                       {128, 0, 0, 128, 3, 1, 0, 3, 10, 20, 30, 0, 11, 203, 99, 255},
+                       {255, 0, 0, 128, 255, 85, 0, 3, 0, 0, 0, 0, 11, 203, 99, 255});
+}
+
+SYNC_TEST(ndi_publisher_treats_opaque_alpha_bytes_as_ignored) {
+  require_copied_pixels(1,
+                       {128, 0, 0, 128, 3, 111, 249, 1, 10, 20, 30, 0, 11, 203, 99, 255},
+                       {128, 0, 0, 255, 3, 111, 249, 255, 10, 20, 30, 255, 11, 203, 99, 255});
+}
+
+SYNC_TEST(ndi_publisher_unpremultiplication_rounds_and_saturates_channels) {
+  require_copied_pixels(3,
+                       {1, 2, 3, 128, 64, 128, 255, 128, 1, 2, 3, 1, 126, 1, 0, 127},
+                       {2, 4, 6, 128, 128, 255, 255, 128, 255, 255, 255, 1, 253, 2, 0, 127});
+}
 
 SYNC_TEST(ndi_publisher_with_bogus_explicit_runtime_path_reports_unavailable_without_crashing) {
   NdiFramePublisher::Options options{.runtime_path = "Z:/definitely/not/a/real/ndi/runtime/dir"};

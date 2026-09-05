@@ -69,9 +69,6 @@ diagnosed, remove it when the fix ships.
   Settings.
 - **The native pairing prompt defaults to Deny.** Pressing Return in the
   companion's pairing dialog denies the origin.
-- **`syncd --list-pairings` and `--revoke-origin` must not run beside the
-  app.** They open the pairing store directly and leave the running daemon
-  unable to authenticate pairings until it restarts.
 - **The Windows installer is not code-signed** and Windows warns about an
   unrecognised publisher; each release publishes a SHA-256 instead.
 - **The Windows camera needs Windows 11.** `MFCreateVirtualCamera` arrived in

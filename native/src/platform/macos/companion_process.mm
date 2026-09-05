@@ -249,6 +249,14 @@ struct OwnedTaskState {
   bool termination_requested = false;
 };
 
+// Accessed on the main thread, like CompanionProcess's public methods. Main
+// queue notifications can outlive Impl, so they refer to this small ownership
+// record weakly instead of keeping a raw supervisor pointer.
+struct TaskOwnerState {
+  std::shared_ptr<OwnedTaskState> task;
+  bool active = true;
+};
+
 } // namespace
 
 std::optional<HealthSnapshot> parse_health_json(std::string_view json,
@@ -346,7 +354,7 @@ struct CompanionProcess::Impl {
   explicit Impl(CompanionProcessOptions value) : options(std::move(value)) {}
 
   CompanionProcessOptions options;
-  std::shared_ptr<OwnedTaskState> owned_state;
+  std::shared_ptr<TaskOwnerState> task_owner = std::make_shared<TaskOwnerState>();
   // One session per endpoint for the life of the supervisor. The status poll
   // runs every second for as long as the menu app is open; a session, its
   // ephemeral stores, and its delegate queue are meant to be built once, not
@@ -456,18 +464,23 @@ CompanionProcess::CompanionProcess(CompanionProcessOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
 
 CompanionProcess::~CompanionProcess() {
-  const auto state = impl_->owned_state;
+  const auto state = impl_->task_owner->task;
+  impl_->task_owner->active = false;
+  impl_->task_owner->task.reset();
   NSTask* task = state == nullptr ? nil : state->task;
   task.terminationHandler = nil;
   if (state != nullptr) {
+    state->stderr_callback = {};
+    state->exit_callback = {};
+    state->termination_completions.clear();
     state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
     state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
   }
   if (task != nil && task.running) {
     ::kill(task.processIdentifier, SIGKILL);
   }
-  task.standardError = nil;
-  task.standardOutput = nil;
+  // NSTask forbids changing standardOutput/standardError after launch, even
+  // after the task exits. Removing its handlers above breaks the retain cycles.
   // A probe still in flight completes with an error and posts to main; the
   // completion captures no supervisor state.
   [impl_->status_session invalidateAndCancel];
@@ -482,7 +495,7 @@ std::vector<std::string> CompanionProcess::launch_arguments() const {
 }
 
 std::optional<int> CompanionProcess::owned_pid() const noexcept {
-  const auto state = impl_->owned_state;
+  const auto state = impl_->task_owner->task;
   NSTask* task = state == nullptr ? nil : state->task;
   if (task == nil || !task.running) return std::nullopt;
   return static_cast<int>(task.processIdentifier);
@@ -491,7 +504,7 @@ std::optional<int> CompanionProcess::owned_pid() const noexcept {
 bool CompanionProcess::start(StderrCallback stderr_callback,
                              ExitCallback exit_callback,
                              std::string& error) {
-  if (impl_->owned_state != nullptr) {
+  if (impl_->task_owner->task != nullptr) {
     error = "Sync helper is already running.";
     return false;
   }
@@ -511,7 +524,7 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   state->stderr_callback = std::move(stderr_callback);
   state->exit_callback = std::move(exit_callback);
 
-  Impl* process = impl_.get();
+  const std::weak_ptr<TaskOwnerState> owner = impl_->task_owner;
   // At end of file the read source stays readable forever, so Foundation
   // would call a handler that stays installed in a tight loop until the
   // termination handler removes it. Release it here as well.
@@ -523,8 +536,14 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
           return;
         }
         std::string bytes(static_cast<const char*>(data.bytes), data.length);
-        on_main([state, bytes = std::move(bytes)] {
-          if (state->stderr_callback) state->stderr_callback(bytes);
+        on_main([owner, state, bytes = std::move(bytes)] {
+          const auto process = owner.lock();
+          if (process != nullptr && process->active && state->stderr_callback) {
+            // The callback may destroy the supervisor and clear its stored
+            // callback, so keep this invocation alive independently.
+            auto callback = state->stderr_callback;
+            callback(bytes);
+          }
         });
       };
   state->stdout_pipe.fileHandleForReading.readabilityHandler =
@@ -536,14 +555,19 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
     state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
     terminated.terminationHandler = nil;
     const int status = terminated.terminationStatus;
-    on_main([process, state, status] {
-      if (process->owned_state == state) process->owned_state.reset();
+    on_main([owner, state, status] {
+      const auto process = owner.lock();
+      if (process == nullptr || !process->active) return;
+      if (process->task == state) process->task.reset();
       if (state->exit_callback) {
         auto callback = std::move(state->exit_callback);
         callback(status);
       }
       auto completions = std::move(state->termination_completions);
-      for (auto& completion : completions) completion();
+      for (auto& completion : completions) {
+        if (!process->active) return;
+        completion();
+      }
     });
   };
 
@@ -555,7 +579,7 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
     error = cpp_string(launch_error.localizedDescription);
     return false;
   }
-  impl_->owned_state = std::move(state);
+  impl_->task_owner->task = std::move(state);
   error.clear();
   return true;
 }
@@ -619,9 +643,13 @@ void CompanionProcess::probe(ProbeCallback completion) {
 }
 
 void CompanionProcess::terminate(Completion completion) {
-  const auto state = impl_->owned_state;
+  const auto state = impl_->task_owner->task;
   if (state == nullptr) {
-    on_main(std::move(completion));
+    const std::weak_ptr<TaskOwnerState> owner = impl_->task_owner;
+    on_main([owner, completion = std::move(completion)] {
+      const auto process = owner.lock();
+      if (process != nullptr && process->active) completion();
+    });
     return;
   }
   state->termination_completions.push_back(std::move(completion));
