@@ -11,6 +11,31 @@ import { upgrade } from './lib/ws.mjs';
 import { createFrameBuffer, stampFrame } from './lib/frame.mjs';
 import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
 
+// How many samples at each end of the warm window vote on the endpoint
+// footprint. Growth used to be one sample minus one sample, which made the
+// whole eight-hour verdict hostage to two readings.
+//
+// The sampler is periodic and the sender lifecycle is not, so a sample
+// occasionally lands in the brief gap between one sender closing and the next
+// opening — where the daemon has released its per-sender buffers and reads
+// about 8 MB lighter than it does while streaming. Observed on LARGEBOI: two
+// samples out of 3210, both on cycle boundaries, reading 3056 KiB against a
+// p50 of 11168. Rare, but if one lands on an endpoint it moves growth by the
+// full 8 MB — a phantom leak at the start of the window, or a phantom
+// improvement at the end, on a run that was flat throughout.
+//
+// Five is enough to outvote the at most one gap sample a cycle can produce,
+// and short enough to stay a genuine endpoint over a multi-hour window.
+const ENDPOINT_WINDOW = 5;
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = sorted.length >> 1;
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
 export function summarise(samples, { warmupFraction = 0.25 } = {}) {
   if (!Array.isArray(samples) || samples.length < 2) {
     throw new RangeError('summarise needs at least two samples');
@@ -21,11 +46,24 @@ export function summarise(samples, { warmupFraction = 0.25 } = {}) {
   if (warm.length < 2) warm = samples.slice(-2);
   const first = warm[0];
   const last = warm[warm.length - 1];
+
+  // Never let the two ends overlap: on a short series that would compare a
+  // window against itself and report a flat line no matter what happened.
+  const endpointWindow = Math.max(1, Math.min(ENDPOINT_WINDOW, warm.length >> 1));
+  const footprints = warm.map((sample) => sample.footprint);
+  const firstKb = median(footprints.slice(0, endpointWindow));
+  const lastKb = median(footprints.slice(-endpointWindow));
+
   return {
     first,
     last,
-    peak: Math.max(...warm.map((sample) => sample.footprint)),
-    growthKb: last.footprint - first.footprint,
+    // The medians the verdict actually rests on, reported so a surprising
+    // growth number can be checked against them without the raw series.
+    firstKb,
+    lastKb,
+    endpointWindow,
+    peak: Math.max(...footprints),
+    growthKb: lastKb - firstKb,
     sampleCount: warm.length,
   };
 }

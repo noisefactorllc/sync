@@ -11,14 +11,37 @@ test('summarise ignores the warm-up window when measuring growth', () => {
   const result = summarise(samples, { warmupFraction: 0.25 });
   assert.equal(result.first.t, 1);
   assert.equal(result.last.t, 4);
-  assert.equal(result.growthKb, 20_200 - 90_000);
   assert.equal(result.peak, 90_000);
   assert.equal(result.sampleCount, 4);
+  // The warm window is [90_000, 20_000, 20_100, 20_200]: a series sitting flat
+  // at ~20 MB whose first reading is a 90 MB spike. Taking that one sample as
+  // the baseline would report -69,800 KiB of "shrinkage" on a flat run.
+  assert.equal(result.endpointWindow, 2);
+  assert.equal(result.growthKb, 20_150 - 55_000);
+});
+
+test('one cycle-gap sample on an endpoint cannot move the growth verdict', () => {
+  // Reproduces what LARGEBOI's Windows run actually produced: a daemon flat at
+  // 11_180 KiB for the whole window, with single samples at two cycle
+  // boundaries reading 3056 KiB because the sampler landed between one sender
+  // closing and the next opening. One of them falls on the very last sample.
+  const flat = [];
+  for (let t = 0; t < 40; t += 1) flat.push(sample(t, 11_180));
+  flat[20] = sample(20, 3056);
+  flat[39] = sample(39, 3056);
+  const result = summarise(flat, { warmupFraction: 0.25 });
+
+  assert.equal(result.endpointWindow, 5);
+  assert.equal(result.last.footprint, 3056, 'the raw endpoint sample is still reported');
+  assert.equal(result.lastKb, 11_180, 'but the verdict uses the median of the last five');
+  assert.equal(result.growthKb, 0, 'a flat daemon must report flat, not -8124 KiB');
 });
 
 test('summarise keeps at least two samples even for a tiny series', () => {
   const result = summarise([sample(0, 10), sample(1, 20)], { warmupFraction: 0.9 });
   assert.equal(result.sampleCount, 2);
+  // Two samples leave one at each end; the endpoints cannot overlap.
+  assert.equal(result.endpointWindow, 1);
   assert.equal(result.growthKb, 10);
 });
 

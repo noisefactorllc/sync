@@ -62,7 +62,11 @@ try {
       stack: String(runError?.stack ?? runError) })}\n`);
   }
   stream.write(`${JSON.stringify({ plane: 'protocol', type: 'summary', ...result,
-    growthKb: summary ? summary.growthKb : null, peakKb: summary ? summary.peak : null })}\n`);
+    growthKb: summary ? summary.growthKb : null, peakKb: summary ? summary.peak : null,
+    // The two endpoint medians growthKb is the difference of, so a surprising
+    // growth number can be checked without re-reading the whole series.
+    firstKb: summary ? summary.firstKb : null, lastKb: summary ? summary.lastKb : null,
+    endpointWindow: summary ? summary.endpointWindow : null })}\n`);
   if (result.reaped === false) {
     process.stderr.write(`protocol soak: daemon pid=${soak.daemon.pid} would not die ` +
       `after SIGTERM+SIGKILL; giving up rather than hanging\n`);
