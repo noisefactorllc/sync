@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProtocolSoak, summarise } from './engine.mjs';
+import { metricTimeouts } from './lib/process-metrics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const daemonPath = path.resolve(ROOT, process.env.SYNC_DAEMON_PATH || 'build/syncd');
@@ -87,6 +88,13 @@ try {
   stream.write(`${JSON.stringify({ plane: 'protocol', type: 'summary', ...result,
     growthKb: summary ? summary.growthKb : null, peakKb: summary ? summary.peak : null,
     geometryChanges: soak.state.geometryChanges ?? 0,
+    // The timeouts that actually governed this run's metric reads. A run keeps
+    // whatever it loaded for its whole life, so two datasets taken hours apart
+    // can differ in a constant neither of them names — and a metric read that
+    // failed because a shell was slow is indistinguishable from one that failed
+    // for a real reason. Recorded rather than assumed.
+    metricTimeoutMs: metricTimeouts.defaultMs,
+    windowsMetricTimeoutMs: metricTimeouts.windowsMs,
     finalGeometry: soak.state.geometry ?? `${soak.geometry.width}x${soak.geometry.height}`,
     // The two endpoint medians growthKb is the difference of, so a surprising
     // growth number can be checked without re-reading the whole series.

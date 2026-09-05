@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  captureCombined, footprintKb, footprintKbAsync, parseLeaksReport, powershellArgs, residentKb, residentKbAsync, runLeaks,
-} from './process-metrics.mjs';
+  captureCombined, footprintKb, footprintKbAsync, parseLeaksReport, powershellArgs, residentKb, residentKbAsync, runLeaks, metricTimeouts} from './process-metrics.mjs';
 
 // On a host where the daemon isn't debuggable, real `leaks` splits its
 // output across two streams: the restriction notice on stderr, and a
@@ -348,4 +347,22 @@ test('the Windows fallback is told the platform, so it does not shell out to ps'
     fallback: (pid, options) => { fallbackOptions = options; return 1; },
   });
   assert.equal(fallbackOptions?.platform, 'win32');
+});
+
+// A run keeps whatever timeout it loaded for its whole life. An eight-hour soak
+// that started before a timeout changed uses the old value throughout, and
+// nothing in its artifacts said which one — so two datasets taken hours apart
+// could differ in a constant neither of them named. A metric read that failed
+// because a shell was slow looks exactly like one that failed for a real
+// reason, and the budget is what separates them.
+test('metricTimeouts exposes the constants that govern real metric reads', () => {
+  assert.equal(typeof metricTimeouts.defaultMs, 'number');
+  assert.equal(typeof metricTimeouts.windowsMs, 'number');
+  assert.ok(metricTimeouts.defaultMs > 0);
+  // Windows shells out to PowerShell, whose own startup can exceed the default
+  // budget on a loaded host — a failed reading where a slow one was meant.
+  assert.ok(metricTimeouts.windowsMs > metricTimeouts.defaultMs,
+    'the Windows budget must stay larger than the default, or the fix is undone');
+  assert.equal(Object.isFrozen(metricTimeouts), true,
+    'a recorded constant must not be mutable by whoever records it');
 });

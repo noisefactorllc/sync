@@ -32,6 +32,18 @@ const WINDOWS_PRIVATE_EXPR = '(Get-Process -Id %PID%).PrivateMemorySize64';
 // an MSYS `ps` via Git for Windows that EXISTS and rejects these flags, so
 // "does ps run?" is not a usable platform probe either; the branch is on
 // process.platform and the command itself is verified here.
+// Exported so a run can RECORD the timeouts that governed its own metric
+// reads. An 8h soak that loaded this module before a timeout changed keeps the
+// old value for its whole life, and nothing in its artifacts said which one it
+// used — so two datasets taken hours apart could differ in a constant neither
+// of them named. A metric read that fails because a shell was slow looks
+// exactly like a metric read that failed for a real reason, and the difference
+// between a 2s and a 10s budget is the difference between those two readings.
+export const metricTimeouts = Object.freeze({
+  defaultMs: METRIC_TIMEOUT_MS,
+  windowsMs: WINDOWS_METRIC_TIMEOUT_MS,
+});
+
 export const powershellArgs = (expression, pid) =>
   ['-NoProfile', '-NonInteractive', '-Command', expression.replace('%PID%', String(pid))];
 
