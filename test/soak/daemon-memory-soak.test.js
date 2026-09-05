@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { ProtocolSoak } from './engine.mjs';
+import { residentKbAsync, footprintKbAsync } from './lib/process-metrics.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 // The daemon's built location is generator-dependent, not just
@@ -30,11 +32,11 @@ if (process.env.SYNC_DAEMON_PATH) {
 const requiresDaemon = { skip: !existsSync(DAEMON), timeout: 25_000 };
 
 async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
-  const args = delayedHealthFailure ? ['--input-type=module', '-e', `
+  const args = delayedHealthFailure || process.platform === 'win32' ? ['--input-type=module', '-e', `
     import { registerHooks } from 'node:module';
-    // This case tests health completion ordering. Slow inspectors would give
-    // the injected failure time to finish even if the health joins vanished.
-    // The separate tiny-frame case retains the real platform inspectors.
+    // These cases test timer fairness and health completion ordering. Slow
+    // inspectors can consume the entire five-second window or mask a missing
+    // health join. Real Windows commands are checked separately below.
     registerHooks({ load(url, context, nextLoad) {
       if (url === ${JSON.stringify(new URL('./lib/process-metrics.mjs', import.meta.url).href)}) {
         return { format: 'module', shortCircuit: true, source:
@@ -46,6 +48,7 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
       }
       return nextLoad(url, context);
     } });
+    if (${delayedHealthFailure}) {
     const realFetch = globalThis.fetch;
     let previous;
     globalThis.fetch = (...args) => {
@@ -68,6 +71,7 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
         });
       });
     };
+    }
     await import(${JSON.stringify(new URL('../acceptance/daemon-memory-soak.mjs', import.meta.url).href)});
   `] : process.platform === 'darwin' ? ['--input-type=module', '-e', `
     import { registerHooks } from 'node:module';
@@ -136,3 +140,27 @@ test('a final pending health failure prevents a successful soak verdict',
     assert.equal(result.code, 1, result.stdout);
     assert.match(result.stderr, /late health probe failure/, result.stdout);
   });
+
+test('Windows inspectors read real daemon resident and private memory', {
+  ...requiresDaemon,
+  skip: process.platform !== 'win32' ? 'requires the Windows process memory APIs' : requiresDaemon.skip,
+}, async (t) => {
+  const lifecycle = new ProtocolSoak({ daemonPath: DAEMON, width: 8, height: 8,
+    origin: 'https://soak.example', token: 'soak-token-123' });
+  t.after(() => lifecycle.stop());
+  await lifecycle.start();
+  // Inspect an idle real daemon without coupling PowerShell startup to a
+  // five-second streaming window. Join both commands before cleanup, and do
+  // not let a private-byte failure pass by falling back to resident memory.
+  const results = await Promise.allSettled([
+    residentKbAsync(lifecycle.daemon.pid),
+    footprintKbAsync(lifecycle.daemon.pid, { fallback: () => {
+      throw new Error('the real Windows private-memory inspection failed');
+    } }),
+  ]);
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'rejected') throw result.reason;
+    assert.ok(Number.isFinite(result.value) && result.value > 0,
+      `${index === 0 ? 'resident' : 'private'} memory must be a positive real reading`);
+  }
+});

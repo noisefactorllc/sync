@@ -3,6 +3,10 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const METRIC_TIMEOUT_MS = 2000;
+// Starting PowerShell on a loaded Windows host can itself exceed two
+// seconds. Keep its work bounded without treating that startup as a failed
+// process reading. The sampler permits only one inspection pair in flight.
+const WINDOWS_METRIC_TIMEOUT_MS = 10_000;
 
 function parseResidentKb(text) {
   return Number(text.trim());
@@ -54,7 +58,7 @@ function defaultWindowsRun(expression) {
 
 function defaultWindowsRunAsync(expression) {
   return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), {
-    encoding: 'utf8', timeout: METRIC_TIMEOUT_MS,
+    encoding: 'utf8', timeout: WINDOWS_METRIC_TIMEOUT_MS,
   })
     .then((result) => result.stdout);
 }

@@ -136,6 +136,23 @@ then verifies timeout rejection and destruction. Removing the timeout makes
 that regression fail. The final local suite passed 190/190 against an ASan
 macOS daemon and 190/190 on Linux after these corrections.
 
+Upstream `ef4ef28` then added generator-aware daemon discovery and enabled the
+real-child startup fixtures on Windows. It retained the explicit-path failure
+guard and received a clean independent review. Its CI passed all macOS/Linux
+jobs, Windows native tests and packaging, and the dedicated camera gate, but
+exposed a remaining Windows inspection limit: PowerShell was terminated by the
+new two-second async deadline before producing a reading. Windows async reads
+now have a ten-second bound. A successful 2.2-second command reproduced the
+old timeout locally and completes with the corrected budget.
+
+Increasing that bound alone cannot guarantee a completed warm sample within
+a five-second run. The Windows timer regression therefore uses deterministic
+metrics, retaining the real daemon, stream, health requests, and shutdown.
+A separate Windows test invokes the real resident/private inspectors against
+an idle daemon, requires positive finite readings, rejects private-memory
+fallback, and joins both commands before cleanup. Physical memory-growth
+acceptance remains a separate sustained run.
+
 ## Remaining acceptance boundaries
 
 Windows native builds/tests, packaging/lifecycle checks, and the dedicated
