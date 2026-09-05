@@ -11,10 +11,25 @@ const SCRIPT = path.join(ROOT, 'test/acceptance/daemon-memory-soak.mjs');
 if (process.env.SYNC_DAEMON_PATH) {
   assert.ok(existsSync(DAEMON), `SYNC_DAEMON_PATH does not exist: ${DAEMON}`);
 }
-const requiresDaemon = { skip: !existsSync(DAEMON), timeout: 20_000 };
+const requiresDaemon = { skip: !existsSync(DAEMON), timeout: 25_000 };
 
 async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
   const args = delayedHealthFailure ? ['--input-type=module', '-e', `
+    import { registerHooks } from 'node:module';
+    // This case tests health completion ordering. Slow inspectors would give
+    // the injected failure time to finish even if the health joins vanished.
+    // The separate tiny-frame case retains the real platform inspectors.
+    registerHooks({ load(url, context, nextLoad) {
+      if (url === ${JSON.stringify(new URL('./lib/process-metrics.mjs', import.meta.url).href)}) {
+        return { format: 'module', shortCircuit: true, source:
+          'export const residentKb = () => 1024; ' +
+          'export const footprintKb = () => 1024; ' +
+          'export const residentKbAsync = async () => 1024; ' +
+          'export const footprintKbAsync = async () => 1024; ' +
+          'export const runLeaks = () => { throw new Error("unexpected leak scan"); };' };
+      }
+      return nextLoad(url, context);
+    } });
     const realFetch = globalThis.fetch;
     let previous;
     globalThis.fetch = (...args) => {
@@ -23,12 +38,36 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
         previous.resolve(previous.response);
         previous = null;
       }
-      return realFetch(...args).then(response => new Promise((resolve, reject) => {
-        previous = { response, resolve, timer: setTimeout(() => {
-          reject(new Error('late health probe failure'));
-        }, 1800) };
-      }));
+      return realFetch(...args).then(async response => {
+        // Consume the real body while its request deadline is active. The
+        // synthetic completion delay must not race that body's abort signal.
+        const body = await response.arrayBuffer();
+        const completed = new Response(body, {
+          status: response.status, headers: response.headers,
+        });
+        return new Promise((resolve, reject) => {
+          previous = { response: completed, resolve, timer: setTimeout(() => {
+            reject(new Error('late health probe failure'));
+          }, 1800) };
+        });
+      });
     };
+    await import(${JSON.stringify(new URL('../acceptance/daemon-memory-soak.mjs', import.meta.url).href)});
+  `] : process.platform === 'darwin' ? ['--input-type=module', '-e', `
+    import { registerHooks } from 'node:module';
+    // vmmap suspends a busy target and does not support ASan heaps. This
+    // lifecycle regression measures real RSS without inspecting its heap;
+    // physical-footprint acceptance is a separate, unsanitized soak.
+    const metrics = ${JSON.stringify(new URL('./lib/process-metrics.mjs', import.meta.url).href)};
+    registerHooks({ load(url, context, nextLoad) {
+      if (url === metrics) {
+        const original = JSON.stringify(metrics + '?resident-fixture');
+        return { format: 'module', shortCircuit: true, source:
+          'export * from ' + original + '; ' +
+          'export { residentKbAsync as footprintKbAsync } from ' + original + ';' };
+      }
+      return nextLoad(url, context);
+    } });
     await import(${JSON.stringify(new URL('../acceptance/daemon-memory-soak.mjs', import.meta.url).href)});
   `] : [SCRIPT];
   const child = spawn(process.execPath, args, {
@@ -55,21 +94,23 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
       try { process.kill(daemonPid, 'SIGKILL'); } catch {}
     }
   };
-  const timer = setTimeout(() => { timedOut = true; terminate(); }, 12_000);
+  // Includes bounded startup, final asynchronous inspection and shutdown;
+  // still fails well before the sixty-second cycle of the starvation bug.
+  const timer = setTimeout(() => { timedOut = true; terminate(); }, 20_000);
   t.after(() => { clearTimeout(timer); terminate(); });
   const result = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
   clearTimeout(timer);
-  assert.equal(timedOut, false, `five-second soak exceeded twelve seconds:\n${stdout}\n${stderr}`);
+  assert.equal(timedOut, false, `five-second soak exceeded twenty seconds:\n${stdout}\n${stderr}`);
   return { ...result, stdout, stderr };
 }
 
 test('a five-second soak with tiny frames ends before its sixty-second sender cycle',
   requiresDaemon, async (t) => {
     const result = await shortRun(t);
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /cycles=1 sent=/);
   });
 
@@ -77,5 +118,5 @@ test('a final pending health failure prevents a successful soak verdict',
   requiresDaemon, async (t) => {
     const result = await shortRun(t, { width: 1024, delayedHealthFailure: true });
     assert.equal(result.code, 1, result.stdout);
-    assert.match(result.stderr, /late health probe failure/);
+    assert.match(result.stderr, /late health probe failure/, result.stdout);
   });

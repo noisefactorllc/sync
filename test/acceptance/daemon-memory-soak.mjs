@@ -31,7 +31,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { upgrade } from '../soak/lib/ws.mjs';
 import { stampFrame } from '../soak/lib/frame.mjs';
 import { ProtocolSoak } from '../soak/engine.mjs';
-import { residentKb, footprintKb, runLeaks } from '../soak/lib/process-metrics.mjs';
+import { residentKbAsync, footprintKbAsync, runLeaks } from '../soak/lib/process-metrics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SYNCD = process.env.SYNC_DAEMON_PATH
@@ -124,11 +124,29 @@ async function stats() {
 }
 
 let sampler;
+let pendingSample = null;
 const pendingHealth = new Set();
 let leaksReport = null;
 let exitCode;
 let exitSignal;
 let reaped;
+async function sampleMemory(postStream = false) {
+  const sample = { t: Math.round((Date.now() - started) / 1000), frames: sentFrames };
+  const readings = await Promise.allSettled([
+    residentKbAsync(daemon.pid), footprintKbAsync(daemon.pid),
+  ]);
+  // Join both inspectors on failure as well; one rejected read must not
+  // release the sample guard while its sibling still examines the daemon.
+  const [rss, footprint] = readings.map((reading) => {
+    if (reading.status === 'rejected') throw reading.reason;
+    return reading.value;
+  });
+  // A read started during streaming may finish after buffers are released.
+  // Exclude that crossing sample from the streaming growth calculation too.
+  samples.push({ ...sample, rss, footprint,
+    ...(postStream || stop ? { postStream: true } : {}) });
+}
+
 try {
   const streamer = (async () => {
     try {
@@ -160,11 +178,12 @@ try {
   })();
 
   sampler = setInterval(() => {
-    try {
-      samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
-        footprint: footprintKb(daemon.pid), frames: sentFrames });
-    } catch (error) {
-      runError ??= error;
+    // vmmap and PowerShell can exceed the daemon's header/frame deadlines.
+    // Keep them off the event loop that flushes those bytes, and never stack
+    // inspectors when one sample takes longer than the sampling interval.
+    if (!pendingSample) {
+      pendingSample = sampleMemory().catch((error) => { runError ??= error; })
+        .finally(() => { pendingSample = null; });
     }
     const check = health(port).catch((error) => { runError ??= error; })
       .finally(() => pendingHealth.delete(check));
@@ -176,12 +195,12 @@ try {
   await streamer;
   clearInterval(sampler);
   await Promise.all(pendingHealth);
+  await pendingSample;
   // Taken AFTER the stream has stopped and before the daemon is signalled, so
   // this is the daemon at rest with its per-sender buffers legitimately released.
   // It is kept in the table because it is informative, but flagged so the growth
   // figure is not computed against it — see `warm` below.
-  samples.push({ t: Math.round((Date.now() - started) / 1000), rss: residentKb(daemon.pid),
-    footprint: footprintKb(daemon.pid), frames: sentFrames, postStream: true });
+  await sampleMemory(true);
 
   if (CHECK_LEAKS) {
     // `leaks` walks the live heap for blocks nothing references. It tells a
@@ -195,6 +214,7 @@ try {
   // Every issued probe contributes to the verdict while the daemon is still
   // alive. Its own timeout bounds this wait on an unresponsive daemon.
   await Promise.all(pendingHealth);
+  await pendingSample;
   control?.socket.destroy();
   data?.socket.destroy();
   ({ exitCode, signalCode: exitSignal, reaped } = await lifecycle.stop());
@@ -213,6 +233,7 @@ for (const sample of samples) {
 // macOS and -8352 KiB on Windows purely from where the last sample was taken.
 const warm = samples.filter((sample) =>
   !sample.postStream && sample.t >= Math.max(3, SECONDS * 0.25));
+assert.ok(warm.length > 0, runError?.stack ?? 'no streaming memory sample completed after warm-up');
 const first = warm[0];
 const last = warm[warm.length - 1];
 const peak = Math.max(...warm.map((sample) => sample.footprint));

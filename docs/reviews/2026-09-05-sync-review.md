@@ -13,8 +13,8 @@ was left running. The initial review did not start a release or remote workflow.
 | macOS companion lifetime | Destruction after helper exit changed immutable NSTask stdio properties and raised an exception. Once that was removed, an already queued termination callback dereferenced freed supervisor state, confirmed by ASan. | Queued callbacks use a weak ownership record, destruction disarms callbacks, and post-launch stdio mutation is removed. Tests cover destruction before queue drain, destruction from an exit callback, and queued termination with no helper. Existing terminate/relaunch ordering tests still pass. |
 | NDI alpha | Premultiplied pixels were copied unchanged into NDI's straight-alpha RGBA format; opaque mode also preserved an ignored alpha byte. | Normalize into the existing owned buffer. Four production-conversion tests cover packed/padded rows, straight and opaque modes, zero/full/tiny alpha, rounding, saturation, unchanged input, and destination bounds. Three failed before normalization. No new frame allocations. |
 | Linux camera colors | NV12 bytes use BT.709, but an unspecified V4L2 colorspace lets v4l2loopback choose sRGB and its default BT.601 YCbCr interpretation. | Declare 709 primaries and matrix, limited range, and sRGB transfer using the extended-format contract. The regression runs real encoder bytes through metadata-based matrix, range, and transfer interpretation, including saturated and neutral patches. Negotiated color drift is rejected. |
-| Windows RGB camera levels | RGB32 copied full-range BGRA bytes while declaring limited range. | Advertise full range for RGB32 and retain limited range for NV12. Added a media-type regression. **Windows execution pending.** |
-| Windows camera activation | ShutdownObject did nothing; after DetachObject, ActivateObject permanently failed. | Serialize cached-source ownership, create sources lazily, shut down and release on ShutdownObject, and detach without shutting down the caller's source. Regressions check fresh usable activation after both operations. **Windows execution pending.** |
+| Windows RGB camera levels | RGB32 copied full-range BGRA bytes while declaring limited range. | Advertise full range for RGB32 and retain limited range for NV12. Added a media-type regression. Windows native CI passed on `315c00f`. |
+| Windows camera activation | ShutdownObject did nothing; after DetachObject, ActivateObject permanently failed. | Serialize cached-source ownership, create sources lazily, shut down and release on ShutdownObject, and detach without shutting down the caller's source. Regressions check fresh usable activation after both operations. Windows native CI passed on `315c00f`. |
 | Soak process lifecycle | Missing executables, malformed/oversized readiness, invalid ports, or silent children could escape promise handling or leave the caller waiting indefinitely. | Bound and validate readiness; stop the child before rejecting. Both soak programs share this lifecycle. The long runner emits an error plus final JSONL summary even when startup fails. Real-child regressions demonstrated failures before the repair. |
 | Soak WebSocket lifecycle | Closed/silent/failed upgrades and stalled writes could hang; failed upgrades retained sockets; fragmented headers accumulated listeners; coalesced first messages were not drained. | Bound connection/upgrade/write waits and header size, clean up failed sockets and temporary listeners, and drain handshake remainder immediately. Ten real TCP tests cover failure and successful wire-byte behavior; eight reproduced original failures. |
 | Soak scheduling and verdict | Tiny frames could starve timers: a five-second run lasted until a sixty-second sender cycle. A final pending health failure could arrive after a successful verdict. | Periodically yield to the event loop, enforce the short run's elapsed-time bound, and join issued health checks before shutdown/verdict. Real-daemon regressions cover duration and delayed health failure. |
@@ -112,14 +112,39 @@ completed three geometry changes and three session cycles with zero dropped
 frames or reconnects, exit zero, and confirmed child reaping. This run verifies
 integration behavior, not sustained performance or memory-growth certification.
 
+### CI follow-up
+
+The first authorized push, `315c00f`, passed all Linux CI jobs, Windows native
+Release and warning builds (19 suites each), Windows package verification and
+installed-app lifecycle smoke, and the dedicated Windows camera end-to-end gate.
+The overall CI run failed in new JavaScript regressions, exposing two harness
+assumptions that local unsanitized runs had missed.
+
+Synchronous memory inspection stalled the short soak's network writes long
+enough to trip daemon header/frame deadlines. The sampler now uses bounded
+asynchronous reads, keeps one sample in flight, joins both inspectors even on
+failure, and excludes reads crossing the end of streaming. The macOS lifecycle
+unit fixture uses real RSS because vmmap pauses busy targets and explicitly
+does not support ASan heaps; it does not certify physical-footprint growth.
+The final-health fixture uses deterministic fast metrics with a real daemon
+and HTTP request/body. Removing both health joins now makes this regression
+fail, proving incidental inspection time cannot mask the missing wait.
+
+The Windows loopback stack could buffer the old fixture's entire 32 MiB write.
+The timeout regression now corks a real socket to hold its write callback,
+then verifies timeout rejection and destruction. Removing the timeout makes
+that regression fail. The final local suite passed 190/190 against an ASan
+macOS daemon and 190/190 on Linux after these corrections.
+
 ## Remaining acceptance boundaries
 
-Windows camera changes have source review and regression coverage, but no
-Windows compiler/runtime was available here. Before release, run the native
-Windows build and tests, packaging/lifecycle gates, and real receiver checks.
-No signed/notarized macOS bundle or physical Spout, NDI, or V4L2 receiver
-certification was performed. NDI normalization tests verify production copy
-bytes without loading the vendor runtime.
+Windows native builds/tests, packaging/lifecycle checks, and the dedicated
+camera end-to-end gate passed remotely at `315c00f`; the later follow-up only
+changes JavaScript verification and documentation. No signed/notarized macOS
+bundle or physical Spout, NDI, or V4L2 receiver certification was performed in
+this task. NDI normalization tests verify production copy bytes without loading
+the vendor runtime. The actual Noisedeck A → Sync Camera → Noisedeck B pixel
+path remains a separate acceptance requirement.
 
 A push to public `main` can request a preview release through Scaffold after
 green CI. The user subsequently authorized pushing after review feedback is

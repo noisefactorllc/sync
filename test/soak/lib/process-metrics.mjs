@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const METRIC_TIMEOUT_MS = 2000;
 
 function parseResidentKb(text) {
   return Number(text.trim());
@@ -41,7 +42,9 @@ function defaultPsRun(pid) {
 }
 
 function defaultPsRunAsync(pid) {
-  return execFileAsync('ps', ['-o', 'rss=', '-p', String(pid)], { encoding: 'utf8' })
+  return execFileAsync('ps', ['-o', 'rss=', '-p', String(pid)], {
+    encoding: 'utf8', timeout: METRIC_TIMEOUT_MS,
+  })
     .then((result) => result.stdout);
 }
 
@@ -50,7 +53,9 @@ function defaultWindowsRun(expression) {
 }
 
 function defaultWindowsRunAsync(expression) {
-  return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), { encoding: 'utf8' })
+  return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), {
+    encoding: 'utf8', timeout: METRIC_TIMEOUT_MS,
+  })
     .then((result) => result.stdout);
 }
 
@@ -84,7 +89,9 @@ function defaultVmmapRun(pid) {
 }
 
 function defaultVmmapRunAsync(pid) {
-  return execFileAsync('vmmap', ['-summary', String(pid)], { encoding: 'utf8' })
+  return execFileAsync('vmmap', ['-summary', String(pid)], {
+    encoding: 'utf8', timeout: METRIC_TIMEOUT_MS,
+  })
     .then((result) => result.stdout);
 }
 

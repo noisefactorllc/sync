@@ -112,14 +112,16 @@ test('a message coalesced with the upgrade response is available immediately', a
   assert.deepEqual(JSON.parse(message.payload.toString()), { ready: true });
 });
 
-test('a binary write to a peer that stops reading expires and destroys the stream', async (t) => {
+test('a binary write held in the socket buffer expires and destroys the stream', async (t) => {
   const fixture = await peer(t, (socket, request) => {
     socket.write(response(request));
-    socket.pause();
   });
   const ws = await bounded(upgrade(fixture.port, '/control'));
   t.after(() => ws.socket.destroy());
-  await assert.rejects(bounded(ws.sendBinary(Buffer.alloc(32 * 1024 * 1024), 30)),
+  // Cork a real socket so its write callback cannot complete before timeout.
+  // A fixed large payload can still fit in Windows' loopback send buffers.
+  ws.socket.cork();
+  await assert.rejects(bounded(ws.sendBinary(Buffer.from([1, 2, 3, 4]), 30)),
     /write.*timed out/);
   assert.equal(ws.socket.destroyed, true);
 });
