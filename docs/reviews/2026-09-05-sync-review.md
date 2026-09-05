@@ -3,7 +3,7 @@
 Reviewed the separate checkout from baseline `7ca2dae` on `main`. Repairs are
 contained in Sync; sibling Noisemaker, Noisedeck, and Scaffold sources were
 consulted for interoperability and release behavior. The installed companion
-was left running. No release or remote workflow was started.
+was left running. The initial review did not start a release or remote workflow.
 
 ## Findings addressed
 
@@ -12,7 +12,7 @@ was left running. No release or remote workflow was started.
 | Browser export resources | A data-socket failure was treated as GPU backend destruction. Noisemaker then abandoned live export slots without destroying their textures, buffers, or fences. | Transport failures now use ordinary resource cleanup. Close/error regressions failed with zero slots destroyed before the fix and pass with all three destroyed once. Explicit backend loss still abandons resources as intended. Also checked against the actual sibling Noisemaker export queue. |
 | macOS companion lifetime | Destruction after helper exit changed immutable NSTask stdio properties and raised an exception. Once that was removed, an already queued termination callback dereferenced freed supervisor state, confirmed by ASan. | Queued callbacks use a weak ownership record, destruction disarms callbacks, and post-launch stdio mutation is removed. Tests cover destruction before queue drain, destruction from an exit callback, and queued termination with no helper. Existing terminate/relaunch ordering tests still pass. |
 | NDI alpha | Premultiplied pixels were copied unchanged into NDI's straight-alpha RGBA format; opaque mode also preserved an ignored alpha byte. | Normalize into the existing owned buffer. Four production-conversion tests cover packed/padded rows, straight and opaque modes, zero/full/tiny alpha, rounding, saturation, unchanged input, and destination bounds. Three failed before normalization. No new frame allocations. |
-| Linux camera colors | NV12 bytes use BT.709, but an unspecified V4L2 colorspace lets v4l2loopback choose sRGB and its default BT.601 YCbCr interpretation. | Declare REC709. The regression encodes a colored patch through the real NV12 converter and decodes it using the requested driver metadata; it failed before the fix. |
+| Linux camera colors | NV12 bytes use BT.709, but an unspecified V4L2 colorspace lets v4l2loopback choose sRGB and its default BT.601 YCbCr interpretation. | Declare 709 primaries and matrix, limited range, and sRGB transfer using the extended-format contract. The regression runs real encoder bytes through metadata-based matrix, range, and transfer interpretation, including saturated and neutral patches. Negotiated color drift is rejected. |
 | Windows RGB camera levels | RGB32 copied full-range BGRA bytes while declaring limited range. | Advertise full range for RGB32 and retain limited range for NV12. Added a media-type regression. **Windows execution pending.** |
 | Windows camera activation | ShutdownObject did nothing; after DetachObject, ActivateObject permanently failed. | Serialize cached-source ownership, create sources lazily, shut down and release on ShutdownObject, and detach without shutting down the caller's source. Regressions check fresh usable activation after both operations. **Windows execution pending.** |
 | Soak process lifecycle | Missing executables, malformed/oversized readiness, invalid ports, or silent children could escape promise handling or leave the caller waiting indefinitely. | Bound and validate readiness; stop the child before rejecting. Both soak programs share this lifecycle. The long runner emits an error plus final JSONL summary even when startup fails. Real-child regressions demonstrated failures before the repair. |
@@ -81,6 +81,37 @@ shellcheck --severity=warning scripts/*.sh packaging/linux/postrm
 actionlint -ignore 'label "sync-camera" is unknown' .github/workflows/*.yml
 ```
 
+## Independent review follow-up
+
+A fresh reviewer examined `7ca2dae..341a1c1` and found one important correction:
+REC709's default transfer function did not describe the unchanged sRGB-encoded
+channels. The original matrix-only regression missed the resulting brightness
+shift. The extended regression failed against that implementation, as did new
+checks for unsupported extended metadata and incompatible negotiated color.
+The repair declares sRGB transfer with the 709 matrix and limited range, checks
+extended-format capability, sets the required `priv` magic, and validates the
+returned format. The reviewer examined this correction and reported no
+remaining findings.
+
+The reviewer also confirmed a minor test guard defect: an explicit missing
+`SYNC_DAEMON_PATH` skipped both native soak regressions with exit zero. It now
+fails with a clear path assertion; an absent optional default build can still
+skip. Verified both the rejected path and the two successful real-daemon tests.
+
+Fresh follow-up verification passed all 21 macOS native suites in both warning
+and sanitizer configurations, and all 18 native suites on Ubuntu ARM64 and
+x86_64. The changed Linux camera device and sink suites also passed ASan/UBSan
+with leak detection. Detailed evidence is retained alongside the original logs.
+
+Integrated upstream `06e0c62` on `main`, preserving protocol-soak geometry
+rotation together with the startup bound and timer fairness corrections. The
+reviewer separately approved the constructor conflict resolution. The combined
+Node 22 unit suite passed 190/190 on macOS and Linux; Linux loopback passed
+23/23 and the syncctl integration passed 1/1. An eight-second real-daemon run
+completed three geometry changes and three session cycles with zero dropped
+frames or reconnects, exit zero, and confirmed child reaping. This run verifies
+integration behavior, not sustained performance or memory-growth certification.
+
 ## Remaining acceptance boundaries
 
 Windows camera changes have source review and regression coverage, but no
@@ -91,12 +122,16 @@ certification was performed. NDI normalization tests verify production copy
 bytes without loading the vendor runtime.
 
 A push to public `main` can request a preview release through Scaffold after
-green CI. This review does not authorize that push or publication.
+green CI. The user subsequently authorized pushing after review feedback is
+addressed. The upstream protocol geometry-rotation change was integrated and
+verified before the push.
 
 ## External contracts checked
 
 - [NDI frame types](https://docs.ndi.video/all/developing-with-ndi/sdk/frame-types):
   RGBA uses straight alpha.
+- [V4L2 extended-format contract](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/pixfmt-v4l2.html):
+  capability and `priv` magic are required for independent transfer metadata.
 - [V4L2 colorspace defaults](https://kernel.org/doc/html/v6.15/userspace-api/media/v4l/colorspaces-details.html)
   and [v4l2loopback source](https://github.com/v4l2loopback/v4l2loopback/blob/v0.13.2/v4l2loopback.c):
   declared colorspace controls the default YCbCr matrix.
