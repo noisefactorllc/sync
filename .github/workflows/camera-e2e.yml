@@ -20,6 +20,25 @@ name: Camera end-to-end
 # be initiated from a fork. Do not add `pull_request` here, and do not move
 # this job into ci.yml.
 #
+# THE RUNNER IS SOMEONE'S DESK MACHINE, AND IT MAY BE UNDER MEASUREMENT
+#
+# This job does not run in a disposable container. It runs on a real Windows
+# PC in the office, which is also used for long soak runs -- a push to main
+# lands a source build, a media-source registration and a camera test on a
+# machine that may be eight hours into measuring daemon memory.
+#
+# That is survivable and has been measured: an 87-second run of this workflow
+# during an 8h protocol soak on 2026-09-05 moved the daemon's footprint not at
+# all (11176-11180 KiB, the same 4 KiB spread as the rest of the run), left pid,
+# reconnects and drops untouched, and cost about 7% of throughput for its
+# duration -- less than the swing between two adjacent uncontaminated windows.
+# Contention scales with overlap fraction, and 87 seconds inside 28,800 is
+# structurally negligible.
+#
+# So this is not a reason to avoid pushing. It is a reason to SAY that you did:
+# tell whoever is running on that host the start and end times, so the window
+# can be marked in their results rather than discovered as an anomaly later.
+#
 # WHAT THE RUNNER HOST HAS TO BE (all four were established by measurement)
 #
 #   1. Not a service. A Windows service runs in session 0, and the Frame
