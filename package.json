@@ -9,14 +9,16 @@
   },
   "type": "module",
   "scripts": {
-    "test:browser": "node --test --test-timeout=30000 test/browser/*.test.js",
+    "test:meta": "node --test --test-timeout=30000 test/meta/*.test.js",
+  "test:browser": "node --test --test-timeout=30000 test/browser/*.test.js",
     "test:protocol": "node --test --test-timeout=30000 test/browser/protocol.test.js",
     "test:integration": "node --test --test-timeout=30000 test/integration/loopback.test.js",
     "test:integration:linux": "node --test --test-timeout=45000 test/integration/linux-daemon-control.test.js",
     "test:packaging": "node --test --test-timeout=30000 test/packaging/*.test.js",
     "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js",
     "test:linux:containers": "scripts/test-linux-containers.sh",
-    "test:soak": "node test/acceptance/daemon-memory-soak.mjs",
+    "test:acceptance:unit": "node --test --test-timeout=30000 test/acceptance/*.test.mjs",
+  "test:soak": "node test/acceptance/daemon-memory-soak.mjs",
     "test:soak:unit": "node --test --test-timeout=30000 test/soak/*.test.js test/soak/lib/*.test.js",
     "test:soak:long": "node test/soak/run.mjs"
   }
