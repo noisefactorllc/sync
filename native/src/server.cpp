@@ -126,6 +126,40 @@ struct Connection {
   bool pairing_message_received = false;
   AuthorityState authority_state = AuthorityState::None;
   std::uint64_t authority_generation = 0;
+
+  // SENDERS THIS CONNECTION OWNED THAT THE DAEMON REAPED UNDER IT.
+  //
+  // A sender is reaped when its DATA socket closes. The SDK's ordinary
+  // shutdown (SyncSender.close) drops the data socket FIRST and only then
+  // awaits closeSender, so the daemon routinely reaps a sender a heartbeat
+  // before its owner asks to close it — and answering sender_not_found there
+  // fails an ordinary stop() for a race the client cannot avoid.
+  //
+  // Remembering the ids lets closeSender stay idempotent for senders this
+  // connection genuinely owned, while a sender id that was never ours still
+  // answers sender_not_found. That distinction is worth keeping: blanket
+  // idempotency would report success for an id that never existed, which is a
+  // diagnostic an SDK author needs.
+  //
+  // A FIXED RING, not a growing set. A long-lived control connection may open
+  // and reap thousands of senders across a soak, and a per-connection
+  // container that grew with them would be a leak keyed on uptime. Four is
+  // ample: it covers the in-flight closes of a client shutting down, which is
+  // the only window in which the question is ever asked.
+  static constexpr std::size_t kReapedSenderMemory = 4;
+  std::array<std::string, kReapedSenderMemory> reaped_sender_ids{};
+  std::size_t reaped_sender_cursor = 0;
+
+  void remember_reaped_sender(std::string_view id) {
+    reaped_sender_ids[reaped_sender_cursor] = std::string(id);
+    reaped_sender_cursor = (reaped_sender_cursor + 1) % kReapedSenderMemory;
+  }
+
+  [[nodiscard]] bool reaped_sender_remembered(std::string_view id) const {
+    if (id.empty()) return false;
+    return std::any_of(reaped_sender_ids.begin(), reaped_sender_ids.end(),
+                       [id](const std::string& seen) { return seen == id; });
+  }
 };
 
 struct Sender {
@@ -1882,6 +1916,14 @@ class Server {
 
   void close_sender(Connection& owner, std::string_view sender_id) {
     Sender* sender = find_sender(sender_id);
+    if (sender == nullptr && owner.reaped_sender_remembered(sender_id)) {
+      // ALREADY CLOSED, AND THIS CONNECTION OWNED IT. A request to close a
+      // sender the daemon has already reaped has achieved its purpose, so it
+      // succeeds. The SDK closes the data socket before awaiting closeSender,
+      // which reaps the sender first and made an ordinary stop() fail.
+      queue_text(owner, control::encode_sender_closed(sender_id));
+      return;
+    }
     if (sender == nullptr || sender->owner != &owner) {
       queue_text(owner, control::encode_error("sender_not_found", "Sender does not exist"));
       return;
@@ -1896,6 +1938,9 @@ class Server {
     Sender& sender = senders_[slot];
     if (!sender.occupied) return;
     Connection* data = sender.data;
+    // Record the id against its owner BEFORE the entry is cleared, so a
+    // closeSender arriving after the reap can be answered as the no-op it is.
+    if (sender.owner != nullptr) sender.owner->remember_reaped_sender(sender.id);
     (void)receiver_.remove_sender(sender.id);
     publisher_.close_sender(sender.id);
     sender.occupied = false;

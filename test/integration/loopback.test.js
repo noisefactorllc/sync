@@ -1874,9 +1874,8 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     // one the test name actually makes.
     control.client.sendJson({ type: "closeSender", senderId: second.created.id });
     const offenderCleanup = await control.client.nextJson("budget offender cleanup");
-    assert.equal(offenderCleanup.type, "error");
-    assert.equal(offenderCleanup.code, "sender_not_found",
-                 "the offender's slot must already be reclaimed, not waiting on a control message");
+    assert.equal(offenderCleanup.type, "senderClosed",
+                 "closing an already-reaped sender this connection owned is a no-op, not an error");
     control.client.sendJson({ type: "closeSender", senderId: first.created.id });
     assert.equal((await control.client.nextJson("budget holder cleanup")).type,
                  "senderClosed");
@@ -1906,8 +1905,7 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     // the property the surrounding test is about.
     control.client.sendJson({ type: "closeSender", senderId: replacement.created.id });
     const replacementCleanup = await control.client.nextJson("budget replacement cleanup");
-    assert.equal(replacementCleanup.type, "error");
-    assert.equal(replacementCleanup.code, "sender_not_found");
+    assert.equal(replacementCleanup.type, "senderClosed");
 
     control.client.send(0x8, Buffer.from([0x03, 0xe8]));
     assert.equal((await control.client.nextFrame("budget control close")).opcode, 0x8);
@@ -1966,8 +1964,7 @@ test("an incomplete data message times out without expiring an idle sender", asy
     // unaffected.
     control.client.sendJson({ type: "closeSender", senderId: partial.created.id });
     const partialCleanup = await control.client.nextJson("partial sender cleanup");
-    assert.equal(partialCleanup.type, "error");
-    assert.equal(partialCleanup.code, "sender_not_found");
+    assert.equal(partialCleanup.type, "senderClosed");
     control.client.sendJson({ type: "closeSender", senderId: idle.created.id });
     assert.equal((await control.client.nextJson("idle sender cleanup")).type,
                  "senderClosed");
@@ -2680,10 +2677,15 @@ test("syncd management preserves authentication in a running pairing daemon", as
 // 954 seconds frozen on one frame with the new sender reporting 24.6 fps.
 //
 // The reap used to be reachable only from a control teardown or an explicit
-// closeSender — and the SDK fires that message unawaited with its errors
-// swallowed, so the daemon's only route to learning was one it could not rely
-// on. Asserted through the control protocol: a reaped sender is gone, so
-// closing it by id reports sender_not_found.
+// closeSender. The belief that this was unreliable — "the SDK fires that
+// message unawaited with its errors swallowed" — was only half true, and the
+// wrong half was load-bearing: _remoteEnd fires it unawaited, but
+// SyncSender.close AWAITS it (browser/client.js), after dropping the data
+// socket. So the ordinary stop() path reaps the sender and then asks the
+// daemon to close it, and answering sender_not_found there broke every normal
+// shutdown. Both release certification gates failed on it, on macOS/Syphon and
+// Ubuntu/V4L2, before it was caught. closeSender is therefore idempotent for a
+// sender this connection owned; see the test below for the ordering itself.
 test("a dead data socket unregisters its sender rather than stranding it", async () => {
   const daemon = await spawnDaemon();
   try {
@@ -2701,17 +2703,84 @@ test("a dead data socket unregisters its sender rather than stranding it", async
     const second = await createTestSender(control.client, daemon.ready.port, "Replacement sender");
     assert.notEqual(second.created.id, first.created.id);
 
-    // The reaped sender is gone: closing it by id is not found. Before the fix
-    // this returned senderClosed, because the entry was still occupied.
+    // Closing the reaped sender by id SUCCEEDS as a no-op. It is already gone,
+    // and this connection owned it, so the request has achieved its purpose.
+    //
+    // This assertion is deliberately weak, and the reason is worth recording so
+    // nobody spends another night rediscovering it. Two stronger shapes were
+    // tried and both are closed by the code:
+    //
+    //   * Ask the daemon whether the corpse is still registered with the
+    //     publisher. Impossible: send_stats carries the SAME find_sender guard
+    //     as close_sender, so a reaped sender's publisher state is unreadable
+    //     through the protocol by construction. The reap makes the daemon
+    //     unable to answer questions about what it just reaped.
+    //   * Prove the publisher slot came back by exhausting capacity. Does not
+    //     isolate anything: kMaximumSenders is 64 for BOTH the server's
+    //     senders_ and TestPublisher's entries_, so the publisher cannot be
+    //     filled without filling the server's table too.
+    //
+    // The property this test's bug actually produced — a frozen consumer
+    // picture while every instrument reads healthy — is covered where it can be
+    // observed: the V4L2 acceptance on real hardware, which checks
+    // outputDiffersFromSource, outputIsNotIdleCard, and an independent
+    // receiver's frameCount/uniqueChecksumCount. What remains here is the
+    // narrow protocol-level claim, asserted above by the replacement opening.
     control.client.sendJson({ type: "closeSender", senderId: first.created.id });
     const closed = await control.client.nextJson("stranded sender close");
-    assert.equal(closed.type, "error", `expected the reaped sender to be gone, got ${closed.type}`);
-    assert.equal(closed.code, "sender_not_found");
+    assert.equal(closed.type, "senderClosed",
+                 `expected closing the reaped sender to be a no-op, got ${closed.type}`);
 
     // And the replacement is genuinely live — it closes normally.
     control.client.sendJson({ type: "closeSender", senderId: second.created.id });
     assert.equal((await control.client.nextJson("replacement close")).type, "senderClosed");
     second.data.destroy();
+    control.client.destroy();
+  } finally {
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+// THE ORDERING THE SDK ACTUALLY USES. This is the case that reached production
+// and failed both release certification gates, and no test covered it.
+//
+// SyncSender.close() drops the DATA socket first (_closeLocal) and only then
+// awaits _requestSenderClose -> closeSender on control. So an ordinary stop()
+// asks the daemon to close a sender the daemon has already reaped in response
+// to that very close. Answering sender_not_found there fails a shutdown for a
+// race the client cannot avoid — 4 of 5 stop() calls failed across two release
+// builds, on macOS/Syphon and Ubuntu/V4L2 both.
+//
+// The soak never caught it because the soak closes gracefully: closeSender
+// first, THEN the data socket. Ten hours and 480 lifecycle cycles never once
+// exercised the ordering the SDK ships.
+test("closing a sender after its own data socket dropped is a no-op, not an error",
+     async () => {
+  const daemon = await spawnDaemon();
+  try {
+    const control = await authenticateControl(daemon.ready, ORIGIN, TOKEN);
+    assert.equal((await control.client.nextJson("welcome")).type, "welcome");
+
+    const sender = await createTestSender(control.client, daemon.ready.port, "Stopping sender");
+
+    // Exactly SyncSender.close()'s order: data socket down, then closeSender.
+    sender.data.destroy();
+    await sender.data.waitClosed().catch(() => {});
+
+    control.client.sendJson({ type: "closeSender", senderId: sender.created.id });
+    const closed = await control.client.nextJson("close after data drop");
+    assert.equal(closed.type, "senderClosed",
+                 `an ordinary stop() must succeed, got ${JSON.stringify(closed)}`);
+    assert.equal(closed.id, sender.created.id);
+
+    // A sender id this connection NEVER owned is still a loud error. Blanket
+    // idempotency would report success for an id that never existed, which is
+    // a diagnostic an SDK author needs.
+    control.client.sendJson({ type: "closeSender", senderId: "sender-that-never-existed" });
+    const unknown = await control.client.nextJson("unknown sender close");
+    assert.equal(unknown.type, "error");
+    assert.equal(unknown.code, "sender_not_found");
+
     control.client.destroy();
   } finally {
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
