@@ -39,14 +39,6 @@ Things that stop Sync from working today, with the workaround where one
 exists. Please keep this list current: add an entry when a report is
 diagnosed, remove it when the fix ships.
 
-- **Sync output dies for good if the companion is away for more than five
-  seconds.** Noisedeck retried a lost sender three times — after 250ms, 1s and
-  4s — then raised `SYNC_RECOVERY_EXHAUSTED` and stopped. Anything that took
-  the companion away for longer than 5.25 seconds (a restart, an app update, a
-  laptop that slept) left the output permanently dead with the picture frozen
-  on its last frame and no error shown. Workaround: stop and restart the
-  output. Fixed in noisedeck a5acc702 — recovery keeps its fast ramp and then
-  retries every 30 seconds for as long as the output is meant to be live.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`; Chrome logs
@@ -56,12 +48,6 @@ diagnosed, remove it when the fix ships.
   150+ gate `127.0.0.1` behind the `loopback-network` permission. The passive
   check stops at "Needs attention"; only Connect Sync can raise the browser's
   prompt. Noisedeck Standalone (Electron) grants it by default.
-- **Sync Camera refuses the helper on 0.2.31 and earlier.** The CoreMediaIO
-  sink client passed a NULL queue-altered proc, so an approved extension still
-  reported "did not accept a connection". Fixed in 18e81ea; ships with the
-  next preview release.
-- **Copy Diagnostics reports "Sync 0.2.0" on 0.2.31 and earlier.** The menu
-  bar and tray apps compiled a fallback version string. Fixed in 858a6fd.
 - **The macOS approval row can lag a day behind the request.** System
   Settings > Privacy & Security > Security shows "System software from
   application "Sync" was blocked from loading" only for a live request; if
