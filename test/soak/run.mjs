@@ -58,6 +58,12 @@ const soak = new ProtocolSoak({
   // every SYNC_SOAK_GEOMETRY_EVERY seconds, mirroring the browser format leg
   // on a plane with no renderer, no camera sink and no GL readback. Unset,
   // nothing changes and the run behaves exactly as it always has.
+  // SYNC_SOAK_PUBLISHER=camera runs the daemon against a real publisher instead
+  // of --test-receiver, which drops every frame without reaching one. The
+  // camera publisher scales and permutes each frame into a fixed 1920x1080
+  // canvas, so a rotation that changes source size changes its per-frame cost —
+  // work a --test-receiver run never performs and therefore never measures.
+  publisher: process.env.SYNC_SOAK_PUBLISHER || null,
   geometries: parseGeometries(process.env.SYNC_SOAK_GEOMETRIES),
   geometryEveryMs: Number(process.env.SYNC_SOAK_GEOMETRY_EVERY || 0) * 1000,
   onSample(sample) {
@@ -93,6 +99,7 @@ try {
     // can differ in a constant neither of them names — and a metric read that
     // failed because a shell was slow is indistinguishable from one that failed
     // for a real reason. Recorded rather than assumed.
+    publisher: soak.publisher ?? 'test-receiver',
     metricTimeoutMs: metricTimeouts.defaultMs,
     windowsMetricTimeoutMs: metricTimeouts.windowsMs,
     finalGeometry: soak.state.geometry ?? `${soak.geometry.width}x${soak.geometry.height}`,

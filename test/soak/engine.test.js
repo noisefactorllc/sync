@@ -434,3 +434,25 @@ test('ProtocolSoak includes its base geometry in the buffer budget', () => {
   assert.equal(soak.maxBuffered, 3 * base,
     'the largest size the run can send is its own base, not the rotation head');
 });
+
+// --test-receiver accepts frames and drops them: it never reaches a publisher,
+// so a run using it says nothing about publisher-side work. The camera
+// publisher scales and permutes every frame into a FIXED 1920x1080 canvas, so a
+// 1440p source costs 1.78x the per-frame CPU of a 1080p one — work a
+// --test-receiver run never performs. A churn experiment on --test-receiver
+// exonerated the receive path and never executed the publish path.
+test('ProtocolSoak defaults to --test-receiver and can select a publisher instead', () => {
+  const receiver = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't',
+  });
+  assert.deepEqual(receiver.publisherArgs, ['--test-receiver']);
+
+  const camera = new ProtocolSoak({
+    daemonPath: 'unused', origin: 'https://soak.example', token: 't', publisher: 'camera',
+  });
+  assert.deepEqual(camera.publisherArgs, ['--publisher', 'camera'],
+    'a camera run must reach the publisher, not the receiver');
+  // The two are mutually exclusive: a run cannot both drop frames and publish
+  // them, and passing both would let the daemon choose which claim is true.
+  assert.equal(camera.publisherArgs.includes('--test-receiver'), false);
+});

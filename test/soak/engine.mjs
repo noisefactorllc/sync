@@ -81,12 +81,28 @@ export function summarise(samples, { warmupFraction = 0.25 } = {}) {
 export class ProtocolSoak {
   constructor({ daemonPath, origin, token, width = 1920, height = 1080,
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
-                startupTimeoutMs = 5_000, daemonArgs = [],
+                startupTimeoutMs = 5_000, daemonArgs = [], publisher = null,
                 stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000,
                 geometries = null, geometryEveryMs = 0 }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
-                          leaksEveryMs, onSample, startupTimeoutMs, daemonArgs,
+                          leaksEveryMs, onSample, startupTimeoutMs, daemonArgs, publisher,
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
+    // WHICH DAEMON PATH THIS RUN ACTUALLY EXERCISES.
+    //
+    // --test-receiver accepts frames and drops them. It never reaches a
+    // publisher, so a run using it says nothing about publisher-side work —
+    // and the camera publisher does real per-frame work that scales with the
+    // SOURCE frame: every frame is scaled and permuted into a FIXED 1920x1080
+    // canvas (camera_identity.hpp: the one format the camera advertises), so
+    // a 1440p source costs 1.78x the per-frame CPU of a 1080p one.
+    //
+    // That matters because a churn experiment on --test-receiver showed the
+    // daemon losing only 6% of pixel throughput at 1440p while the browser
+    // plane lost a third to a half — and the browser plane publishes to the
+    // camera. The receive path was exonerated; the camera publish path was
+    // never executed. Making the publisher selectable is what lets the same
+    // rotation be run against the path that does the work.
+    this.publisherArgs = publisher ? ['--publisher', publisher] : ['--test-receiver'];
     // GEOMETRY CHURN ON THE PROTOCOL PLANE.
     //
     // The browser soak's format leg rotates the canvas and a 4.2x throughput
@@ -172,7 +188,7 @@ export class ProtocolSoak {
     this.daemon = spawn(this.daemonPath,
       [...this.daemonArgs,
        '--port', '0', '--test-origin', this.origin, '--test-token', this.token,
-       '--test-receiver'], { stdio: ['ignore', 'pipe', 'pipe'] });
+       ...this.publisherArgs], { stdio: ['ignore', 'pipe', 'pipe'] });
     this.daemon.stderr.setEncoding('utf8');
     this.daemon.stderr.on('data', (chunk) => {
       this.state.stderr = (this.state.stderr + chunk).slice(-8192);
