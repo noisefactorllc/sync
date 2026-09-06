@@ -35,35 +35,35 @@ current public implementation.
 
 ## Known issues
 
-Things that stop Sync from working today, with the workaround where one
-exists. Please keep this list current: add an entry when a report is
-diagnosed, remove it when the fix ships.
+These issues stop Sync from working today. Each entry includes a workaround
+where one exists. Keep this list current. Add an entry when a report is
+diagnosed. Remove it when the fix ships.
 
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
-  stop public pages from reaching `127.0.0.1`; Chrome logs
+  stop public pages from reaching `127.0.0.1`. Chrome logs
   `net::ERR_BLOCKED_BY_CLIENT` and Noisedeck reports the companion absent.
   Workaround: set the blocker to no filtering on the Noisedeck origin.
 - **Browsers require a loopback permission first.** Chrome 145+ and Firefox
   150+ gate `127.0.0.1` behind the `loopback-network` permission. The passive
-  check stops at "Needs attention"; only Connect Sync can raise the browser's
+  check stops at "Needs attention". Only Connect Sync can show the browser's
   prompt. Noisedeck Standalone (Electron) grants it by default.
 - **The macOS approval row can lag a day behind the request.** System
   Settings > Privacy & Security > Security shows "System software from
-  application "Sync" was blocked from loading" only for a live request; if
-  it is missing, quit Sync, relaunch it from Applications, and reopen
-  Settings.
+  application "Sync" was blocked from loading" only for a live request.
+  If the row is missing, quit Sync. Relaunch it from Applications.
+  Open Settings again.
 - **The native pairing prompt defaults to Deny.** Pressing Return in the
   companion's pairing dialog denies the origin.
 - **The Windows installer is not code-signed** and Windows warns about an
-  unrecognised publisher; each release publishes a SHA-256 instead.
+  unrecognised publisher. Each release publishes a SHA-256 instead.
 - **The Windows camera needs Windows 11.** `MFCreateVirtualCamera` arrived in
   build 22000, so on Windows 10 the provider reports "the camera needs
   Windows 11 (build 22000) or later" and the rest of Sync is unaffected.
 - **Declining the uninstall prompt leaves the camera registered.** Removing
   the CLSID from HKLM needs the same elevation that added it, and a per-user
   uninstall is not elevated. The stale key is harmless and the next install
-  reuses it; `syncd --unregister-camera`, run as an administrator, clears it.
+  reuses it. Run `syncd --unregister-camera` as an administrator to clear it.
 - **Two users signed in at once share one Windows camera.** The media source
   cannot be told which account to pair with without an administrator-only
   API, so it accepts frames from whoever is logged in interactively. With
@@ -117,18 +117,18 @@ opens the camera. PipeWire and WirePlumber are useful interoperability checks
 reported by `syncctl doctor`, but are not in the frame path. The daemon writes
 NV12 directly to V4L2.
 
-No provider is ever linked at build time. Each is discovered at run time
-through its documented public entry point, and a provider whose runtime is
-absent simply reports itself unavailable rather than failing the daemon. A
-selected provider that ends up unavailable also prints one line to stderr
-naming why, so `available: false` is never the whole diagnosis; the `ready`
-record on stdout keeps its exact shape.
+No provider is ever linked at build time. Sync discovers each provider at
+runtime through its documented public entry point. A provider whose runtime
+is absent reports itself unavailable rather than failing the daemon.
+An unavailable selected provider also prints one line to stderr that explains
+why. Thus, `available: false` is never the whole diagnosis.
+The `ready` record on stdout keeps its exact shape.
 
 ## Building the native daemon
 
 Sync requires CMake 3.21 or newer, a C++20 compiler, OpenSSL 3, and libuv.
 macOS builds also use the system Foundation and Metal frameworks and locate
-libuv through pkg-config; Windows builds use MSVC and locate libuv and
+libuv through pkg-config. Windows builds use MSVC and locate libuv and
 OpenSSL through a CONFIG package such as vcpkg:
 
 ```powershell
@@ -155,11 +155,11 @@ cmake -S . -B build -G Ninja && cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run the tests from a shell with a Windows-shaped environment. An MSYS2 login
-shell unsets `LOCALAPPDATA` and points `TMP`/`TEMP` at `/tmp`, and the pairing
-store resolves its default path from `%LOCALAPPDATA%` and refuses a path that
-is not drive-absolute, so several tests fail there for reasons unrelated to the
-code.
+Run the tests from a shell with a Windows-shaped environment.
+An MSYS2 login shell unsets `LOCALAPPDATA` and points `TMP`/`TEMP` at `/tmp`.
+The pairing store resolves its default path from `%LOCALAPPDATA%`.
+It refuses paths that are not drive-absolute.
+Thus, several tests fail in an MSYS2 login shell for reasons unrelated to the code.
 
 ```bash
 cmake -S . -B build
@@ -275,8 +275,8 @@ Factor release workflow.
 ## Browser SDK
 
 The dependency-free browser modules live in [`browser/`](browser/). Passive
-discovery never initiates pairing; `pair()` must be called from a deliberate
-user action, and the host application owns returned token storage. See the
+discovery never initiates pairing. A deliberate user action must call
+`pair()`. The host application owns storage for the returned token. See the
 [browser client guide](browser/README.md) for the API and loopback Permissions
 Policy requirements.
 
@@ -308,13 +308,13 @@ idle real daemon verifies process inspection (including private memory on Window
 Windows inspection has a 60-second command budget inside a 75-second test and a
 180-second runner budget. A missing daemon fails integration instead of skipping it.
 To repeat these checks after a harness change, run `test:integration:soak` on the
-same build several times; every run must pass without a retry that hides failure.
+same build several times. Every run must pass without a retry that hides failure.
 Fairness under unlimited writes is checked with immediately completed writes and a
 queued stop, independently of native throughput or runner scheduling speed.
 
 The memory soak streams 1080p frames through a test-receiver daemon while
 cycling senders and probing health, and fails on footprint growth. Run it
-against a Release build; a Debug daemon is too slow to be representative:
+against a Release build. A Debug daemon is too slow to be representative:
 
 ```bash
 SYNC_DAEMON_PATH=build-release/syncd SYNC_SOAK_SECONDS=60 npm run test:soak
@@ -326,7 +326,7 @@ This standalone soak still sends at unlimited speed by default. Set
 ## Security
 
 Unknown origins cannot silently publish. Pairing requires a browser-initiated
-request and a visible native approval prompt; reusable credentials are scoped
+request and a visible native approval prompt. Reusable credentials are scoped
 to an exact normalized origin and can be revoked. Please report suspected
 vulnerabilities privately using [SECURITY.md](SECURITY.md).
 
