@@ -202,7 +202,9 @@ function client(options = {}) {
     token: TOKEN,
     fetch: async () => response(HEALTH),
     WebSocket: FakeWebSocket,
-    timeoutMs: 50,
+    // Successful fixture work must tolerate a runner being descheduled.
+    // Deadline tests supply their own short budget and controlled clock.
+    timeoutMs: 5_000,
     ...options,
   });
 }
@@ -528,6 +530,7 @@ test('an already-expired passive gate never invokes the Permissions API', async 
       value: { now: () => nowValues.shift() ?? 51 },
     });
     const bridge = client({
+      timeoutMs: 50,
       permissions: {
         async query() {
           queryCalls += 1;
@@ -574,6 +577,7 @@ test('an expired permission query never advances to the legacy descriptor fallba
     };
     globalThis.clearTimeout = (timer) => { timer.active = false; };
     bridge = client({
+      timeoutMs: 50,
       permissions: {
         query(descriptor) {
           queries.push(descriptor);
@@ -876,7 +880,10 @@ test('pair rejects malformed, binary, oversized, noncanonical, and duplicate res
   }
 });
 
-test('pair classifies early close, socket error, and local response timeout without lifecycle ambiguity', async () => {
+test('pair classifies early close, socket error, and local response timeout without lifecycle ambiguity', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
   const cases = [
     {
       setup(socket) { socket.remoteClose(); },
@@ -894,7 +901,14 @@ test('pair classifies early close, socket error, and local response timeout with
   for (const { setup, ErrorClass } of cases) {
     FakeWebSocket.reset(setup);
     const bridge = client({ pairingTimeoutMs: 5 });
-    await assert.rejects(bridge.pair('Noisedeck'), ErrorClass);
+    const rejected = assert.rejects(bridge.pair('Noisedeck'), ErrorClass);
+    if (ErrorClass === SyncTimeoutError) {
+      await flushUntil(() => FakeWebSocket.instances[0]?.sent.length === 1,
+        'pairing request before its response deadline');
+      now += 5;
+      t.mock.timers.tick(5);
+    }
+    await rejected;
     const socket = FakeWebSocket.instances[0];
     assert.equal(socket.listenerCount, 0);
     assert.equal(socket.closeCalls <= 1, true);
@@ -1319,7 +1333,10 @@ test('connect opens only /control, sends the exact hello, and returns a validate
   assert.equal(FakeWebSocket.instances[0].closeCalls, 1);
 });
 
-test('connect classifies authentication and rejects malformed, oversized, early-close, and timed-out sessions', async () => {
+test('connect classifies authentication and rejects malformed, oversized, early-close, and timed-out sessions', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
   const scenarios = [
     {
       setup(socket) {
@@ -1352,7 +1369,14 @@ test('connect classifies authentication and rejects malformed, oversized, early-
   ];
   for (const { setup, ErrorClass } of scenarios) {
     FakeWebSocket.reset(setup);
-    await assert.rejects(client({ timeoutMs: 5 }).connect(), ErrorClass);
+    const rejected = assert.rejects(client({ timeoutMs: 5 }).connect(), ErrorClass);
+    if (ErrorClass === SyncTimeoutError) {
+      await flushUntil(() => FakeWebSocket.instances.length === 1,
+        'control socket before its connection deadline');
+      now += 5;
+      t.mock.timers.tick(5);
+    }
+    await rejected;
     assert.equal(FakeWebSocket.instances[0].closeCalls <= 1, true);
   }
 });

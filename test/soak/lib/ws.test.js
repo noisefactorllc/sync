@@ -4,7 +4,8 @@ import net from 'node:net';
 import test from 'node:test';
 import { connect, upgrade } from './ws.mjs';
 
-function bounded(promise, timeoutMs = 1000) {
+// This guards a stuck test; protocol deadlines are asserted separately below.
+function bounded(promise, timeoutMs = 10_000) {
   let timer;
   return Promise.race([
     promise,
@@ -64,9 +65,23 @@ test('an upgrade rejects promptly when the peer closes without a response', asyn
 });
 
 test('an unanswered upgrade expires and destroys the connection', async (t) => {
-  const fixture = await peer(t, () => {});
-  await assert.rejects(bounded(upgrade(fixture.port, '/control', { timeoutMs: 30 })),
+  let received;
+  const requestReceived = new Promise((resolve) => { received = resolve; });
+  const fixture = await peer(t, () => received());
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // upgrade() computes a shared connection/header deadline from this clock.
+  // Keep it on the same controlled timeline as the timeout callbacks.
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const rejected = assert.rejects(upgrade(fixture.port, '/control', { timeoutMs: 30 }),
     /upgrade.*timed out/);
+  // Expire the upgrade only after the TCP connection and request exist.
+  // Otherwise a slow runner can expire connect() and test the wrong stage.
+  await requestReceived;
+  now = 30;
+  t.mock.timers.tick(30);
+  await rejected;
+  t.mock.timers.reset();
   await bounded(fixture.disconnected);
 });
 
@@ -121,8 +136,12 @@ test('a binary write held in the socket buffer expires and destroys the stream',
   // Cork a real socket so its write callback cannot complete before timeout.
   // A fixed large payload can still fit in Windows' loopback send buffers.
   ws.socket.cork();
-  await assert.rejects(bounded(ws.sendBinary(Buffer.from([1, 2, 3, 4]), 30)),
-    /write.*timed out/);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const rejected = assert.rejects(ws.sendBinary(Buffer.from([1, 2, 3, 4]), 30), /write.*timed out/);
+  t.mock.timers.tick(29);
+  assert.equal(ws.socket.destroyed, false, 'the write remains live before its deadline');
+  t.mock.timers.tick(1);
+  await rejected;
   assert.equal(ws.socket.destroyed, true);
 });
 
@@ -139,7 +158,7 @@ test('a successful binary write preserves its exact wire bytes and releases writ
   });
   const ws = await bounded(upgrade(fixture.port, '/control'));
   t.after(() => ws.socket.destroy());
-  await ws.sendBinary(Buffer.from([10, 20, 30, 40]), 500);
+  await ws.sendBinary(Buffer.from([10, 20, 30, 40]));
   assert.deepEqual(await bounded(wire), Buffer.from([0x82, 0x84, 0, 0, 0, 0, 10, 20, 30, 40]));
   assert.equal(ws.socket.listenerCount('error'), 1);
   assert.equal(ws.socket.listenerCount('close'), 1);

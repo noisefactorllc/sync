@@ -180,6 +180,7 @@ jobs:
           cmake --build build --parallel 4
           ctest --test-dir build --output-on-failure
           npm run test:unit
+          SYNC_DAEMON_PATH=build/syncd npm run test:integration:soak
 
   windows:
     name: Windows ${{ matrix.name }}

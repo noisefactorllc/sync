@@ -8,7 +8,7 @@ import { summarise, ProtocolSoak } from './engine.mjs';
 
 const sample = (t, footprint) => ({ t, footprint, rss: footprint, frames: t * 60 });
 
-async function startupFixture(t, body) {
+async function startupFixture(t, body, { startupTimeoutMs = 10_000 } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'sync-startup-test-'));
   // A plain script run by THIS node, not a shebang file with an exec bit.
   // Windows honours neither, which is why these tests used to be skipped
@@ -19,7 +19,7 @@ async function startupFixture(t, body) {
   await writeFile(script, `${body}\n`);
   const soak = new ProtocolSoak({ daemonPath: process.execPath, daemonArgs: [script],
     width: 8, height: 8,
-    startupTimeoutMs: 1000, stopTermTimeoutMs: 200, stopKillTimeoutMs: 200 });
+    startupTimeoutMs, stopTermTimeoutMs: 2000, stopKillTimeoutMs: 2000 });
   t.after(async () => {
     if (soak.daemon) await soak.stop();
     await rm(directory, { recursive: true, force: true });
@@ -33,7 +33,7 @@ async function boundedStart(soak) {
   let timer;
   try {
     return await Promise.race([soak.start(), new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('outer test deadline')), 4000);
+      timer = setTimeout(() => reject(new Error('outer test deadline')), 15_000);
     })]);
   } finally {
     clearTimeout(timer);
@@ -53,7 +53,8 @@ for (const [name, body, expected] of [
   ['invalid port', "process.stdout.write(JSON.stringify({type:'ready',port:0})+'\\n'); setInterval(() => {}, 1000)", /invalid syncd readiness/i],
 ]) {
   test(`startup cleans up ${name} before rejecting`, async (t) => {
-    const soak = await startupFixture(t, body);
+    const soak = await startupFixture(t, body, name === 'silent daemon'
+      ? { startupTimeoutMs: 100 } : {});
     await assert.rejects(boundedStart(soak), expected);
     assert.ok(soak.daemon.exitCode !== null || soak.daemon.signalCode !== null,
       'readiness failure must reap the child before the caller continues');
@@ -243,18 +244,20 @@ function fakeSoak(overrides = {}) {
   });
 }
 
-test('stop() escalates to SIGKILL and still returns promptly when SIGTERM is ignored', async () => {
+test('stop() escalates only after the SIGTERM deadline when SIGTERM is ignored', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] });
   const soak = fakeSoak();
   soak.daemon = new DeafChild();
-  const started = Date.now();
-  const result = await soak.stop();
-  const elapsed = Date.now() - started;
+  const stopping = soak.stop();
+  t.mock.timers.tick(19);
+  assert.deepEqual(soak.daemon.signals, ['SIGTERM']);
+  t.mock.timers.tick(1);
+  await Promise.resolve();
+  t.mock.timers.tick(0); // deliver the fake child's queued SIGKILL exit
+  const result = await stopping;
   assert.deepEqual(soak.daemon.signals, ['SIGTERM', 'SIGKILL']);
   assert.equal(result.reaped, true);
   assert.equal(result.exitCode, null);
-  // Bounded by stopTermTimeoutMs (20) + stopKillTimeoutMs (50), not by any
-  // unbounded await — well under a real SIGTERM grace period.
-  assert.ok(elapsed < 1000, `stop() took ${elapsed}ms, expected it to resolve promptly`);
   // The caller (run.mjs's finally) unconditionally spreads this result into
   // its JSONL summary line right after awaiting stop() — proving stop()
   // resolves with a well-formed, spreadable object is what guarantees that
@@ -263,7 +266,8 @@ test('stop() escalates to SIGKILL and still returns promptly when SIGTERM is ign
   assert.doesNotThrow(() => JSON.stringify(summaryLine));
 });
 
-test('stop() gives up and still returns a usable result when the child never dies', async () => {
+test('stop() gives up only after both deadlines when the child never dies', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const soak = fakeSoak();
   soak.daemon = new UnkillableChild();
   soak.daemon.stdout.on('data', () => {}); // the long-lived listeners start() attaches
@@ -276,13 +280,18 @@ test('stop() gives up and still returns a usable result when the child never die
   const data = fakeConnection();
   soak.control = control;
   soak.data = data;
-  const started = Date.now();
-  const result = await soak.stop();
-  const elapsed = Date.now() - started;
+  let result;
+  const stopping = soak.stop().then((value) => { result = value; });
+  t.mock.timers.tick(20);
+  await Promise.resolve(); // arm the SIGKILL wait after SIGTERM expires
+  t.mock.timers.tick(49);
+  await Promise.resolve();
+  assert.equal(result, undefined, 'do not abandon before the SIGKILL deadline');
+  t.mock.timers.tick(1);
+  await stopping;
   assert.deepEqual(soak.daemon.signals, ['SIGTERM', 'SIGKILL']);
   assert.equal(result.reaped, false);
   assert.equal(result.exitCode, null);
-  assert.ok(elapsed < 1000, `stop() took ${elapsed}ms, expected it to give up promptly`);
   const summaryLine = { plane: 'protocol', type: 'summary', ...result };
   assert.doesNotThrow(() => JSON.stringify(summaryLine));
   // The hang this round closes moved up a layer: a genuinely unkillable
@@ -300,12 +309,18 @@ test('stop() gives up and still returns a usable result when the child never die
   assert.equal(soak.data, null, 'stop() must dereference data after abandoning it');
 });
 
-test('stop() observes an exit that landed during a previous wait instead of racing past it', async () => {
+test('stop() observes an exit that landed during a previous wait instead of racing past it', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const soak = fakeSoak(); // stopTermTimeoutMs: 20, stopKillTimeoutMs: 50
   soak.daemon = new MutedExitChild();
-  const started = Date.now();
-  const result = await soak.stop();
-  const elapsed = Date.now() - started;
+  const stopping = soak.stop();
+  t.mock.timers.tick(20);
+  // The result must be available without advancing the SIGKILL clock.
+  const pending = Symbol('still waiting');
+  await Promise.resolve();
+  await Promise.resolve();
+  const result = await Promise.race([stopping, Promise.resolve(pending)]);
+  assert.notEqual(result, pending, 'an already exited child must not arm another wait');
   // The SIGTERM wait times out at 20ms since no 'exit' event ever fires, so
   // a SIGKILL still gets sent (harmless, and the reviewer flagged this as an
   // acceptable side effect) — but the following wait must recognize the
@@ -315,8 +330,6 @@ test('stop() observes an exit that landed during a previous wait instead of raci
   assert.deepEqual(soak.daemon.signals, ['SIGTERM', 'SIGKILL']);
   assert.equal(result.reaped, true);
   assert.equal(result.exitCode, 0);
-  assert.ok(elapsed < 45,
-    `stop() took ${elapsed}ms; expected it to short-circuit well before the 50ms SIGKILL bound`);
 });
 
 test('_waitForExit\'s pre-check catches signalCode alone, without exitCode also being set', async () => {
@@ -331,12 +344,9 @@ test('_waitForExit\'s pre-check catches signalCode alone, without exitCode also 
   soak.daemon = new EventEmitter();
   soak.daemon.exitCode = null;
   soak.daemon.signalCode = 'SIGTERM';
-  const started = Date.now();
-  const exitCode = await soak._waitForExit(50);
-  const elapsed = Date.now() - started;
-  assert.equal(exitCode, null);
-  assert.ok(elapsed < 10,
-    `_waitForExit took ${elapsed}ms; the pre-check should resolve immediately, not wait out the 50ms bound`);
+  const pending = Symbol('still waiting');
+  const exitCode = await Promise.race([soak._waitForExit(50), Promise.resolve(pending)]);
+  assert.equal(exitCode, null, 'an already signalled child resolves without waiting for a timer');
 });
 
 // Windows has no POSIX signals: Node maps kill('SIGTERM') onto

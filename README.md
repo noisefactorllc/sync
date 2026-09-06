@@ -294,11 +294,23 @@ await sync.connect()
 ## Tests
 
 ```bash
+npm run test:unit
 npm run test:browser
 npm run test:packaging
 SYNC_DAEMON_PATH=build/syncd npm run test:integration
 ctest --test-dir build --output-on-failure
 ```
+
+`test:unit` checks protocol and harness behavior without a native build. The
+integration command also runs `test:integration:soak` in a separate test process:
+the regular short soak uses a 60 FPS ceiling and fixed memory readings, while an
+idle real daemon verifies process inspection (including private memory on Windows).
+Windows inspection has a 60-second command budget inside a 75-second test and a
+180-second runner budget. A missing daemon fails integration instead of skipping it.
+To repeat these checks after a harness change, run `test:integration:soak` on the
+same build several times; every run must pass without a retry that hides failure.
+Fairness under unlimited writes is checked with immediately completed writes and a
+queued stop, independently of native throughput or runner scheduling speed.
 
 The memory soak streams 1080p frames through a test-receiver daemon while
 cycling senders and probing health, and fails on footprint growth. Run it
@@ -307,6 +319,9 @@ against a Release build; a Debug daemon is too slow to be representative:
 ```bash
 SYNC_DAEMON_PATH=build-release/syncd SYNC_SOAK_SECONDS=60 npm run test:soak
 ```
+
+This standalone soak still sends at unlimited speed by default. Set
+`SYNC_SOAK_FPS` to a positive frame-rate ceiling for a paced workload.
 
 ## Security
 

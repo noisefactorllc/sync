@@ -4,8 +4,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { ProtocolSoak } from './engine.mjs';
-import { residentKbAsync, footprintKbAsync } from './lib/process-metrics.mjs';
+import { ProtocolSoak } from '../soak/engine.mjs';
+import { residentKbAsync, footprintKbAsync } from '../soak/lib/process-metrics.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 // The daemon's built location is generator-dependent, not just
@@ -25,20 +25,18 @@ function resolveDaemon() {
   return path.resolve(ROOT, DAEMON_CANDIDATES[0]);
 }
 const DAEMON = resolveDaemon();
-const SCRIPT = path.join(ROOT, 'test/acceptance/daemon-memory-soak.mjs');
-if (process.env.SYNC_DAEMON_PATH) {
-  assert.ok(existsSync(DAEMON), `SYNC_DAEMON_PATH does not exist: ${DAEMON}`);
-}
-const requiresDaemon = { skip: !existsSync(DAEMON), timeout: 25_000 };
+// CI must never turn a missing build into a green skipped suite.
+assert.ok(existsSync(DAEMON), `build syncd first or set SYNC_DAEMON_PATH: ${DAEMON}`);
+const requiresDaemon = { timeout: 25_000 };
 
-async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
-  const args = delayedHealthFailure || process.platform === 'win32' ? ['--input-type=module', '-e', `
+async function shortRun(t, { delayedHealthFailure = false, fps = 60, cycle = 60 } = {}) {
+  const args = ['--input-type=module', '-e', `
     import { registerHooks } from 'node:module';
-    // These cases test timer fairness and health completion ordering. Slow
+    // These cases test duration and health completion ordering. Slow
     // inspectors can consume the entire five-second window or mask a missing
-    // health join. Real Windows commands are checked separately below.
+    // health join. Real process inspection is checked separately below.
     registerHooks({ load(url, context, nextLoad) {
-      if (url === ${JSON.stringify(new URL('./lib/process-metrics.mjs', import.meta.url).href)}) {
+      if (url === ${JSON.stringify(new URL('../soak/lib/process-metrics.mjs', import.meta.url).href)}) {
         return { format: 'module', shortCircuit: true, source:
           'export const residentKb = () => 1024; ' +
           'export const footprintKb = () => 1024; ' +
@@ -49,52 +47,34 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
       return nextLoad(url, context);
     } });
     if (${delayedHealthFailure}) {
-    const realFetch = globalThis.fetch;
-    let previous;
-    globalThis.fetch = (...args) => {
-      if (previous) {
-        clearTimeout(previous.timer);
-        previous.resolve(previous.response);
-        previous = null;
-      }
-      return realFetch(...args).then(async response => {
-        // Consume the real body while its request deadline is active. The
-        // synthetic completion delay must not race that body's abort signal.
-        const body = await response.arrayBuffer();
-        const completed = new Response(body, {
-          status: response.status, headers: response.headers,
-        });
-        return new Promise((resolve, reject) => {
-          previous = { response: completed, resolve, timer: setTimeout(() => {
-            reject(new Error('late health probe failure'));
-          }, 1800) };
-        });
-      });
-    };
+      const healthModule = ${JSON.stringify(new URL('../soak/lib/health.mjs', import.meta.url).href)};
+      registerHooks({ load(url, context, nextLoad) {
+        if (url === healthModule) {
+          return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            let previous;
+            export function probeHealth() {
+              if (previous) {
+                clearTimeout(previous.timer);
+                previous.resolve();
+              }
+              return new Promise((resolve, reject) => {
+                previous = { resolve, timer: setTimeout(() => {
+                  reject(new Error('late health probe failure'));
+                }, 1800) };
+              });
+            }
+          `)} };
+        }
+        return nextLoad(url, context);
+      } });
     }
     await import(${JSON.stringify(new URL('../acceptance/daemon-memory-soak.mjs', import.meta.url).href)});
-  `] : process.platform === 'darwin' ? ['--input-type=module', '-e', `
-    import { registerHooks } from 'node:module';
-    // vmmap suspends a busy target and does not support ASan heaps. This
-    // lifecycle regression measures real RSS without inspecting its heap;
-    // physical-footprint acceptance is a separate, unsanitized soak.
-    const metrics = ${JSON.stringify(new URL('./lib/process-metrics.mjs', import.meta.url).href)};
-    registerHooks({ load(url, context, nextLoad) {
-      if (url === metrics) {
-        const original = JSON.stringify(metrics + '?resident-fixture');
-        return { format: 'module', shortCircuit: true, source:
-          'export * from ' + original + '; ' +
-          'export { residentKbAsync as footprintKbAsync } from ' + original + ';' };
-      }
-      return nextLoad(url, context);
-    } });
-    await import(${JSON.stringify(new URL('../acceptance/daemon-memory-soak.mjs', import.meta.url).href)});
-  `] : [SCRIPT];
+  `];
   const child = spawn(process.execPath, args, {
     cwd: ROOT,
     env: { ...process.env, SYNC_DAEMON_PATH: DAEMON, SYNC_SOAK_SECONDS: '5',
-      SYNC_SOAK_CYCLE: '60', SYNC_SOAK_WIDTH: String(width),
-      SYNC_SOAK_HEIGHT: String(width), SYNC_SOAK_GROWTH_KB: '1000000',
+      SYNC_SOAK_CYCLE: String(cycle), SYNC_SOAK_WIDTH: '8', SYNC_SOAK_FPS: String(fps),
+      SYNC_SOAK_HEIGHT: '8', SYNC_SOAK_GROWTH_KB: '1000000',
       SYNC_SOAK_LEAKS: '0' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -127,7 +107,7 @@ async function shortRun(t, { width = 8, delayedHealthFailure = false } = {}) {
   return { ...result, stdout, stderr };
 }
 
-test('a five-second soak with tiny frames ends before its sixty-second sender cycle',
+test('a five-second paced soak ends before its sixty-second sender cycle',
   requiresDaemon, async (t) => {
     const result = await shortRun(t);
     assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
@@ -136,43 +116,42 @@ test('a five-second soak with tiny frames ends before its sixty-second sender cy
 
 test('a final pending health failure prevents a successful soak verdict',
   requiresDaemon, async (t) => {
-    const result = await shortRun(t, { width: 1024, delayedHealthFailure: true });
+    const result = await shortRun(t, { delayedHealthFailure: true });
     assert.equal(result.code, 1, result.stdout);
     assert.match(result.stderr, /late health probe failure/, result.stdout);
   });
 
-test('Windows inspectors read real daemon resident and private memory', {
-  ...requiresDaemon,
-  skip: process.platform !== 'win32' ? 'requires the Windows process memory APIs' : requiresDaemon.skip,
+test('a paced soak cycles senders and stops while waiting for its next frame',
+  requiresDaemon, async (t) => {
+    const result = await shortRun(t, { fps: 0.01, cycle: 2 });
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /cycles=[2-9]\d* sent=1 /);
+  });
+
+test('process inspectors read real daemon resident memory and Windows private memory', {
+  // Includes the 60s command budget, startup and joined child cleanup.
+  timeout: 75_000,
 }, async (t) => {
   const lifecycle = new ProtocolSoak({ daemonPath: DAEMON, width: 8, height: 8,
     origin: 'https://soak.example', token: 'soak-token-123' });
   t.after(() => lifecycle.stop());
   await lifecycle.start();
-  // Inspect an idle real daemon without coupling PowerShell startup to a
-  // five-second streaming window. Join both commands before cleanup, and do
-  // not let a private-byte failure pass by falling back to resident memory.
-  // A GENEROUS BUDGET, BECAUSE THIS TEST ASKS A DIFFERENT QUESTION THAN A SOAK.
-  //
-  // The module's 10s default protects a sampler that must keep pace with a
-  // stream: there, a slow shell should be abandoned. Here the question is
-  // whether the inspectors can read a real daemon at all, and a cold CI runner
-  // spawning two PowerShells at once has twice exceeded 10s — 10,445ms and
-  // 10,564ms — turning a working inspector into a red build. Abandoning the
-  // read is the wrong answer to this test's question.
+  // Keep real inspection independent of streaming. Concurrent cold PowerShell
+  // startups have exceeded 10s in CI; this fixture has a 60s command budget
+  // inside its 75s test. Join both reads before cleanup and reject a missing
+  // private-memory reading instead of silently substituting resident memory.
   const timeoutMs = 60_000;
-  const results = await Promise.allSettled([
+  const reads = [
     residentKbAsync(lifecycle.daemon.pid, { timeoutMs }),
-    footprintKbAsync(lifecycle.daemon.pid, { timeoutMs, fallback: () => {
+  ];
+  if (process.platform === 'win32') {
+    reads.push(footprintKbAsync(lifecycle.daemon.pid, { timeoutMs, fallback: () => {
       throw new Error('the real Windows private-memory inspection failed');
-    } }),
-  ]);
-  // Whether the daemon outlived the inspection is reported as its own fact —
-  // not because a dead pid can produce the rejection above (it cannot:
-  // Get-Process on a missing pid exits zero, so execFile resolves with empty
-  // stdout and the Number.isFinite check below is what fails), but because a
-  // daemon that dies mid-inspection makes every reading describe a corpse, and
-  // that deserves to be stated rather than inferred.
+    } }));
+  }
+  const results = await Promise.allSettled(reads);
+  // Report target lifetime separately from inspector failure. Empty output
+  // is not a valid measurement even if the inspector process exits zero.
   const exited = lifecycle.daemon.exitCode !== null || lifecycle.daemon.signalCode !== null;
   const daemonNote = exited
     ? ` (daemon ALREADY EXITED before inspection: code=${lifecycle.daemon.exitCode}, ` +

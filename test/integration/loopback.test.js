@@ -1831,7 +1831,7 @@ test("syncd serves bounded loopback health, authenticated control, and dedicated
   }
 });
 
-test("aggregate data payload exhaustion isolates the offender and reclaims capacity", async () => {
+async function checkAggregatePayloadBudget(reverseDeclarations) {
   const sockets = new Set();
   let daemon;
   try {
@@ -1842,23 +1842,32 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     assert.equal((await control.client.nextJson("budget control welcome")).type,
                  "welcome");
 
-    const first = await createTestSender(control.client, ready.port, "Budget holder");
-    const second = await createTestSender(control.client, ready.port, "Budget offender");
+    const first = await createTestSender(control.client, ready.port, "Budget candidate A");
+    const second = await createTestSender(control.client, ready.port, "Budget candidate B");
     sockets.add(first.data);
     sockets.add(second.data);
 
     const declared = 64 * 1024 * 1024 + 64;
-    first.data.socket.write(maskedClientFrameHeader(0x2, declared));
-    second.data.socket.write(maskedClientFrameHeader(0x2, declared));
+    const candidates = [first, second];
+    const closes = candidates.map(({ data }) => data.nextFrame("aggregate budget close"));
+    const order = reverseDeclarations ? [second, first] : [first, second];
+    for (const { data } of order) data.socket.write(maskedClientFrameHeader(0x2, declared));
 
-    const rejected = await second.data.nextFrame("aggregate budget close");
+    // Separate TCP sockets have no shared delivery order. The first declaration
+    // the daemon reads holds the budget; observe which peer it rejects instead
+    // of assuming the second write must be the offender. Keep the other read
+    // pending for the holder's explicit cleanup below.
+    const { frame: rejected, index } = await Promise.race(closes.map(async (close, index) =>
+      ({ frame: await close, index })));
+    const offender = candidates[index];
+    const holder = candidates[1 - index];
     assert.equal(rejected.opcode, 0x8);
     assert.equal(rejected.payload.readUInt16BE(0), 1013);
     assert.equal(rejected.payload.subarray(2).toString("utf8"),
                  "inbound_budget_exhausted");
-    second.data.send(0x8, rejected.payload);
-    await second.data.waitClosed();
-    sockets.delete(second.data);
+    offender.data.send(0x8, rejected.payload);
+    await offender.data.waitClosed();
+    sockets.delete(offender.data);
 
     const concurrentHealth = await health("127.0.0.1", ready.port, ORIGIN);
     assert.equal(concurrentHealth.status, 200);
@@ -1872,18 +1881,18 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     // capacity this test is about is reclaimed by the daemon itself rather
     // than by the test's own cleanup — which is the stronger claim, and the
     // one the test name actually makes.
-    control.client.sendJson({ type: "closeSender", senderId: second.created.id });
+    control.client.sendJson({ type: "closeSender", senderId: offender.created.id });
     const offenderCleanup = await control.client.nextJson("budget offender cleanup");
     assert.equal(offenderCleanup.type, "senderClosed",
                  "closing an already-reaped sender this connection owned is a no-op, not an error");
-    control.client.sendJson({ type: "closeSender", senderId: first.created.id });
+    control.client.sendJson({ type: "closeSender", senderId: holder.created.id });
     assert.equal((await control.client.nextJson("budget holder cleanup")).type,
                  "senderClosed");
-    const holderClose = await first.data.nextFrame("budget holder close");
+    const holderClose = await closes[1 - index];
     assert.equal(holderClose.opcode, 0x8);
-    first.data.send(0x8, holderClose.payload);
-    await first.data.waitClosed();
-    sockets.delete(first.data);
+    holder.data.send(0x8, holderClose.payload);
+    await holder.data.waitClosed();
+    sockets.delete(holder.data);
 
     const replacement = await createTestSender(
       control.client, ready.port, "Budget replacement",
@@ -1915,7 +1924,12 @@ test("aggregate data payload exhaustion isolates the offender and reclaims capac
     for (const client of sockets) client.destroy();
     if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
-});
+}
+
+for (const reverseDeclarations of [false, true]) {
+  test(`aggregate data payload exhaustion isolates the offender and reclaims capacity (reverse=${reverseDeclarations})`,
+    () => checkAggregatePayloadBudget(reverseDeclarations));
+}
 
 test("an incomplete data message times out without expiring an idle sender", async () => {
   const sockets = new Set();

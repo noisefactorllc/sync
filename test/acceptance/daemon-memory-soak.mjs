@@ -16,22 +16,24 @@
 //   SYNC_SOAK_CYCLE     seconds between sender close/recreate cycles (default 5)
 //   SYNC_SOAK_WIDTH     frame width (default 1920)
 //   SYNC_SOAK_HEIGHT    frame height (default 1080)
+//   SYNC_SOAK_FPS       frame-rate ceiling (default 0: unlimited stress)
 //   SYNC_SOAK_GROWTH_KB allowed footprint growth after warm-up, KiB (default 8192)
 //   SYNC_SOAK_LEAKS     1 to run macOS `leaks` against the daemon before it
 //                       exits and fail on any unreachable block
 //
 // Every cycle closes the sender and its data socket, drops the control socket,
 // and builds all three again, so the run covers the lifecycle paths as well as
-// the frame path. A /health probe and a getStats round trip run every second.
+// the frame path. Health is probed every second; getStats runs at cycle boundaries.
 
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { upgrade } from '../soak/lib/ws.mjs';
 import { stampFrame } from '../soak/lib/frame.mjs';
 import { ProtocolSoak } from '../soak/engine.mjs';
 import { residentKbAsync, footprintKbAsync, runLeaks } from '../soak/lib/process-metrics.mjs';
+import { probeHealth } from '../soak/lib/health.mjs';
+import { streamFrames } from '../soak/lib/stream.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SYNCD = process.env.SYNC_DAEMON_PATH
@@ -41,31 +43,27 @@ const SECONDS = Number(process.env.SYNC_SOAK_SECONDS || 30);
 const CYCLE_SECONDS = Number(process.env.SYNC_SOAK_CYCLE || 5);
 const WIDTH = Number(process.env.SYNC_SOAK_WIDTH || 1920);
 const HEIGHT = Number(process.env.SYNC_SOAK_HEIGHT || 1080);
+const FPS = Number(process.env.SYNC_SOAK_FPS || 0);
 const GROWTH_KB = Number(process.env.SYNC_SOAK_GROWTH_KB || 8192);
 const CHECK_LEAKS = process.env.SYNC_SOAK_LEAKS === '1';
 const ORIGIN = 'https://soak.example';
 const TOKEN = 'soak-token-123';
 const MAX_BUFFERED = 3 * (64 + WIDTH * HEIGHT * 4);
-const FRAMES_PER_TURN = 64;
 
 for (const [name, value] of [['seconds', SECONDS], ['cycle', CYCLE_SECONDS],
   ['width', WIDTH], ['height', HEIGHT], ['growth', GROWTH_KB]]) {
   assert.ok(Number.isFinite(value) && value > 0, `${name} must be positive`);
 }
 assert.ok(SECONDS >= 5, 'a run shorter than five seconds has no post-warm-up window');
+assert.ok(Number.isFinite(FPS) && FPS >= 0, 'fps must be non-negative');
 
 async function health(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/health`, {
-    headers: { Origin: ORIGIN },
-    signal: AbortSignal.timeout(2000),
-  });
-  assert.equal(response.status, 200);
-  await response.arrayBuffer();
+  await probeHealth(port, { origin: ORIGIN });
 }
 
 // One frame buffer for the run: the header's sequence and timestamp and one
 // payload byte change per frame, so the sender side does no per-frame
-// allocation and the daemon, not this script, sets the pace.
+// allocation. The daemon sets the pace unless a frame-rate ceiling is supplied.
 const lifecycle = new ProtocolSoak({ daemonPath: SYNCD, origin: ORIGIN,
   token: TOKEN, width: WIDTH, height: HEIGHT });
 const FRAME = lifecycle.frame;
@@ -152,24 +150,27 @@ try {
     try {
       await openSession();
       let lastCycle = Date.now();
-      while (!stop && Date.now() - started < SECONDS * 1000) {
-        if (Date.now() - lastCycle >= CYCLE_SECONDS * 1000) {
-          await stats();
-          await closeSession();
-          await openSession();
-          lastCycle = Date.now();
-        }
-        if (data.socket.writableLength > MAX_BUFFERED) {
-          await new Promise((resolve) => setTimeout(resolve, 2));
-          continue;
-        }
-        sequence += 1;
-        await data.sendBinary(stampFrame(FRAME, sequence, BigInt(Date.now()) * 1000n));
-        sentFrames += 1;
-        // Writable callbacks can continuously replenish nextTick for tiny
-        // frames; periodically let sampling and the stop timer run.
-        if (sentFrames % FRAMES_PER_TURN === 0) await yieldToEventLoop();
-      }
+      const cycleIfDue = async () => {
+        if (Date.now() - lastCycle < CYCLE_SECONDS * 1000) return;
+        await stats();
+        await closeSession();
+        await openSession();
+        lastCycle += CYCLE_SECONDS * 1000;
+      };
+      await streamFrames({ fps: FPS,
+        shouldStop: () => stop || Date.now() - started >= SECONDS * 1000,
+        onWait: cycleIfDue,
+        writeFrame: async () => {
+          await cycleIfDue();
+          if (data.socket.writableLength > MAX_BUFFERED) {
+            await new Promise((resolve) => setTimeout(resolve, 2));
+            return;
+          }
+          sequence += 1;
+          await data.sendBinary(stampFrame(FRAME, sequence, BigInt(Date.now()) * 1000n));
+          sentFrames += 1;
+        },
+      });
       await stats();
       await closeSession();
     } catch (error) {
@@ -264,7 +265,8 @@ if (process.platform === 'win32') {
 } else {
   assert.equal(exitCode, 0, 'syncd exits cleanly on SIGTERM');
 }
-assert.ok(sentFrames > SECONDS * 2, 'the stream actually ran');
+const minimumFrames = FPS > 0 ? Math.min(SECONDS * 2, SECONDS * FPS / 2) : SECONDS * 2;
+assert.ok(sentFrames > minimumFrames, 'the stream actually ran');
 assert.ok(cycles >= Math.floor(SECONDS / CYCLE_SECONDS), 'sender lifecycle cycled');
 if (leaksReport !== null) {
   assert.ok(leaksReport.leaks !== null, `leaks produced no summary:\n${leaksReport.raw}`);
