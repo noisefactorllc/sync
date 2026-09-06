@@ -167,10 +167,12 @@ test('Windows inspectors read real daemon resident and private memory', {
       throw new Error('the real Windows private-memory inspection failed');
     } }),
   ]);
-  // Whether the daemon outlived the inspection is reported as its own fact.
-  // execFile's timeout rejects with "Command failed: powershell.exe ..." and an
-  // EMPTY stderr, which reads exactly like the process having vanished — the
-  // two were confused for two release cycles. State which happened.
+  // Whether the daemon outlived the inspection is reported as its own fact —
+  // not because a dead pid can produce the rejection above (it cannot:
+  // Get-Process on a missing pid exits zero, so execFile resolves with empty
+  // stdout and the Number.isFinite check below is what fails), but because a
+  // daemon that dies mid-inspection makes every reading describe a corpse, and
+  // that deserves to be stated rather than inferred.
   const exited = lifecycle.daemon.exitCode !== null || lifecycle.daemon.signalCode !== null;
   const daemonNote = exited
     ? ` (daemon ALREADY EXITED before inspection: code=${lifecycle.daemon.exitCode}, ` +

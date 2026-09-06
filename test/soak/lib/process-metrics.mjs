@@ -78,11 +78,17 @@ function defaultWindowsRun(expression) {
 // On a cold GitHub Actions Windows runner, two PowerShell startups issued
 // concurrently do not reliably both finish inside 10s. When execFile's timeout
 // fires it kills the child and rejects with "Command failed: powershell.exe
-// ..." and an EMPTY stderr — indistinguishable at a glance from the process
-// having vanished, because a genuinely missing pid would have put PowerShell's
-// own "Cannot find a process" text on stderr. Two CI failures, at 10,445ms and
-// 10,564ms against a 10,000ms budget, were read as a dying daemon and cost two
-// release cycles before the durations gave it away.
+// ..." and an EMPTY stderr. Two CI failures, at 10,445ms and 10,564ms against a
+// 10,000ms budget, were read as the daemon dying before inspection and cost two
+// release cycles.
+//
+// A DEAD PID CANNOT PRODUCE THAT SYMPTOM AT ALL, which is worth knowing before
+// anyone reaches for the same explanation again. Get-Process on a missing pid
+// exits ZERO: PowerShell writes a non-terminating "Cannot find a process with
+// the process identifier" to stderr and returns success, so execFile never
+// rejects. The read comes back empty, Number('') is NaN, and the caller fails
+// its is-this-a-real-number check instead. A rejection here is therefore always
+// the timeout or a spawn failure, never a vanished target.
 function defaultWindowsRunAsync(expression, timeoutMs = WINDOWS_METRIC_TIMEOUT_MS) {
   return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), {
     encoding: 'utf8', timeout: timeoutMs,
