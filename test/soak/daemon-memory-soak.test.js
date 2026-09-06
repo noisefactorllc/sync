@@ -152,15 +152,38 @@ test('Windows inspectors read real daemon resident and private memory', {
   // Inspect an idle real daemon without coupling PowerShell startup to a
   // five-second streaming window. Join both commands before cleanup, and do
   // not let a private-byte failure pass by falling back to resident memory.
+  // A GENEROUS BUDGET, BECAUSE THIS TEST ASKS A DIFFERENT QUESTION THAN A SOAK.
+  //
+  // The module's 10s default protects a sampler that must keep pace with a
+  // stream: there, a slow shell should be abandoned. Here the question is
+  // whether the inspectors can read a real daemon at all, and a cold CI runner
+  // spawning two PowerShells at once has twice exceeded 10s — 10,445ms and
+  // 10,564ms — turning a working inspector into a red build. Abandoning the
+  // read is the wrong answer to this test's question.
+  const timeoutMs = 60_000;
   const results = await Promise.allSettled([
-    residentKbAsync(lifecycle.daemon.pid),
-    footprintKbAsync(lifecycle.daemon.pid, { fallback: () => {
+    residentKbAsync(lifecycle.daemon.pid, { timeoutMs }),
+    footprintKbAsync(lifecycle.daemon.pid, { timeoutMs, fallback: () => {
       throw new Error('the real Windows private-memory inspection failed');
     } }),
   ]);
+  // Whether the daemon outlived the inspection is reported as its own fact.
+  // execFile's timeout rejects with "Command failed: powershell.exe ..." and an
+  // EMPTY stderr, which reads exactly like the process having vanished — the
+  // two were confused for two release cycles. State which happened.
+  const exited = lifecycle.daemon.exitCode !== null || lifecycle.daemon.signalCode !== null;
+  const daemonNote = exited
+    ? ` (daemon ALREADY EXITED before inspection: code=${lifecycle.daemon.exitCode}, ` +
+      `signal=${lifecycle.daemon.signalCode} — the inspector was asked to measure a dead pid)`
+    : ' (daemon was still alive, so this is the inspector, not a dead target)';
   for (const [index, result] of results.entries()) {
-    if (result.status === 'rejected') throw result.reason;
+    const label = index === 0 ? 'resident' : 'private';
+    if (result.status === 'rejected') {
+      throw new Error(`${label} memory inspection failed${daemonNote}: ${result.reason?.message}`);
+    }
     assert.ok(Number.isFinite(result.value) && result.value > 0,
-      `${index === 0 ? 'resident' : 'private'} memory must be a positive real reading`);
+      `${label} memory must be a positive real reading${daemonNote}`);
   }
+  assert.equal(exited, false,
+    'the daemon must outlive its own inspection, or the readings describe a corpse');
 });

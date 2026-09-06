@@ -68,9 +68,24 @@ function defaultWindowsRun(expression) {
   return (pid) => execFileSync('powershell.exe', powershellArgs(expression, pid), { encoding: 'utf8' });
 }
 
-function defaultWindowsRunAsync(expression) {
+// TIMEOUT IS A PARAMETER, NOT A CONSTANT, AND THE REASON IS A REAL FAILURE.
+//
+// The 10s Windows budget exists so a slow shell cannot stall a sampler that
+// has to keep pace with a stream. That is the right trade for a SOAK. It is
+// the wrong trade for a correctness test, which cares whether the number is
+// readable at all and not whether it arrived promptly.
+//
+// On a cold GitHub Actions Windows runner, two PowerShell startups issued
+// concurrently do not reliably both finish inside 10s. When execFile's timeout
+// fires it kills the child and rejects with "Command failed: powershell.exe
+// ..." and an EMPTY stderr — indistinguishable at a glance from the process
+// having vanished, because a genuinely missing pid would have put PowerShell's
+// own "Cannot find a process" text on stderr. Two CI failures, at 10,445ms and
+// 10,564ms against a 10,000ms budget, were read as a dying daemon and cost two
+// release cycles before the durations gave it away.
+function defaultWindowsRunAsync(expression, timeoutMs = WINDOWS_METRIC_TIMEOUT_MS) {
   return (pid) => execFileAsync('powershell.exe', powershellArgs(expression, pid), {
-    encoding: 'utf8', timeout: WINDOWS_METRIC_TIMEOUT_MS,
+    encoding: 'utf8', timeout: timeoutMs,
   })
     .then((result) => result.stdout);
 }
@@ -86,9 +101,11 @@ export function residentKb(pid, { run, platform = process.platform } = {}) {
 // rather than execFileSync. Same command, same parsing, same number — only
 // the call no longer blocks the event loop. See footprintKbAsync for why
 // this matters.
-export async function residentKbAsync(pid, { run, platform = process.platform } = {}) {
+export async function residentKbAsync(pid,
+    { run, platform = process.platform, timeoutMs } = {}) {
   if (platform === 'win32') {
-    return parseWindowsBytesToKb(await (run ?? defaultWindowsRunAsync(WINDOWS_RESIDENT_EXPR))(pid));
+    return parseWindowsBytesToKb(
+      await (run ?? defaultWindowsRunAsync(WINDOWS_RESIDENT_EXPR, timeoutMs))(pid));
   }
   return parseResidentKb(await (run ?? defaultPsRunAsync)(pid));
 }
@@ -154,12 +171,13 @@ export function footprintKb(pid, { run, fallback = residentKb, platform = proces
 // and manufacturing the sampling gaps a soak analyzer would otherwise blame
 // on the system under test. This does the identical work — same command,
 // same darwin-vs-fallback branch, same parsing — without blocking.
-export async function footprintKbAsync(pid, { run, fallback = residentKbAsync, platform = process.platform } = {}) {
+export async function footprintKbAsync(pid,
+    { run, fallback = residentKbAsync, platform = process.platform, timeoutMs } = {}) {
   if (platform === 'win32') {
     let reading;
     try {
       reading = parseWindowsBytesToKb(
-        await (run ?? defaultWindowsRunAsync(WINDOWS_PRIVATE_EXPR))(pid));
+        await (run ?? defaultWindowsRunAsync(WINDOWS_PRIVATE_EXPR, timeoutMs))(pid));
     } catch { reading = NaN; }
     return Number.isFinite(reading) ? reading : fallback(pid, { platform });
   }
