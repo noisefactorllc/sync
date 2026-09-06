@@ -89,19 +89,27 @@ export class ProtocolSoak {
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
     // WHICH DAEMON PATH THIS RUN ACTUALLY EXERCISES.
     //
-    // --test-receiver accepts frames and drops them. It never reaches a
-    // publisher, so a run using it says nothing about publisher-side work —
-    // and the camera publisher does real per-frame work that scales with the
-    // SOURCE frame: every frame is scaled and permuted into a FIXED 1920x1080
-    // canvas (camera_identity.hpp: the one format the camera advertises), so
-    // a 1440p source costs 1.78x the per-frame CPU of a 1080p one.
+    // --test-receiver DOES reach a publisher: run_server constructs a
+    // TestPublisher (server.cpp), a real FramePublisher with per-sender
+    // registration whose publish() runs a byte-at-a-time FNV-1a over the whole
+    // payload. So a --test-receiver run is not "no publisher work" — it is a
+    // full O(payload) scalar pass with a serial dependency chain, and the
+    // throughput ceiling such a run measures is plausibly that loop rather
+    // than the socket path. Read its MB/s as harness capacity, not protocol
+    // capacity.
+    //
+    // What --test-receiver never constructs is the CAMERA publisher, and that
+    // is the path with the work this option exists to reach: every frame is
+    // scaled and permuted into a FIXED 1920x1080 canvas (camera_identity.hpp:
+    // the one format the camera advertises), so a 1440p source costs 1.78x the
+    // per-frame CPU of a 1080p one.
     //
     // That matters because a churn experiment on --test-receiver showed the
     // daemon losing only 6% of pixel throughput at 1440p while the browser
     // plane lost a third to a half — and the browser plane publishes to the
-    // camera. The receive path was exonerated; the camera publish path was
-    // never executed. Making the publisher selectable is what lets the same
-    // rotation be run against the path that does the work.
+    // camera. The camera publish path was never executed. Making the publisher
+    // selectable is what lets the same rotation be run against it — comparing
+    // two different per-frame costs, not work against no work.
     this.publisherArgs = publisher ? ['--publisher', publisher] : ['--test-receiver'];
     // GEOMETRY CHURN ON THE PROTOCOL PLANE.
     //
