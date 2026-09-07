@@ -39,6 +39,14 @@ These issues stop Sync from working today. Each entry includes a workaround
 where one exists. Keep this list current. Add an entry when a report is
 diagnosed. Remove it when the fix ships.
 
+- **Delivered frame rate falls slowly over a multi-hour session with the
+  camera publisher.** Measured over eight hours on 0.2.56 with Noisedeck: the
+  page renders at full speed for the whole run, but the daemon accepts fewer
+  frames each hour, from about 28 to about 15–22 frames per second.
+  Restarting the sender does not reset it. A run with `--test-receiver`
+  instead of `--publisher camera` stays flat, so the cause is in the camera
+  path (`native/src/camera/`). Under investigation. Workaround: quit and
+  reopen Sync.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
