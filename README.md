@@ -53,6 +53,13 @@ diagnosed. Remove it when the fix ships.
   Noisedeck's shipped SDK 0.1.5 fixes a separate sending-schedule defect that
   could admit only every other rendered frame. This does not establish an
   aging fix or guarantee 60 distinct delivered frames per second.
+  If Chrome rendering and delivery both settle at 30 FPS on battery power,
+  connect the computer to power and check Settings > Performance > Energy
+  Saver. Chrome can limit frame cadence when battery charge is low. This
+  check does not explain delivery stalls while rendering remains at 60 FPS.
+  The [30-minute direct-receiver report](https://sync.noisedeck.app/performance/research-2026-09-08-direct-rgba-web-30m/)
+  records both symptoms. Its experimental path still has unresolved stalls;
+  it is not a released fix.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
