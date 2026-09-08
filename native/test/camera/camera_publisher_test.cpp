@@ -1,6 +1,7 @@
 #include "test_harness.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -9,6 +10,7 @@
 
 #include <sync/frame_receiver.hpp>
 #include <sync/platform/camera_identity.hpp>
+#include <sync/platform/camera_frame_fitter.hpp>
 #include <sync/platform/camera_publisher.hpp>
 #include <sync/platform/camera_sink.hpp>
 
@@ -270,4 +272,125 @@ SYNC_TEST(camera_publisher_fits_many_frames_with_stable_output) {
     SYNC_REQUIRE((sink.last_center_pixel == std::array<std::uint8_t, 4>{0, 0, 255, 255}));
   }
   SYNC_REQUIRE(sink.submitted == 32);
+}
+
+namespace {
+
+struct WrittenSink final : CameraSink {
+  using WriteResult = noisefactor::sync::camera::CameraSinkWrite;
+  static constexpr std::size_t stride = 1920 * 4 + 64;
+  std::vector<std::byte> output = std::vector<std::byte>(stride * 1080, std::byte{0xA7});
+  bool capacity = true;
+  WriteResult result = WriteResult::Accepted;
+  std::size_t direct_calls = 0, writer_calls = 0, published = 0, legacy_calls = 0;
+  std::uint64_t timestamp = 0;
+
+  auto available() const noexcept -> bool override { return true; }
+  auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason override {
+    return CameraSinkUnavailableReason::None;
+  }
+  auto has_capacity() const noexcept -> bool override { return capacity; }
+  auto submit(const CameraSinkFrame&) noexcept -> CameraSinkSubmit override {
+    ++legacy_calls;
+    return CameraSinkSubmit::Accepted;
+  }
+  auto submit_written(noisefactor::sync::camera::CameraFrameWriter writer, void* context,
+                      std::uint64_t time) noexcept -> WriteResult override {
+    ++direct_calls;
+    timestamp = time;
+    if (result != WriteResult::Accepted) return result;
+    ++writer_calls;
+    if (!writer(context, output, stride)) return WriteResult::Failed;
+    ++published;
+    return WriteResult::Accepted;
+  }
+};
+
+}  // namespace
+
+SYNC_TEST(camera_publisher_uses_direct_storage_with_the_actual_stride_synchronously) {
+  WrittenSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  auto source = kRedPayload;
+  const auto unchanged = source;
+  SYNC_REQUIRE(publisher.publish("a", make_frame(source)) == PublishResult::Accepted);
+  SYNC_REQUIRE(sink.direct_calls == 1 && sink.writer_calls == 1 && sink.published == 1);
+  SYNC_REQUIRE(sink.legacy_calls == 0 && sink.timestamp == 5'000);
+  SYNC_REQUIRE(source == unchanged);
+  // The fitted output is complete before publish returns; changing the borrowed
+  // input after that return does not alter the owned destination.
+  source.fill(std::byte{0});
+  const std::size_t center = 540 * sink.stride + 960 * 4;
+  SYNC_REQUIRE(sink.output[center + 2] == std::byte{255});
+  SYNC_REQUIRE(sink.output[center + 3] == std::byte{255});
+  for (std::size_t y = 0; y < 1080; ++y) {
+    SYNC_REQUIRE(std::all_of(sink.output.begin() + y * sink.stride + 7680,
+                            sink.output.begin() + (y + 1) * sink.stride,
+                            [](std::byte value) { return value == std::byte{0xA7}; }));
+  }
+}
+
+SYNC_TEST(camera_publisher_falls_back_only_when_direct_writing_is_unsupported) {
+  for (auto result : {WrittenSink::WriteResult::Unsupported,
+                      WrittenSink::WriteResult::Backpressured, WrittenSink::WriteResult::Failed}) {
+    WrittenSink sink;
+    sink.result = result;
+    CameraFramePublisher publisher(sink);
+    SYNC_REQUIRE(publisher.open_sender("a", "first"));
+    const auto expected = result == WrittenSink::WriteResult::Unsupported ? PublishResult::Accepted
+        : result == WrittenSink::WriteResult::Backpressured ? PublishResult::Backpressured
+                                                          : PublishResult::Failed;
+    SYNC_REQUIRE(publisher.publish("a", make_frame(kRedPayload)) == expected);
+    SYNC_REQUIRE(sink.direct_calls == 1 && sink.writer_calls == 0);
+    SYNC_REQUIRE(sink.legacy_calls == (result == WrittenSink::WriteResult::Unsupported ? 1 : 0));
+  }
+}
+
+SYNC_TEST(camera_publisher_direct_capacity_and_writer_failure_never_publish_partial_pixels) {
+  WrittenSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  auto invalid = make_frame(kRedPayload);
+  invalid.pixel_format = 9;
+  sink.capacity = false;
+  SYNC_REQUIRE(publisher.publish("a", invalid) == PublishResult::Backpressured);
+  SYNC_REQUIRE(sink.direct_calls == 0 && sink.writer_calls == 0);
+  sink.capacity = true;
+  SYNC_REQUIRE(publisher.publish("a", invalid) == PublishResult::Failed);
+  SYNC_REQUIRE(sink.direct_calls == 1 && sink.writer_calls == 1);
+  SYNC_REQUIRE(sink.published == 0 && sink.legacy_calls == 0);
+}
+
+SYNC_TEST(camera_publisher_direct_pixels_match_legacy_fitting_across_alpha_and_size_changes) {
+  using noisefactor::sync::camera::CameraFitScratch;
+  using noisefactor::sync::camera::fit_camera_frame;
+  WrittenSink sink;
+  CameraFramePublisher publisher(sink);
+  SYNC_REQUIRE(publisher.open_sender("a", "first"));
+  CameraFitScratch scratch;
+  std::vector<std::byte> reference(7680 * 1080);
+  const std::array<std::array<std::uint32_t, 2>, 4> sizes{
+      {{1920, 1080}, {641, 479}, {1920, 800}, {1920, 1080}}};
+  for (auto size : sizes) for (std::uint16_t alpha : {1, 2, 3}) {
+    const auto stride = size[0] * 4 + 68;
+    std::vector<std::byte> source(static_cast<std::size_t>(stride) * size[1], std::byte{0xDD});
+    for (std::uint32_t y = 0; y < size[1]; ++y) for (std::uint32_t x = 0; x < size[0]; ++x) {
+      const std::size_t offset = static_cast<std::size_t>(y) * stride + x * 4;
+      source[offset] = static_cast<std::byte>((x * 31 + y) & 255);
+      source[offset + 1] = static_cast<std::byte>((x + y * 19) & 255);
+      source[offset + 2] = static_cast<std::byte>((x * 7 + y * 3) & 255);
+      source[offset + 3] = static_cast<std::byte>((x + y * 17) & 255);
+    }
+    auto frame = make_frame(source);
+    frame.width = size[0]; frame.height = size[1]; frame.row_stride = stride;
+    frame.payload_bytes = static_cast<std::uint32_t>(source.size()); frame.alpha_mode = alpha;
+    SYNC_REQUIRE(fit_camera_frame(frame, reference, 7680, kCanvas, scratch));
+    SYNC_REQUIRE(publisher.publish("a", frame) == PublishResult::Accepted);
+    for (std::size_t row = 0; row < 1080; ++row) {
+      SYNC_REQUIRE(std::equal(reference.begin() + row * 7680, reference.begin() + (row + 1) * 7680,
+                              sink.output.begin() + row * sink.stride));
+    }
+  }
+  SYNC_REQUIRE(sink.published == 12 && sink.legacy_calls == 0);
 }

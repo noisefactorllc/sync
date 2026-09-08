@@ -1,4 +1,5 @@
 #include <sync/platform/cmio_camera_sink.hpp>
+#include "cmio_frame_submission.hpp"
 
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -177,6 +178,70 @@ CmioCameraSink::CmioCameraSink(Options options) : impl_(std::make_unique<Impl>(o
 
 CmioCameraSink::~CmioCameraSink() = default;
 
+auto detail::submit_cmio_frame(CVPixelBufferPoolRef pool, CMVideoFormatDescriptionRef& format,
+                               CMSimpleQueueRef queue, std::size_t depth,
+                               CameraFrameWriter writer, void* context) noexcept -> CameraSinkSubmit {
+  if (pool == nullptr || queue == nullptr) return CameraSinkSubmit::Failed;
+  struct Operations {
+    using Pixels = CVPixelBufferRef;
+    using Sample = CMSampleBufferRef;
+    CVPixelBufferPoolRef pool;
+    CMVideoFormatDescriptionRef& format;
+    CMSimpleQueueRef queue;
+    std::size_t depth;
+
+    auto has_capacity() const noexcept -> bool {
+      return static_cast<std::size_t>(CMSimpleQueueGetCount(queue)) < depth;
+    }
+    auto allocate(Pixels& pixels) noexcept -> bool {
+      return CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixels) == kCVReturnSuccess;
+    }
+    auto lock(Pixels pixels) noexcept -> bool {
+      return CVPixelBufferLockBaseAddress(pixels, 0) == kCVReturnSuccess;
+    }
+    auto unlock(Pixels pixels) noexcept -> bool {
+      return CVPixelBufferUnlockBaseAddress(pixels, 0) == kCVReturnSuccess;
+    }
+    void release_pixels(Pixels pixels) noexcept { CVPixelBufferRelease(pixels); }
+    auto destination(Pixels pixels) const noexcept -> WritableCameraFrame {
+      auto* base = static_cast<std::byte*>(CVPixelBufferGetBaseAddress(pixels));
+      if (base == nullptr || CVPixelBufferIsPlanar(pixels)) return {};
+      return {.bytes = {base, CVPixelBufferGetDataSize(pixels)},
+              .stride = CVPixelBufferGetBytesPerRow(pixels),
+              .width = CVPixelBufferGetWidth(pixels), .height = CVPixelBufferGetHeight(pixels)};
+    }
+    auto prepare_format(Pixels pixels) noexcept -> bool {
+      CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
+                            kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+      CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey,
+                            kCVImageBufferTransferFunction_sRGB, kCVAttachmentMode_ShouldPropagate);
+      if (format != nullptr) return true;
+      CMVideoFormatDescriptionRef created = nullptr;
+      const OSStatus result = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
+                                                                          pixels, &created);
+      if (result != noErr || created == nullptr) {
+        if (created != nullptr) CFRelease(created);
+        return false;
+      }
+      format = created;
+      return true;
+    }
+    auto make_sample(Pixels pixels, Sample& sample) const noexcept -> bool {
+      const CMTime pts = CMTimeMake(static_cast<int64_t>(host_time_ns()), 1'000'000'000);
+      CMSampleTimingInfo timing{
+          .duration = CMTimeMake(1, static_cast<int32_t>(kMaximumFramesPerSecond)),
+          .presentationTimeStamp = pts,
+          .decodeTimeStamp = kCMTimeInvalid,
+      };
+      return CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixels, true, nullptr, nullptr,
+                                                format, &timing, &sample) == noErr;
+    }
+    auto enqueue(Sample sample) noexcept -> bool { return CMSimpleQueueEnqueue(queue, sample) == noErr; }
+    void release_sample(Sample sample) noexcept { CFRelease(sample); }
+  } operations{pool, format, queue, depth};
+  return submit_camera_frame(operations, writer, context);
+}
+
 auto CmioCameraSink::available() const noexcept -> bool {
   return impl_->reason == CameraSinkUnavailableReason::None;
 }
@@ -197,59 +262,39 @@ auto CmioCameraSink::has_capacity() const noexcept -> bool {
 auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {
   if (frame.width != kCanvas.width || frame.height != kCanvas.height ||
       frame.row_stride < static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel ||
-      frame.bgra.size() < frame.row_stride * kCanvas.height) {
+      frame.row_stride > frame.bgra.size() / kCanvas.height) {
     return CameraSinkSubmit::Failed;
   }
   if (!available()) return CameraSinkSubmit::Failed;
-  if (static_cast<std::size_t>(CMSimpleQueueGetCount(impl_->queue)) >= impl_->depth) {
-    return CameraSinkSubmit::Backpressured;
-  }
-
-  CVPixelBufferRef pixels = nullptr;
-  if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, impl_->pool, &pixels) !=
-          kCVReturnSuccess ||
-      pixels == nullptr) {
-    return CameraSinkSubmit::Backpressured;
-  }
-  CVPixelBufferLockBaseAddress(pixels, 0);
-  auto* destination = static_cast<std::byte*>(CVPixelBufferGetBaseAddress(pixels));
-  const std::size_t destination_stride = CVPixelBufferGetBytesPerRow(pixels);
-  const std::size_t row_bytes = static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
-  for (std::uint32_t row = 0; row < kCanvas.height; ++row) {
-    std::memcpy(destination + static_cast<std::size_t>(row) * destination_stride,
-                frame.bgra.data() + static_cast<std::size_t>(row) * frame.row_stride, row_bytes);
-  }
-  CVPixelBufferUnlockBaseAddress(pixels, 0);
-  CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
-                        kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-  CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey,
-                        kCVImageBufferTransferFunction_sRGB, kCVAttachmentMode_ShouldPropagate);
-
-  if (impl_->format == nullptr &&
-      CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixels, &impl_->format) !=
-          noErr) {
-    impl_->format = nullptr;
-    CVPixelBufferRelease(pixels);
-    return CameraSinkSubmit::Failed;
-  }
-  const CMTime pts = CMTimeMake(static_cast<int64_t>(host_time_ns()), 1'000'000'000);
-  CMSampleTimingInfo timing{
-      .duration = CMTimeMake(1, static_cast<int32_t>(kMaximumFramesPerSecond)),
-      .presentationTimeStamp = pts,
-      .decodeTimeStamp = kCMTimeInvalid,
+  // Copy the small borrowed view, not its pixels; the callback remains const
+  // with respect to the caller's frame without casting away constness.
+  CameraSinkFrame source = frame;
+  const auto copy = [](void* context, std::span<std::byte> destination,
+                        std::size_t destination_stride) noexcept -> bool {
+    const auto& source = *static_cast<const CameraSinkFrame*>(context);
+    const std::size_t row_bytes = static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
+    for (std::uint32_t row = 0; row < kCanvas.height; ++row) {
+      std::memcpy(destination.data() + static_cast<std::size_t>(row) * destination_stride,
+                  source.bgra.data() + static_cast<std::size_t>(row) * source.row_stride, row_bytes);
+    }
+    return true;
   };
-  CMSampleBufferRef sample = nullptr;
-  const OSStatus status = CMSampleBufferCreateForImageBuffer(
-      kCFAllocatorDefault, pixels, true, nullptr, nullptr, impl_->format, &timing, &sample);
-  CVPixelBufferRelease(pixels);
-  if (status != noErr || sample == nullptr) return CameraSinkSubmit::Failed;
-  // The queue takes over this reference: the extension releases the buffer
-  // after consuming it, so there is deliberately no CFRelease on success.
-  if (CMSimpleQueueEnqueue(impl_->queue, sample) != noErr) {
-    CFRelease(sample);
-    return CameraSinkSubmit::Backpressured;
+  return detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
+                                   copy, &source);
+}
+
+auto CmioCameraSink::submit_written(CameraFrameWriter writer, void* context,
+                                    std::uint64_t presentation_time_us) noexcept -> CameraSinkWrite {
+  // Preserve the existing camera clock: samples are stamped at submission.
+  (void)presentation_time_us;
+  if (!available()) return CameraSinkWrite::Failed;
+  switch (detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
+                                    writer, context)) {
+    case CameraSinkSubmit::Accepted: return CameraSinkWrite::Accepted;
+    case CameraSinkSubmit::Backpressured: return CameraSinkWrite::Backpressured;
+    case CameraSinkSubmit::Failed: return CameraSinkWrite::Failed;
   }
-  return CameraSinkSubmit::Accepted;
+  return CameraSinkWrite::Failed;
 }
 
 }  // namespace noisefactor::sync::camera

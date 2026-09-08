@@ -23,8 +23,7 @@ struct CameraFramePublisher::Impl {
 
   explicit Impl(CameraSink& sink_ref)
       : sink(sink_ref),
-        canvas_stride(static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel),
-        canvas(canvas_stride * kCanvas.height) {}
+        canvas_stride(static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel) {}
 
   CameraSink& sink;
   std::uint64_t open_counter = 0;
@@ -110,6 +109,34 @@ auto CameraFramePublisher::publish(std::string_view sender_id,
   // Ask before converting: the fit is the expensive step, and a sink whose
   // queue is full would only throw the result away.
   if (!impl_->sink.has_capacity()) return PublishResult::Backpressured;
+  struct FitContext {
+    const protocol::FrameView& frame;
+    CameraFitScratch& scratch;
+  } context{frame, impl_->scratch};
+  const auto write = [](void* opaque, std::span<std::byte> destination,
+                         std::size_t stride) noexcept -> bool {
+    auto& fit = *static_cast<FitContext*>(opaque);
+    return fit_camera_frame(fit.frame, destination, stride, kCanvas, fit.scratch);
+  };
+  switch (impl_->sink.submit_written(write, &context, frame.presentation_time_us)) {
+    case CameraSinkWrite::Accepted:
+      return PublishResult::Accepted;
+    case CameraSinkWrite::Backpressured:
+      return PublishResult::Backpressured;
+    case CameraSinkWrite::Failed:
+      return PublishResult::Failed;
+    case CameraSinkWrite::Unsupported:
+      break;
+  }
+  // Sinks with owned writable storage never need the extra full-size canvas.
+  // Keep legacy storage once allocated, rather than allocate on every frame.
+  if (impl_->canvas.empty()) {
+    try {
+      impl_->canvas.resize(impl_->canvas_stride * kCanvas.height);
+    } catch (...) {
+      return PublishResult::Failed;
+    }
+  }
   if (!fit_camera_frame(frame, impl_->canvas, impl_->canvas_stride, kCanvas, impl_->scratch)) {
     return PublishResult::Failed;
   }

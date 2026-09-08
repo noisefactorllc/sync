@@ -118,6 +118,23 @@ class MemorySocket {
   }
 }
 
+class TaskBufferedSocket extends MemorySocket {
+  constructor() {
+    super();
+    this.peakBufferedAmount = 0;
+  }
+
+  send(message) {
+    super.send(message);
+    this.bufferedAmount += message.byteLength;
+    this.peakBufferedAmount = Math.max(this.peakBufferedAmount, this.bufferedAmount);
+  }
+
+  drain() {
+    this.bufferedAmount = 0;
+  }
+}
+
 function createSink({ socket = new MemorySocket(), exportQueue = new MemoryExportQueue(), maxBufferedBytes = 1024, timeOrigin = 1723305600000 } = {}) {
   const sink = new SyncFrameSink({
     socket,
@@ -268,6 +285,249 @@ test('submit reserves the full encoded frame budget before starting readback', (
   assert.equal(exportQueue.polls, 1);
   assert.equal(exportQueue.pending.length, 0);
   assert.equal(sink.stats.droppedBackpressure, 1);
+});
+
+test('poll completion admits every next render task within a one-frame socket budget', { timeout: 1000 }, () => {
+  const socket = new TaskBufferedSocket();
+  const exportQueue = new MemoryExportQueue({ capacity: 1 });
+  exportQueue.poll = function () {
+    this.polls += 1;
+    if (this.pending.length) this.complete(FRAME);
+  };
+  const sink = new SyncFrameSink({ socket, exportQueue, maxBufferedFrames: 1, clock: { timeOrigin: 0 } });
+  sink.configure(DESCRIPTOR);
+  const accepted = [];
+
+  for (let tick = 1; tick <= 12; tick += 1) {
+    socket.drain(); // Browser transport drains between render tasks, never inside send().
+    accepted.push(sink.submit(`texture-${tick}`, tick));
+  }
+
+  assert.deepEqual(accepted, Array(12).fill(true));
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.equal(socket.peakBufferedAmount, 80);
+  assert.equal(exportQueue.pending.length, 1);
+  assert.deepEqual(sink.stats, { accepted: 12, droppedBusy: 0, droppedBackpressure: 0, sent: 11, failed: 0 });
+});
+
+test('pressure inherited from an earlier task rejects admission even if poll drains it', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink({ maxBufferedBytes: 80 });
+  socket.bufferedAmount = 1;
+  exportQueue.poll = () => { socket.bufferedAmount = 0; };
+
+  assert.equal(sink.submit('pressured', 1), false);
+  assert.equal(exportQueue.pending.length, 0);
+  assert.equal(sink.stats.droppedBackpressure, 1);
+  assert.equal(sink.submit('next-task', 2), true);
+});
+
+test('multiple poll completions and an immediate enqueue completion cannot exceed one encoded frame', { timeout: 1000 }, () => {
+  const socket = new TaskBufferedSocket();
+  const exportQueue = new MemoryExportQueue();
+  const sink = new SyncFrameSink({ socket, exportQueue, maxBufferedFrames: 1, clock: { timeOrigin: 0 } });
+  sink.configure(DESCRIPTOR);
+  assert.equal(sink.submit('first', 1), true);
+  assert.equal(sink.submit('second', 2), true);
+  exportQueue.poll = function () {
+    while (this.pending.length) this.complete(FRAME);
+  };
+  const enqueue = exportQueue.enqueue.bind(exportQueue);
+  exportQueue.enqueue = function (...args) {
+    const accepted = enqueue(...args);
+    if (accepted) this.complete(FRAME);
+    return accepted;
+  };
+
+  assert.equal(sink.submit('third', 3), true);
+  assert.equal(socket.peakBufferedAmount, 80);
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [1]);
+  assert.deepEqual(sink.stats, { accepted: 3, droppedBusy: 0, droppedBackpressure: 2, sent: 1, failed: 0 });
+});
+
+test('padded-stride completions still obey the configured socket byte limit', { timeout: 1000 }, () => {
+  const socket = new TaskBufferedSocket();
+  const exportQueue = new MemoryExportQueue();
+  const sink = new SyncFrameSink({ socket, exportQueue, maxBufferedFrames: 1, clock: { timeOrigin: 0 } });
+  sink.configure(DESCRIPTOR);
+  assert.equal(sink.submit('padded', 1), true);
+  exportQueue.complete({ ...FRAME, rowStride: 12, data: new Uint8Array(24) });
+
+  assert.equal(socket.sent.length, 0);
+  assert.equal(sink.stats.droppedBackpressure, 1);
+  assert.equal(sink.submit('tight', 2), true);
+  exportQueue.complete(FRAME);
+  assert.equal(socket.peakBufferedAmount, 80);
+});
+
+test('asynchronous completion copies borrowed export bytes before the callback returns', { timeout: 1000 }, async () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  const borrowed = new Uint8Array(FRAME.data);
+  assert.equal(sink.submit('async', 1), true);
+
+  await new Promise((resolve) => {
+    queueMicrotask(() => {
+      exportQueue.complete({ ...FRAME, data: borrowed });
+      borrowed.fill(0);
+      resolve();
+    });
+  });
+
+  assert.equal(socket.sent.length, 1);
+  assert.deepEqual([...new Uint8Array(socket.sent[0], 64)], [...FRAME.data]);
+  assert.equal(sink.stats.sent, 1);
+});
+
+test('reconfigure during poll invalidates admission and preserves global sequence order', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  exportQueue.poll = () => sink.configure({ ...DESCRIPTOR, colorSpace: 'display-p3' });
+
+  assert.equal(sink.submit('old-configuration', 1), false);
+  assert.equal(exportQueue.history.length, 0);
+  assert.equal(sink.stats.failed, 1);
+  exportQueue.poll = () => {};
+  assert.equal(sink.submit('new-configuration', 2), true);
+  exportQueue.complete(FRAME);
+  assert.equal(decodeFrameHeaderV1(socket.sent[0]).sequence, 2);
+  assert.equal(decodeFrameHeaderV1(socket.sent[0]).colorSpace, COLOR_SPACE.DISPLAY_P3);
+});
+
+test('close during poll fails admission without enqueueing on the closed queue', { timeout: 1000 }, () => {
+  const { sink, exportQueue } = configuredSink();
+  exportQueue.poll = () => sink.close();
+  exportQueue.enqueue = () => { throw new Error('closed queue must not be touched'); };
+
+  assert.equal(sink.submit('closed-during-poll', 1), false);
+  assert.equal(exportQueue.history.length, 0);
+  assert.equal(sink.stats.failed, 1);
+  assert.equal(sink.stats.droppedBusy, 0);
+});
+
+test('socket must remain open across the admission decision and poll', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  socket.readyState = 0;
+  exportQueue.poll = () => { socket.readyState = 1; };
+
+  assert.equal(sink.submit('opening-during-poll', 1), false);
+  assert.equal(exportQueue.history.length, 0);
+  assert.equal(sink.stats.failed, 1);
+  exportQueue.poll = () => { socket.readyState = 3; };
+  assert.equal(sink.submit('closing-during-poll', 2), false);
+  assert.equal(exportQueue.history.length, 0);
+  assert.equal(sink.stats.failed, 2);
+});
+
+test('callbacks from a previous configuration cannot use a new descriptor with identical dimensions', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('old', 1), true);
+  sink.configure({ ...DESCRIPTOR, colorSpace: 'display-p3' });
+  assert.equal(sink.submit('current', 2), true);
+
+  exportQueue.complete(FRAME);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(sink.stats.failed, 1);
+  exportQueue.complete(FRAME);
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [2]);
+  assert.equal(decodeFrameHeaderV1(socket.sent[0]).colorSpace, COLOR_SPACE.DISPLAY_P3);
+});
+
+test('duplicate and reordered completions never send a non-increasing sequence', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('older', 1), true);
+  assert.equal(sink.submit('newer', 2), true);
+  const duplicate = exportQueue.history[1];
+  exportQueue.complete(FRAME, 1);
+  exportQueue.complete(FRAME);
+  duplicate.onFrame(FRAME, duplicate.timestamp, duplicate.context);
+  assert.equal(sink.submit('next', 3), true);
+  exportQueue.complete(FRAME);
+
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [2, 3]);
+  assert.equal(sink.stats.failed, 2);
+});
+
+test('a failed send consumes its completion and cannot be replayed later', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('throws', 1), true);
+  const duplicate = exportQueue.history[0];
+  socket.sendError = new Error('send failed');
+  exportQueue.complete(FRAME);
+  socket.sendError = null;
+  duplicate.onFrame(FRAME, duplicate.timestamp, duplicate.context);
+  assert.equal(sink.submit('recovers', 2), true);
+  exportQueue.complete(FRAME);
+
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [2]);
+  assert.equal(sink.stats.failed, 2);
+});
+
+test('failed configure invalidates pending exports until a successful configuration', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  assert.equal(sink.submit('old', 1), true);
+  const configure = exportQueue.configure.bind(exportQueue);
+  const error = new Error('configure failed');
+  exportQueue.configure = () => { throw error; };
+
+  assert.throws(() => sink.configure({ ...DESCRIPTOR }), (caught) => caught === error);
+  assert.equal(sink.stats.failed, 1);
+  exportQueue.complete(FRAME);
+  assert.equal(sink.submit('unconfigured', 2), false);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(sink.stats.failed, 3);
+  exportQueue.configure = configure;
+  sink.configure(DESCRIPTOR);
+  assert.equal(sink.submit('recovered', 3), true);
+  exportQueue.complete(FRAME);
+  assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [3]);
+});
+
+test('an initially available queue retains pre-configuration submit compatibility', { timeout: 1000 }, () => {
+  const { sink, exportQueue } = createSink();
+  exportQueue.configure(DESCRIPTOR);
+
+  assert.equal(sink.submit('available-before-sink-configure', 1), true);
+  assert.equal(exportQueue.pending.length, 1);
+  assert.equal(sink.stats.accepted, 1);
+});
+
+test('configure after close leaves both closed dependencies alone', { timeout: 1000 }, () => {
+  const { sink, exportQueue } = configuredSink();
+  sink.close();
+  exportQueue.configure = () => { throw new Error('closed queue must not be touched'); };
+
+  assert.doesNotThrow(() => sink.configure(DESCRIPTOR));
+  assert.equal(exportQueue.closeCalls, 1);
+});
+
+test('enqueue reconfiguration invalidates a successful return and its later callback', { timeout: 1000 }, () => {
+  const { sink, socket, exportQueue } = configuredSink();
+  const enqueue = exportQueue.enqueue.bind(exportQueue);
+  exportQueue.enqueue = (...args) => {
+    const accepted = enqueue(...args);
+    sink.configure({ ...DESCRIPTOR });
+    return accepted;
+  };
+
+  assert.equal(sink.submit('reconfigured-during-enqueue', 1), false);
+  assert.equal(sink.stats.accepted, 0);
+  assert.equal(sink.stats.failed, 1);
+  exportQueue.complete(FRAME);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(sink.stats.failed, 2);
+});
+
+test('throwing poll or enqueue fails only that submit and allows later progress', { timeout: 1000 }, () => {
+  for (const method of ['poll', 'enqueue']) {
+    const { sink, socket, exportQueue } = configuredSink();
+    const original = exportQueue[method].bind(exportQueue);
+    exportQueue[method] = () => { throw new Error(`${method} failed`); };
+
+    assert.equal(sink.submit('throws', 1), false);
+    assert.deepEqual(sink.stats, { accepted: 0, droppedBusy: 0, droppedBackpressure: 0, sent: 0, failed: 1 });
+    exportQueue[method] = original;
+    assert.equal(sink.submit('recovered', 2), true);
+    exportQueue.complete(FRAME);
+    assert.deepEqual(socket.sent.map((message) => decodeFrameHeaderV1(message).sequence), [2]);
+  }
 });
 
 test('submit drops busy when the bounded export ring has no slot', () => {
@@ -544,4 +804,3 @@ test('a closed sink touches neither the export queue nor the socket', () => {
   assert.equal(socket.sent.length, 0);
   assert.equal(sink.stats.failed, 2);
 });
-

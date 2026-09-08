@@ -43,6 +43,8 @@ class CmioCameraSink final : public CameraSink {
   [[nodiscard]] auto unavailable_status() const noexcept -> std::int32_t override;
   [[nodiscard]] auto has_capacity() const noexcept -> bool override;
   auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit override;
+  auto submit_written(CameraFrameWriter writer, void* context,
+                       std::uint64_t presentation_time_us) noexcept -> CameraSinkWrite override;
 
  private:
   struct Impl;

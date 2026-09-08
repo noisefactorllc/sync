@@ -128,6 +128,19 @@ enum class CameraSinkSubmit : std::uint8_t {
   Failed,
 };
 
+enum class CameraSinkWrite : std::uint8_t {
+  Unsupported,
+  Accepted,
+  Backpressured,
+  Failed,
+};
+
+// Called at most once, synchronously, with sink-owned writable BGRA storage.
+// Neither the sink nor the writer may retain the context or writable view.
+// False cancels publication; partially written pixels must never be submitted.
+using CameraFrameWriter = bool (*)(void* context, std::span<std::byte> bgra,
+                                   std::size_t row_stride) noexcept;
+
 // Where fitted frames go. The production sinks are the CoreMediaIO client in
 // cmio_camera_sink.hpp and the shared-ring writer in mf_camera_sink.hpp; tests
 // inject a fake.
@@ -148,6 +161,11 @@ class CameraSink {
   [[nodiscard]] virtual auto has_capacity() const noexcept -> bool { return true; }
   // The frame is a borrowed view valid only for this call.
   virtual auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit = 0;
+  // Only Unsupported permits the caller to fit into its legacy canvas instead.
+  // An implementation must check capacity before invoking the writer and finish
+  // all use of the writer/context before returning, including on failure.
+  virtual auto submit_written(CameraFrameWriter, void*, std::uint64_t) noexcept
+      -> CameraSinkWrite { return CameraSinkWrite::Unsupported; }
 };
 
 }  // namespace noisefactor::sync::camera
