@@ -29,9 +29,11 @@
 #include <objbase.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -170,7 +172,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::FILE* out = std::fopen(out_path, "wb");
+  // std::ofstream, not fopen: the CI toolchain treats fopen as C4996 under /WX.
+  // Binary mode keeps the newline exactly one byte, so the JSONL stays stable.
+  std::ofstream out(out_path, std::ios::binary);
   if (!out) { std::fprintf(stderr, "cannot open %s\n", out_path); return 1; }
 
   // Producer: submit marked frames at the target cadence on its own thread.
@@ -200,10 +204,12 @@ int main(int argc, char** argv) {
   });
 
   DeliveryAccounting acc(target, [&](const DeliverySecond& d) {
-    std::fprintf(out,
+    std::array<char, 192> line{};
+    std::snprintf(line.data(), line.size(),
         "{\"t\":%llu,\"new\":%u,\"repeat\":%u,\"empty\":%u,\"outOfOrder\":%u}\n",
         static_cast<unsigned long long>(d.second), d.newFrames, d.repeats, d.empties, d.outOfOrder);
-    std::fflush(out);
+    out << line.data();
+    out.flush();
   });
 
   const std::uint64_t start = now_ms();
@@ -215,7 +221,8 @@ int main(int argc, char** argv) {
   producer.join();
 
   const auto sum = acc.finish();
-  std::fprintf(out,
+  std::array<char, 512> summary{};
+  std::snprintf(summary.data(), summary.size(),
       "{\"type\":\"summary\",\"seconds\":%llu,\"submitted\":%llu,\"totalNew\":%llu,"
       "\"totalRepeats\":%llu,\"totalEmpties\":%llu,\"totalOutOfOrder\":%llu,"
       "\"meanDeliveredFps\":%.2f,\"maxSecondFps\":%u,\"minSecondFps\":%u,"
@@ -228,7 +235,8 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(sum.totalOutOfOrder),
       sum.meanDeliveredFps, sum.maxSecondFps, sum.minSecondFps,
       sum.sustainedTarget ? "true" : "false", sum.target, sum.firstThirdFps, sum.lastThirdFps);
-  std::fclose(out);
+  out << summary.data();
+  out.close();
   source->Shutdown();
 
   std::printf("delivered probe done: %llu s, mean %.1f fps, sustained %s\n",
