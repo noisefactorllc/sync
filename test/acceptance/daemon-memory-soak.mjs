@@ -179,7 +179,7 @@ try {
   })();
 
   sampler = setInterval(() => {
-    // vmmap and PowerShell can exceed the daemon's header/frame deadlines.
+    // footprint(1) and PowerShell can exceed the daemon's header/frame deadlines.
     // Keep them off the event loop that flushes those bytes, and never stack
     // inspectors when one sample takes longer than the sampling interval.
     if (!pendingSample) {

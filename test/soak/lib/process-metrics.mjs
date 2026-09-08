@@ -12,7 +12,7 @@ function parseResidentKb(text) {
   return Number(text.trim());
 }
 
-// Windows has no `ps` and no `vmmap`, so a soak there needs its own pair of
+// Windows has no `ps` and no `footprint`, so a soak there needs its own pair of
 // readings. PowerShell exposes both halves of the same distinction macOS draws:
 //
 //   WorkingSet64        pages resident right now, shared pages included — the
@@ -116,27 +116,39 @@ export async function residentKbAsync(pid,
   return parseResidentKb(await (run ?? defaultPsRunAsync)(pid));
 }
 
+// footprint(1) prints one summary line per target:
+//   "syncd [1234]: 64-bit    Footprint: 56413952 B (16384 bytes per page)"
+// `-f bytes` fixes the unit so no K/M/G scaling can drift. The number is the
+// kernel's phys_footprint, the same value vmmap's "Physical footprint" line
+// reports.
 function parseFootprintKb(text) {
-  const match = /Physical footprint:\s+([\d.]+)([KMG])/.exec(text);
+  const match = /Footprint:\s+(\d+)\s+B\b/.exec(text);
   if (!match) return null;
-  const scale = { K: 1, M: 1024, G: 1024 * 1024 }[match[2]];
-  return Math.round(Number(match[1]) * scale);
+  return Math.round(Number(match[1]) / 1024);
 }
 
-function defaultVmmapRun(pid) {
-  return execFileSync('vmmap', ['-summary', String(pid)], { encoding: 'utf8' });
+function defaultFootprintRun(pid) {
+  return execFileSync('footprint', ['-f', 'bytes', String(pid)], { encoding: 'utf8' });
 }
 
-function defaultVmmapRunAsync(pid) {
-  return execFileAsync('vmmap', ['-summary', String(pid)], {
+function defaultFootprintRunAsync(pid) {
+  return execFileAsync('footprint', ['-f', 'bytes', String(pid)], {
     encoding: 'utf8', timeout: METRIC_TIMEOUT_MS,
   })
     .then((result) => result.stdout);
 }
 
-// vmmap is synchronous and takes a few hundred milliseconds, which shows in
-// the table as a small dip in frames sent around each sample. Without the
-// developer tools it is absent, and RSS stands in.
+// NEVER READ THIS NUMBER WITH vmmap. `vmmap` (with or without -summary)
+// SUSPENDS ITS TARGET while it walks the address space: measured on spare.lan
+// 2026-09-08 against a 300 MB process stamping time every 5 ms, each vmmap
+// call stopped the target for 1.28-1.35 s, and on the camera daemon with a
+// grown pixel-buffer pool for 1.7 s. Sampled every second, that shaved the
+// daemon's capacity; sampled every 10 s across a soak's Chrome processes it
+// froze the sender for a growing slice of every cycle and manufactured a
+// multi-hour "delivery decline" that two 8 h runs were spent chasing.
+// footprint(1) reports the same phys_footprint in ~0.1 s and leaves no gap
+// in the stamped timeline; `ps -o rss=` takes ~0.06 s. Without the developer
+// tools footprint is absent, and RSS stands in.
 export function footprintKb(pid, { run, fallback = residentKb, platform = process.platform } = {}) {
   // Windows draws the same distinction macOS does, under different names:
   // private bytes exclude shared pages the way physical footprint does, so a
@@ -156,7 +168,7 @@ export function footprintKb(pid, { run, fallback = residentKb, platform = proces
     return Number.isFinite(reading) ? reading : fallback(pid, { platform });
   }
   if (platform !== 'darwin') return fallback(pid);
-  run = run ?? defaultVmmapRun;
+  run = run ?? defaultFootprintRun;
   let text;
   try {
     text = run(pid);
@@ -170,8 +182,8 @@ export function footprintKb(pid, { run, fallback = residentKb, platform = proces
 // Non-blocking twin of footprintKb. A soak run samples the daemon plus every
 // Chrome process for its browser profiles — Chromium propagates
 // --user-data-dir to renderer, GPU, and utility children, so that is
-// upwards of a dozen targets per sample tick. footprintKb's vmmap call is
-// synchronous and takes a few hundred milliseconds each; a dozen of those in
+// upwards of a dozen targets per sample tick. footprintKb's footprint(1) call
+// is synchronous and takes ~100 ms each; a dozen of those in
 // series blocks the event loop for seconds at a time, freezing every timer
 // in the harness (including the very stream sampler doing the measuring)
 // and manufacturing the sampling gaps a soak analyzer would otherwise blame
@@ -188,7 +200,7 @@ export async function footprintKbAsync(pid,
     return Number.isFinite(reading) ? reading : fallback(pid, { platform });
   }
   if (platform !== 'darwin') return fallback(pid);
-  run = run ?? defaultVmmapRunAsync;
+  run = run ?? defaultFootprintRunAsync;
   let text;
   try {
     text = await run(pid);

@@ -158,79 +158,80 @@ test('residentKbAsync parses the same ps output as residentKb', async () => {
 
 // --- footprintKb / footprintKbAsync ---------------------------------------
 
-const VMMAP_SUMMARY_KB = 'Physical footprint:         18432K\n';
-const VMMAP_SUMMARY_MB = 'Physical footprint:         12.5M\n';
-const VMMAP_UNPARSEABLE = 'vmmap: no summary available\n';
+const FOOTPRINT_KB = 'syncd [111]: 64-bit    Footprint: 18874368 B (16384 bytes per page)\n';
+const FOOTPRINT_ROUNDS = 'syncd [111]: 64-bit    Footprint: 13107712 B (16384 bytes per page)\n';
+const FOOTPRINT_UNPARSEABLE = 'footprint: Unable to find pid for process matching \'111\'\n';
 
-test('footprintKb reads the vmmap physical footprint on darwin (K scale)', () => {
-  const result = footprintKb(111, { platform: 'darwin', run: () => VMMAP_SUMMARY_KB });
+test('footprintKb reads the footprint(1) byte count on darwin as KiB', () => {
+  const result = footprintKb(111, { platform: 'darwin', run: () => FOOTPRINT_KB });
   assert.equal(result, 18432);
 });
 
-test('footprintKb reads the vmmap physical footprint on darwin (M scale)', () => {
-  const result = footprintKb(111, { platform: 'darwin', run: () => VMMAP_SUMMARY_MB });
-  assert.equal(result, Math.round(12.5 * 1024));
+test('footprintKb rounds the footprint(1) byte count to whole KiB', () => {
+  // 13107712 B is 12800.5 KiB; the reading is a whole number of KiB.
+  const result = footprintKb(111, { platform: 'darwin', run: () => FOOTPRINT_ROUNDS });
+  assert.equal(result, 12801);
 });
 
-test('footprintKb falls back to residentKb off darwin without calling vmmap', () => {
-  let vmmapCalled = false;
+test('footprintKb falls back to residentKb off darwin without calling footprint', () => {
+  let footprintCalled = false;
   const result = footprintKb(111, {
     platform: 'linux',
-    run: () => { vmmapCalled = true; return VMMAP_SUMMARY_KB; },
+    run: () => { footprintCalled = true; return FOOTPRINT_KB; },
     fallback: () => 999,
   });
   assert.equal(result, 999);
-  assert.equal(vmmapCalled, false);
+  assert.equal(footprintCalled, false);
 });
 
-test('footprintKb falls back to residentKb when vmmap throws (absent developer tools)', () => {
+test('footprintKb falls back to residentKb when footprint throws (absent developer tools)', () => {
   const result = footprintKb(111, {
     platform: 'darwin',
-    run: () => { throw new Error('vmmap not found'); },
+    run: () => { throw new Error('footprint not found'); },
     fallback: () => 777,
   });
   assert.equal(result, 777);
 });
 
-test('footprintKb falls back to residentKb when vmmap output has no summary line', () => {
+test('footprintKb falls back to residentKb when footprint output has no summary line', () => {
   const result = footprintKb(111, {
     platform: 'darwin',
-    run: () => VMMAP_UNPARSEABLE,
+    run: () => FOOTPRINT_UNPARSEABLE,
     fallback: () => 555,
   });
   assert.equal(result, 555);
 });
 
 test('footprintKbAsync agrees with footprintKb on darwin, identical input', async () => {
-  const sync = footprintKb(111, { platform: 'darwin', run: () => VMMAP_SUMMARY_KB });
-  const async_ = await footprintKbAsync(111, { platform: 'darwin', run: async () => VMMAP_SUMMARY_KB });
+  const sync = footprintKb(111, { platform: 'darwin', run: () => FOOTPRINT_KB });
+  const async_ = await footprintKbAsync(111, { platform: 'darwin', run: async () => FOOTPRINT_KB });
   assert.equal(async_, sync);
 });
 
-test('footprintKbAsync falls back off darwin without calling vmmap', async () => {
-  let vmmapCalled = false;
+test('footprintKbAsync falls back off darwin without calling footprint', async () => {
+  let footprintCalled = false;
   const result = await footprintKbAsync(111, {
     platform: 'linux',
-    run: async () => { vmmapCalled = true; return VMMAP_SUMMARY_KB; },
+    run: async () => { footprintCalled = true; return FOOTPRINT_KB; },
     fallback: async () => 999,
   });
   assert.equal(result, 999);
-  assert.equal(vmmapCalled, false);
+  assert.equal(footprintCalled, false);
 });
 
-test('footprintKbAsync falls back when vmmap rejects (absent developer tools)', async () => {
+test('footprintKbAsync falls back when footprint rejects (absent developer tools)', async () => {
   const result = await footprintKbAsync(111, {
     platform: 'darwin',
-    run: async () => { throw new Error('vmmap not found'); },
+    run: async () => { throw new Error('footprint not found'); },
     fallback: async () => 777,
   });
   assert.equal(result, 777);
 });
 
-test('footprintKbAsync falls back when vmmap output has no summary line', async () => {
+test('footprintKbAsync falls back when footprint output has no summary line', async () => {
   const result = await footprintKbAsync(111, {
     platform: 'darwin',
-    run: async () => VMMAP_UNPARSEABLE,
+    run: async () => FOOTPRINT_UNPARSEABLE,
     fallback: async () => 555,
   });
   assert.equal(result, 555);
@@ -238,7 +239,7 @@ test('footprintKbAsync falls back when vmmap output has no summary line', async 
 
 // --- Windows -------------------------------------------------------------
 //
-// Windows has neither `ps` nor `vmmap`. It does expose both halves of the same
+// Windows has neither `ps` nor `footprint`. It does expose both halves of the same
 // distinction macOS draws, so a soak there reads the leak-relevant number
 // rather than the noisy one.
 
@@ -290,10 +291,10 @@ test('runLeaks reports no evidence on non-darwin instead of shelling out', () =>
 });
 
 // macOS behaviour must be untouched by all of the above.
-test('darwin still uses ps and vmmap', () => {
+test('darwin still uses ps and footprint(1)', () => {
   assert.equal(residentKb(1, { platform: 'darwin', run: () => ' 4096 ' }), 4096);
   assert.equal(
-    footprintKb(1, { platform: 'darwin', run: () => 'Physical footprint:  12.5M' }),
+    footprintKb(1, { platform: 'darwin', run: () => 'launchd [1]: 64-bit    Footprint: 13107200 B (16384 bytes per page)\n' }),
     12800);
 });
 
