@@ -372,7 +372,7 @@ SYNC_TEST(camera_publisher_direct_pixels_match_legacy_fitting_across_alpha_and_s
   std::vector<std::byte> reference(7680 * 1080);
   const std::array<std::array<std::uint32_t, 2>, 4> sizes{
       {{1920, 1080}, {641, 479}, {1920, 800}, {1920, 1080}}};
-  for (auto size : sizes) for (std::uint16_t alpha : {1, 2, 3}) {
+  for (auto size : sizes) for (std::uint16_t alpha : std::array<std::uint16_t, 3>{1, 2, 3}) {
     const auto stride = size[0] * 4 + 68;
     std::vector<std::byte> source(static_cast<std::size_t>(stride) * size[1], std::byte{0xDD});
     for (std::uint32_t y = 0; y < size[1]; ++y) for (std::uint32_t x = 0; x < size[0]; ++x) {
