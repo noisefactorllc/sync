@@ -45,6 +45,9 @@ diagnosed. Remove it when the fix ships.
   after restarting the sending browser, but not after repeated Sync daemon
   restarts. The restart replaced the whole browser process and profile; it
   did not isolate a rendering context or establish where the state lives.
+  An eight-hour run of the daemon alone, driven by a Node client with the
+  camera publisher at 1920 × 1080, did not slow. The state is in the browser
+  client, or in daemon state that only a browser client exercises.
   Save your program before trying a sender-app restart. Restarting Sync
   alone is not a confirmed remedy for this gradual slowdown.
   Noisedeck's shipped SDK 0.1.5 fixes a separate sending-schedule defect that
