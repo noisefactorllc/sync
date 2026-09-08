@@ -429,6 +429,19 @@ target_include_directories(sync_camera_nv12_tests PRIVATE native/test)
 target_link_libraries(sync_camera_nv12_tests PRIVATE sync_camera_nv12)
 add_test(NAME sync_camera_nv12_tests COMMAND sync_camera_nv12_tests)
 
+# The pure core of the sustained-delivery probe: the in-frame marker that lets
+# a reader tell frame N from N+1, and the per-second delivered-fps accounting.
+# No camera, no Media Foundation, so it runs everywhere -- links sync_camera_nv12
+# only to prove the marker survives a real BGRA->NV12 conversion.
+add_executable(sync_camera_delivered_marker_tests
+  native/test/camera/delivered_marker_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_camera_delivered_marker_tests PRIVATE cxx_std_20)
+target_include_directories(sync_camera_delivered_marker_tests PRIVATE native/test)
+target_link_libraries(sync_camera_delivered_marker_tests PRIVATE sync_camera_nv12)
+add_test(NAME sync_camera_delivered_marker_tests COMMAND sync_camera_delivered_marker_tests)
+
 # The shared ring is the transport CoreMediaIO provides for free on macOS: the
 # media source in session 0 creates it, syncd opens it. Layout and naming live
 # here so both halves agree by construction, and the logic is testable with no
@@ -1077,6 +1090,19 @@ elseif(WIN32)
     sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32)
   add_test(NAME sync_virtual_camera_e2e_tests COMMAND sync_virtual_camera_e2e_tests)
   set_tests_properties(sync_virtual_camera_e2e_tests PROPERTIES LABELS sync_camera_e2e)
+
+  # Sustained-delivery probe. Streams marked frames through the real virtual
+  # camera and reads them back with a Media Foundation source reader to measure
+  # distinct delivered frames per second over hours. It needs the registered
+  # system camera, so it BUILDS here but is deliberately not an add_test: its
+  # end-to-end run is a machine change reserved for an explicit decision.
+  add_executable(sync_camera_delivered_probe
+    native/test/windows/camera_delivered_probe.cpp
+  )
+  target_compile_features(sync_camera_delivered_probe PRIVATE cxx_std_20)
+  target_include_directories(sync_camera_delivered_probe PRIVATE native/include)
+  target_link_libraries(sync_camera_delivered_probe PRIVATE
+    sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32)
 
   # The waiting card. Drawn through WIC and Direct2D onto a plain memory
   # bitmap: no window, no device, so it renders the same inside the frame
