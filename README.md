@@ -104,6 +104,15 @@ diagnosed. Remove it when the fix ships.
   records prevent a complete per-write reconstruction. The sequential tests
   do not establish an exclusive cause or explain the earlier source-entry
   gaps. The [fixed socket buffer report](https://sync.noisedeck.app/performance/research-2026-09-09-native-send-buffer/) is live.
+  A separate source packet copy candidate uses three reusable packets. It removes one
+  8,294,400-byte payload copy per fast-path encoding attempt and reduces
+  logical retained CPU packet storage by 8,294,272 bytes. Fresh web and desktop
+  pixel controls passed. Three-minute observations averaged 45.479 unique
+  pairs/s on web and 55.562 on desktop. A later unchanged encoder reference
+  averaged 53.978 on web. These sequential runs do not isolate the change's
+  effect. A repeated candidate measurement failed its diagnostic deadline
+  and has no accepted FPS. The prepared report retains both failed attempts. Publication is pending.
+  This candidate has not shipped. Sustained 1080p60 remains unresolved.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
