@@ -54,20 +54,20 @@ These issues stop Sync from working today. Each entry includes a workaround
 where one exists. Keep this list current. Add an entry when a report is
 diagnosed. Remove it when the fix ships.
 
-- **Sustained 1080p60 and multi-hour camera stability remain under investigation.**
-  Earlier eight-hour tests on Sync 0.2.56 recorded declining accepted frame
-  rates while Noisedeck kept rendering at full speed. Later tests recovered
-  after restarting the sending browser, but not after repeated Sync daemon
-  restarts. The restart replaced the whole browser process and profile; it
-  did not isolate a rendering context or establish where the state lives.
-  An eight-hour run of the daemon alone, driven by a Node client with the
-  camera publisher at 1920 × 1080, did not slow. The state is in the browser
-  client, or in daemon state that only a browser client exercises.
-  Save your program before trying a sender-app restart. Restarting Sync
-  alone is not a confirmed remedy for this gradual slowdown.
-  Noisedeck's shipped SDK 0.1.5 fixes a separate sending-schedule defect that
-  could admit only every other rendered frame. This does not establish an
-  aging fix or guarantee 60 distinct delivered frames per second.
+- **Browser consumers of the Sync camera receive about 55 distinct frames
+  per second at 1080p, with repeats. Native consumers receive all 60.** On
+  2026-09-09 a native AVFoundation reader on an Apple Silicon Mac received
+  every frame of a 60 fps sender for 10 minutes: 60 per second, no repeats,
+  no second below 50. That sender ran at 1024 × 1024. The 1080p repeat of
+  the test is pending. Chrome as the consumer of the same camera receives
+  about 55 distinct frames per second, with about one second in ten below
+  50, and its capture service is where the repeats appear. That path is
+  under investigation. Earlier reports of a slowdown over hours came from
+  the test harness, not from Sync. Its memory inspector suspended the
+  sending browser, its second test client competed with the sender for the
+  loopback, and its launch shell ran the daemon at a lower priority than
+  the browsers. The harness no longer does any of these.
+- **Short delivery stalls from browser senders remain under investigation.**
   If Chrome rendering and delivery both settle at 30 FPS on battery power,
   connect the computer to power and check Settings > Performance > Energy
   Saver. Chrome can limit frame cadence when battery charge is low. This
@@ -133,6 +133,10 @@ diagnosed. Remove it when the fix ships.
   The fitter reuses its completion signals between frames.
   This shared native change applies to web and desktop senders.
   It reduces conversion work; it does not establish a delivery-stall fix.
+- **Sync output stops when the Noisedeck window is fully covered.** Chrome
+  marks a fully covered page hidden, Noisedeck then pauses rendering, and
+  Sync output stops until the window is visible again. Workaround: keep part
+  of the Noisedeck window visible, or put it on a second screen.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
