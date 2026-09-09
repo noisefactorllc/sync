@@ -83,6 +83,17 @@ diagnosed. Remove it when the fix ships.
   observations still had seconds below 50. One source renderer stopped
   before cleanup. Its caller remains unknown. The report retains that
   rejected attempt. These diagnostics do not establish a GC cause or fix.
+  A fixed source-encoder candidate completed fresh web and desktop pixel checks.
+  Three-minute observations averaged 58.181 unique pairs/s on web and
+  59.118 on desktop. Web had six complete seconds below 50, including one
+  with zero pairs. Desktop had two, with a minimum of 43. Source telemetry
+  retained gaps between pipeline calls. Their cause remains unknown.
+  GPU contention on the busy test machine is a working hypothesis.
+  These tests did not measure GPU scheduling or contention.
+  A warm test avoided explicit view constructors and BigInt calls. It does
+  not prove zero allocation or a GC fix. These sequential runs do not
+  establish a performance benefit. The candidate has not shipped.
+  The [fixed source encoder report](https://sync.noisedeck.app/performance/research-2026-09-09-fixed-source-encoder/) is live.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
