@@ -1,0 +1,138 @@
+# Sustained camera-delivery measurement.
+#
+# The protocol soak measures how fast the test publisher ACCEPTS frames, which
+# its per-byte checksum caps near 27 fps at 1080p -- 60 is out of its reach by
+# construction. This measures a different quantity: how many DISTINCT frames a
+# real Media Foundation consumer READS BACK per second from the Sync virtual
+# camera, over a long run. That is what "sustained 1080p60" is actually about,
+# and the only way to see the documented multi-hour delivery decline as a trace
+# rather than an anecdote.
+#
+# It reuses the camera gate's proven, durable pattern exactly (see
+# camera-e2e.yml): build in the runner's off-profile workspace where LOCAL
+# SERVICE can read the media-source DLL, `--register-camera` this run's build,
+# run, then an always() RE-REGISTER of the installed build. It never calls
+# --unregister-camera: unregistering RegDeleteTree's the CLSID key, breaking
+# both the desktop Sync install and the ACL grant the runner needs. Register
+# from a new path opens-or-creates the key in place instead.
+#
+# Host requirements are the four in camera-e2e.yml; the same runner satisfies
+# them. Host setup is recorded in scaffold's docs/runbook/office-lan.md.
+#
+# workflow_dispatch only -- never on push. A long delivery run monopolises the
+# one camera on the one machine, so it is a deliberate, dispatched measurement,
+# not something every commit fires.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "How long to measure delivery (10800 = 3 h; default 60 for a validation run)"
+        required: false
+        default: "60"
+      target_fps:
+        description: "Target frames per second (the sustained-delivery goal)"
+        required: false
+        default: "60"
+
+# Share the camera gate's concurrency group: one camera on one machine means a
+# delivery run and an e2e run must never overlap -- two builds registering the
+# media source at once would each invalidate the other. cancel-in-progress is
+# false here so a dispatched measurement queues behind a running gate rather
+# than cancelling it; a push-triggered gate (cancel-in-progress: true) still
+# takes priority over an in-flight measurement, and the always() restore keeps
+# the host clean either way.
+concurrency:
+  group: sync-camera-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  delivery:
+    name: Windows camera sustained delivery
+    if: github.repository == 'noisefactorllc/sync'
+    runs-on: [self-hosted, Windows, X64, sync-camera]
+    # Covers up to a ~3.5 h measurement plus build and restore.
+    timeout-minutes: 220
+    env:
+      BUILD_TYPE: Release
+      INSTALLED_SYNCD: C:\Program Files\Noise Factor\Sync\syncd.exe
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build --config $env:BUILD_TYPE --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      # syncd registers the SyncCamera.dll sitting beside itself, so this points
+      # the machine's CLSID at the build this run just produced. Register only;
+      # the restore step re-registers the installed one.
+      - name: Register this run's media source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "build/$env:BUILD_TYPE/syncd.exe" --register-camera
+          if ($LASTEXITCODE -ne 0) {
+            throw ("camera registration failed. If this is ERROR_ACCESS_DENIED " +
+                   "the host's grant on the CLSID key is gone -- see office-lan.md.")
+          }
+
+      - name: Measure sustained delivery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dur = "${{ github.event.inputs.duration_seconds }}"
+          $fps = "${{ github.event.inputs.target_fps }}"
+          Write-Host "measuring delivered fps for $dur s at target $fps"
+          & "build/$env:BUILD_TYPE/sync_camera_delivered_probe.exe" $dur "delivered.jsonl" $fps
+          $code = $LASTEXITCODE
+          if (Test-Path "delivered.jsonl") {
+            Write-Host "--- summary ---"
+            Get-Content "delivered.jsonl" | Select-String '"type":"summary"'
+          }
+          if ($code -ne 0) { throw "delivery probe exited $code (camera unavailable or run failed)" }
+
+      # always(): a failed or cancelled run must not leave the host's camera
+      # bound to a workspace the next checkout overwrites. Re-register the
+      # installed build -- never --unregister-camera (see the header).
+      - name: Restore the installed media source
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path $env:INSTALLED_SYNCD) {
+            & $env:INSTALLED_SYNCD --register-camera
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to restore the installed camera registration on this host"
+            }
+          } else {
+            Write-Host "No Sync install on this host; nothing to restore."
+          }
+
+      # always(): the JSONL is the whole point, and a run that dies mid-measure
+      # still leaves an interpretable partial trace.
+      - name: Upload the delivery trace
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: camera-delivery-${{ github.event.inputs.duration_seconds }}s
+          path: delivered.jsonl
+          if-no-files-found: warn
