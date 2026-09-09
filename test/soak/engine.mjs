@@ -7,7 +7,7 @@
 // an in-memory array, and leaks run periodically rather than once at exit.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
+import { setImmediate as yieldToEventLoop, setTimeout as sleep } from 'node:timers/promises';
 import { upgrade } from './lib/ws.mjs';
 import { createFrameBuffer, stampFrame } from './lib/frame.mjs';
 import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
@@ -83,10 +83,25 @@ export class ProtocolSoak {
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
                 startupTimeoutMs = 5_000, daemonArgs = [], publisher = null,
                 stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000,
-                geometries = null, geometryEveryMs = 0 }) {
+                geometries = null, geometryEveryMs = 0, fps = 0 }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
                           leaksEveryMs, onSample, startupTimeoutMs, daemonArgs, publisher,
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
+    // PACING. Unpaced (fps 0, the default) this client sends as fast as the
+    // daemon accepts: on spare.lan that is ~200 frames/s of 8 MB frames,
+    // 800 MB/s or more through the loopback. That is the right shape for a
+    // capacity measurement of the daemon alone and the WRONG shape for a
+    // co-load: run beside a browser sender at 1080p it starved that sender
+    // from 60 to ~40 fps within 100 s on every gauntlet of 2026-09-07/08
+    // (spare bisect, scaffold handoff section 4b). With fps set, the loop
+    // sends at most one frame per 1000/fps ms and never bursts to catch up
+    // after backpressure: a paced client that fell behind resumes at its
+    // rate, it does not repay the deficit.
+    if (!Number.isFinite(fps) || fps < 0) {
+      throw new RangeError(`fps must be a non-negative number, got ${fps}`);
+    }
+    this.fps = fps;
+    this.frameIntervalMs = fps > 0 ? 1000 / fps : 0;
     // WHICH DAEMON PATH THIS RUN ACTUALLY EXERCISES.
     //
     // --test-receiver DOES reach a publisher: run_server constructs a
@@ -303,6 +318,10 @@ export class ProtocolSoak {
     let lastLeaks = started;
     let lastGeometry = started;
     await this._openSession();
+    // The earliest instant the next frame may be sent when paced. Reset to
+    // "now" whenever a session is (re)opened so a fresh sender starts at the
+    // rate, not with a queued burst.
+    let nextFrameAt = Date.now();
     while (!this.stopped && Date.now() - started < durationMs) {
       const now = Date.now();
       // Geometry changes on its own clock, independent of the session cycle,
@@ -321,6 +340,7 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = now;
+        nextFrameAt = Date.now();
       }
       const elapsed = Math.round((now - started) / 1000);
       if (elapsed > lastSample) {
@@ -351,11 +371,22 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = Date.now();
+        nextFrameAt = lastCycle;
         continue;
       }
       if (this.data.socket.writableLength > this.maxBuffered) {
         await new Promise((resolve) => setTimeout(resolve, 2));
         continue;
+      }
+      if (this.frameIntervalMs > 0) {
+        const wait = nextFrameAt - Date.now();
+        if (wait > 0) {
+          await sleep(wait);
+          continue;
+        }
+        // At most one frame per interval, measured from the later of the
+        // schedule and now: no catch-up burst after a stall.
+        nextFrameAt = Math.max(nextFrameAt, Date.now()) + this.frameIntervalMs;
       }
       this.state.sequence += 1;
       try {
@@ -373,6 +404,7 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = Date.now();
+        nextFrameAt = lastCycle;
       }
     }
     await this._stats();

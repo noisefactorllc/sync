@@ -466,3 +466,48 @@ test('ProtocolSoak defaults to --test-receiver and can select a publisher instea
   // them, and passing both would let the daemon choose which claim is true.
   assert.equal(camera.publisherArgs.includes('--test-receiver'), false);
 });
+
+// --- pacing ---------------------------------------------------------------
+//
+// Unpaced, this engine is an 8 MB-per-frame firehose that takes whatever the
+// loopback gives it. Beside a browser sender that starved the sender on every
+// gauntlet of 2026-09-07/08. `fps` bounds it to one frame per interval.
+
+function pacedSoak(fps) {
+  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8, fps });
+  soak.data = { closed: false, socket: { writableLength: 0, destroyed: false },
+    sendBinary: async () => {} };
+  soak._openSession = async () => {};
+  soak._closeSession = async () => {};
+  soak._stats = async () => {};
+  return soak;
+}
+
+test('fps paces the stream to at most one frame per interval, with no catch-up burst', async () => {
+  // 200 fps is a 5 ms interval; a 100 ms run allows at most ~20 sends, and
+  // an unpaced loop would send thousands in the same window.
+  const soak = pacedSoak(200);
+  await soak.run(100);
+  assert.ok(soak.state.sentFrames >= 3, `expected a handful of paced sends, got ${soak.state.sentFrames}`);
+  assert.ok(soak.state.sentFrames <= 24, `expected at most ~20 paced sends, got ${soak.state.sentFrames}`);
+});
+
+test('fps 0 (the default) leaves the stream unpaced', async () => {
+  const soak = pacedSoak(0);
+  assert.equal(soak.frameIntervalMs, 0);
+  let clockReads = 0;
+  const original = Date.now;
+  Date.now = () => Math.floor(clockReads++ / 16);
+  try {
+    await soak.run(50);
+  } finally {
+    Date.now = original;
+  }
+  assert.ok(soak.state.sentFrames > 100, `unpaced loop should send freely, got ${soak.state.sentFrames}`);
+});
+
+test('fps rejects a negative or non-numeric rate up front', () => {
+  assert.throws(() => new ProtocolSoak({ daemonPath: '', fps: -1 }), RangeError);
+  assert.throws(() => new ProtocolSoak({ daemonPath: '', fps: Number.NaN }), RangeError);
+  assert.throws(() => new ProtocolSoak({ daemonPath: '', fps: Number.POSITIVE_INFINITY }), RangeError);
+});
