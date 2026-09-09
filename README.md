@@ -71,6 +71,12 @@ diagnosed. Remove it when the fix ships.
   Both still had seconds below 50. The sequential runs do not establish
   a performance benefit or the effect on latency. The report retains one
   rejected marker-check attempt. Its cause remains unproved.
+  The [decoder and ACK report](https://sync.noisedeck.app/performance/research-2026-09-09-browser-scalar-allocations/)
+  records a separate allocation candidate with the same source limit. Web
+  averaged 59.863 FPS over three minutes, with no complete seconds below 50.
+  Desktop averaged 58.015 FPS and had five seconds below 50. Pixel checks
+  passed in both contexts. These short runs do not establish sustained
+  60 FPS or a general pooling benefit. The candidate has not shipped.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
