@@ -2,11 +2,15 @@
 
 #import <Accelerate/Accelerate.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <thread>
 #include <vector>
+
+#include <pthread/qos.h>
 
 #include <sync/platform/camera_frame_fitter.hpp>
 #include <sync/platform/camera_identity.hpp>
@@ -89,6 +93,62 @@ SYNC_TEST(camera_fitter_matches_vimage_for_all_channel_and_alpha_values) {
     SYNC_REQUIRE(source == unchanged_source);
     SYNC_REQUIRE(scratch.swapped.empty());
     SYNC_REQUIRE(scratch.scale_temp.empty());
+  }
+}
+
+// Reuse each caller's completion state across changing frames, then destroy
+// the caller threads immediately after their final fit. Different QoS classes
+// exercise the worker-queue selection without changing the test runner's QoS.
+SYNC_TEST(camera_fitter_joins_concurrent_callers_before_reuse_and_thread_exit) {
+  constexpr std::uint32_t width = 513, height = 513;
+  constexpr std::size_t stride = width * 4;
+  constexpr std::size_t bytes = stride * height;
+  constexpr std::array classes{QOS_CLASS_USER_INITIATED, QOS_CLASS_DEFAULT, QOS_CLASS_UTILITY};
+  for (int round = 0; round < 2; ++round) {
+    std::array<std::exception_ptr, classes.size()> errors{};
+    {
+      struct JoinedCallers {
+        std::array<std::thread, 3> threads;
+        ~JoinedCallers() {
+          for (auto& thread : threads) {
+            if (thread.joinable()) thread.join();
+          }
+        }
+      } callers;
+      for (std::size_t caller = 0; caller < callers.threads.size(); ++caller) {
+        callers.threads[caller] = std::thread([&, caller] {
+          try {
+            SYNC_REQUIRE(pthread_set_qos_class_self_np(classes[caller], 0) == 0);
+            std::vector<std::byte> source(bytes), actual(bytes), expected(bytes);
+            noisefactor::sync::camera::CameraFitScratch scratch;
+            for (unsigned iteration = 0; iteration < 9; ++iteration) {
+              const auto value = static_cast<std::uint8_t>(
+                  19 + caller * 31 + iteration * 7 + round);
+              std::fill(source.begin(), source.end(), static_cast<std::byte>(value));
+              const auto mode = static_cast<std::uint16_t>(1 + iteration % 3);
+              const auto color = mode == 2
+                  ? static_cast<std::uint8_t>((unsigned(value) * value + 127) / 255)
+                  : value;
+              for (std::size_t at = 0; at < bytes; at += 4) {
+                expected[at] = expected[at + 1] = expected[at + 2] =
+                    static_cast<std::byte>(color);
+                expected[at + 3] = std::byte{255};
+              }
+              SYNC_REQUIRE(fit_camera_frame(frame_of(width, height, source, mode),
+                                             actual, stride, {width, height}, scratch));
+              SYNC_REQUIRE(actual == expected);
+            }
+            SYNC_REQUIRE(scratch.swapped.empty());
+            SYNC_REQUIRE(scratch.scale_temp.empty());
+          } catch (...) {
+            errors[caller] = std::current_exception();
+          }
+        });
+      }
+    }
+    for (const auto& error : errors) {
+      if (error) std::rethrow_exception(error);
+    }
   }
 }
 

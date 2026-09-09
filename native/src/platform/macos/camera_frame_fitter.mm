@@ -9,6 +9,7 @@
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #include <dispatch/dispatch.h>
+#include <pthread/qos.h>
 #endif
 
 namespace noisefactor::sync::camera {
@@ -124,19 +125,36 @@ void convert_arm64_into(const protocol::FrameView& frame,
     convert_rows<Straight>(frame, destination, 0, frame.height);
     return;
   }
+  struct Completion {
+    dispatch_semaphore_t signal = dispatch_semaphore_create(0);
+  };
+  thread_local Completion completion;
+  if (!completion.signal) {
+    convert_rows<Straight>(frame, destination, 0, frame.height);
+    return;
+  }
   struct Work {
     const protocol::FrameView& frame;
     const vImage_Buffer& destination;
-  } work{frame, destination};
-  // Exactly two ranges, synchronously joined before the borrowed frame or
-  // destination can be reused. Dispatch owns the reusable worker pool.
-  dispatch_apply_f(2, DISPATCH_APPLY_AUTO, &work, [](void* context, std::size_t index) {
+    Completion& completion;
+  } work{frame, destination, completion};
+  // The caller converts the first range while Dispatch converts the second.
+  // The reusable semaphore joins the borrowed buffers before returning.
+  const auto qos = qos_class_self();
+  const auto priority = qos == QOS_CLASS_UNSPECIFIED ? QOS_CLASS_DEFAULT : qos;
+  dispatch_async_f(dispatch_get_global_queue(priority, 0),
+                    &work, [](void* context) {
     const auto& job = *static_cast<Work*>(context);
-    const auto middle = job.frame.height / 2;
+    // The waiting caller can return and exit its thread as soon as signalled.
+    // Keep the semaphore alive until the worker has returned from signal().
+    dispatch_semaphore_t signal __attribute__((objc_precise_lifetime)) =
+        job.completion.signal;
     convert_rows<Straight>(job.frame, job.destination,
-                           index == 0 ? 0 : middle,
-                           index == 0 ? middle : job.frame.height);
+                           job.frame.height / 2, job.frame.height);
+    dispatch_semaphore_signal(signal);
   });
+  convert_rows<Straight>(frame, destination, 0, frame.height / 2);
+  dispatch_semaphore_wait(completion.signal, DISPATCH_TIME_FOREVER);
 }
 #endif
 
