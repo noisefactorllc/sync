@@ -1,5 +1,7 @@
 #include "test_harness.hpp"
 
+#import <Accelerate/Accelerate.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +47,49 @@ using noisefactor::sync::protocol::FrameView;
 }
 
 }  // namespace
+
+// Compare with the original three-stage conversion for every channel/alpha
+// pair, including odd widths, unaligned starts, and different row padding.
+SYNC_TEST(camera_fitter_matches_vimage_for_all_channel_and_alpha_values) {
+  constexpr std::uint32_t width = 257, height = 256;
+  constexpr std::size_t source_stride = width * 4 + 13;
+  constexpr std::size_t output_stride = width * 4 + 17;
+  std::vector<std::byte> source(3 + source_stride * height + 7, std::byte{0x5a});
+  for (std::uint32_t y = 0; y < height; ++y) {
+    for (std::uint32_t x = 0; x < width; ++x) {
+      const auto at = 3 + y * source_stride + x * 4;
+      source[at] = static_cast<std::byte>(x & 255);
+      source[at + 1] = static_cast<std::byte>((255 - x) & 255);
+      source[at + 2] = static_cast<std::byte>((x ^ 0xa5) & 255);
+      source[at + 3] = static_cast<std::byte>(y);
+    }
+  }
+  const auto unchanged_source = source;
+  for (const std::uint16_t alpha_mode : {1, 2, 3}) {
+    std::vector<std::byte> actual(5 + output_stride * height + 11, std::byte{0x63});
+    auto expected = actual;
+    const auto payload = std::span(source).subspan(3, source_stride * height);
+    vImage_Buffer input{payload.data(), height, width, source_stride};
+    vImage_Buffer output{expected.data() + 5, height, width, output_stride};
+    const std::uint8_t map[4] = {2, 1, 0, 3};
+    SYNC_REQUIRE(vImagePermuteChannels_ARGB8888(&input, &output, map, kvImageNoFlags) ==
+                 kvImageNoError);
+    if (alpha_mode == 2) {
+      SYNC_REQUIRE(vImagePremultiplyData_RGBA8888(&output, &output, kvImageNoFlags) ==
+                   kvImageNoError);
+    }
+    SYNC_REQUIRE(vImageOverwriteChannelsWithScalar_ARGB8888(
+                     255, &output, &output, 0x1, kvImageNoFlags) == kvImageNoError);
+    noisefactor::sync::camera::CameraFitScratch scratch;
+    SYNC_REQUIRE(fit_camera_frame(frame_of(width, height, payload, alpha_mode, source_stride),
+                                   std::span(actual).subspan(5, output_stride * height),
+                                   output_stride, {width, height}, scratch));
+    SYNC_REQUIRE(actual == expected);
+    SYNC_REQUIRE(source == unchanged_source);
+    SYNC_REQUIRE(scratch.swapped.empty());
+    SYNC_REQUIRE(scratch.scale_temp.empty());
+  }
+}
 
 SYNC_TEST(camera_placement_letterboxes_wide_and_pillarboxes_tall_sources) {
   const CameraCanvas canvas{.width = 1920, .height = 1080};

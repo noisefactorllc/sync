@@ -59,9 +59,8 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
          fill(right, placement.y, canvas.width - right, placement.height);
 }
 
-// RGBA -> BGRA permute into `destination`, then straight alpha premultiplied
-// over black in place, then alpha forced opaque in place. The source is never
-// written.
+// Straight alpha is premultiplied first, then permutation and opaque alpha
+// are combined in one image pass. The source is never written.
 [[nodiscard]] auto convert_into(const protocol::FrameView& frame,
                                 vImage_Buffer& destination) noexcept -> bool {
   vImage_Buffer source{
@@ -71,19 +70,20 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
       .rowBytes = frame.row_stride,
   };
   const uint8_t permute[4] = {2, 1, 0, 3};
+  if (frame.alpha_mode == kAlphaStraight) {
+    if (vImagePremultiplyData_RGBA8888(&source, &destination, kvImageNoFlags) !=
+        kvImageNoError) {
+      return false;
+    }
+    return vImagePermuteChannelsWithMaskedInsert_ARGB8888(
+               &destination, &destination, permute, kAlphaChannelMask, kBlackOpaqueBgra,
+               kvImageNoFlags) == kvImageNoError;
+  }
+  // Retain this path: fused out-of-place conversion used more CPU on M2.
   if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) !=
       kvImageNoError) {
     return false;
   }
-  if (frame.alpha_mode == kAlphaStraight) {
-    // The RGBA8888 premultiply treats the last channel as alpha regardless
-    // of the order of the first three, so it is correct for BGRA too.
-    if (vImagePremultiplyData_RGBA8888(&destination, &destination, kvImageNoFlags) !=
-        kvImageNoError) {
-      return false;
-    }
-  }
-  // A camera has no alpha to offer: force opaque after any premultiply.
   return vImageOverwriteChannelsWithScalar_ARGB8888(255, &destination, &destination,
                                                     kAlphaChannelMask, kvImageNoFlags) ==
          kvImageNoError;
