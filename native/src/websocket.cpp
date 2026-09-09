@@ -441,6 +441,8 @@ void ClientFrameDecoder::prepare_fragment_storage(
   if (fragment_payload_.empty() &&
       reusable_payload_.capacity() >= required_capacity) {
     fragment_payload_.swap(reusable_payload_);
+    // Fragment assembly retains the existing append-only size contract.
+    fragment_payload_.clear();
     return;
   }
   MessagePayload empty_reusable(payload_resource_);
@@ -532,13 +534,24 @@ DecodeError ClientFrameDecoder::finish_length() {
           reusable_payload_.capacity() >= payload_length_) {
         payload_.swap(reusable_payload_);
       }
-      payload_.reserve(static_cast<std::size_t>(payload_length_));
+      if (sensitivity_ == PayloadSensitivity::NonSensitive &&
+          opcode_ == Opcode::Binary && payload_.size() >= payload_length_) {
+        // Reuse only an already initialized extent. Cold/growing frames retain
+        // incremental initialization as bytes arrive on the append path.
+        payload_.resize(static_cast<std::size_t>(payload_length_));
+      } else {
+        payload_.clear();
+        payload_.reserve(static_cast<std::size_t>(payload_length_));
+      }
     }
   } else {
     if (payload_.capacity() < payload_length_ &&
         reusable_payload_.capacity() >= payload_length_) {
       payload_.swap(reusable_payload_);
     }
+    // Control frames still append only received bytes, including when their
+    // storage came from a previously initialized Binary payload.
+    payload_.clear();
     payload_.reserve(static_cast<std::size_t>(payload_length_));
   }
   state_ = State::Mask;
@@ -619,8 +632,12 @@ DecodeError ClientFrameDecoder::feed_impl(std::span<const std::byte> bytes,
           !control_ && (!final_ || opcode_ == Opcode::Continuation)
               ? fragment_payload_
               : payload_;
-      const std::size_t destination_offset = destination.size();
-      destination.resize(destination_offset + count);
+      const bool initialized_binary =
+          sensitivity_ == PayloadSensitivity::NonSensitive && final_ &&
+          opcode_ == Opcode::Binary && payload_.size() == payload_length_;
+      const std::size_t destination_offset =
+          initialized_binary ? payload_received_ : destination.size();
+      if (!initialized_binary) destination.resize(destination_offset + count);
       const std::byte* const source = bytes.data() + position;
       std::byte* const target = destination.data() + destination_offset;
       const std::size_t phase = payload_received_ & 3U;
@@ -728,10 +745,12 @@ void ClientFrameDecoder::recycle_payload(MessagePayload& payload) noexcept {
       payload.capacity() > max_reusable_payload_bytes_) {
     return;
   }
-  payload.clear();
   if (payload.capacity() > reusable_payload_.capacity()) {
+    // Preserve the initialized size only in the private reusable slot. The
+    // caller may receive the older allocation and must still see an empty size.
     reusable_payload_.swap(payload);
   }
+  payload.clear();
 }
 
 void cleanse_message_payloads(std::span<Message> messages,

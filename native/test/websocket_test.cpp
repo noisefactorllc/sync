@@ -1,5 +1,6 @@
 #include "test_harness.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -994,4 +995,336 @@ SYNC_TEST(server_encoder_accepts_empty_code_and_valid_utf8_close_reasons) {
                     ws::Opcode::Close,
                     bytes({0x0b, 0xb8, 0x01, 0xc2, 0x80}))
                     .empty());
+}
+
+namespace {
+
+std::vector<std::byte> initialized_payload_bytes(std::size_t size,
+                                                unsigned seed) {
+  std::vector<std::byte> payload(size);
+  for (std::size_t index = 0; index < size; ++index) {
+    payload[index] = static_cast<std::byte>((index * 17 + seed) % 256);
+  }
+  return payload;
+}
+
+std::vector<std::byte> initialized_payload_frame(
+    std::span<const std::byte> payload,
+    ws::Opcode opcode = ws::Opcode::Binary, bool final = true) {
+  auto encoded = masked_binary_header(payload.size());
+  encoded[0] = static_cast<std::byte>((final ? 0x80U : 0U) |
+                                     static_cast<unsigned>(opcode));
+  const std::array<std::byte, 4> mask = {
+      std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+  for (std::size_t index = 0; index < payload.size(); ++index) {
+    encoded.push_back(payload[index] ^ mask[index % mask.size()]);
+  }
+  return encoded;
+}
+
+void feed_initialized_payload(ws::ClientFrameDecoder& decoder,
+                              std::span<const std::byte> encoded,
+                              std::vector<ws::Message>& output,
+                              std::size_t chunk_size = 7) {
+  for (std::size_t offset = 0; offset < encoded.size(); offset += chunk_size) {
+    const auto chunk = encoded.subspan(
+        offset, std::min(chunk_size, encoded.size() - offset));
+    SYNC_REQUIRE(decoder.feed(chunk, output) == ws::DecodeError::None);
+  }
+}
+
+void require_initialized_payload(const ws::Message& message,
+                                 const std::vector<std::byte>& expected) {
+  SYNC_REQUIRE(message.payload.size() == expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    SYNC_REQUIRE(message.payload[index] == expected[index]);
+  }
+}
+
+std::size_t idle_payload_decoder_overhead() {
+  // Match the existing shared-resource test: MSVC Debug charges the decoder's
+  // empty PMR vector proxies before the first payload byte is allocated.
+  ws::PayloadMemoryResource generous(4096);
+  ws::ClientFrameDecoder decoder(128, ws::PayloadSensitivity::NonSensitive,
+                                 nullptr, 128, &generous);
+  return generous.used_bytes();
+}
+
+}  // namespace
+
+SYNC_TEST(recycled_initialized_extent_is_private_empty_to_caller_and_cleansed) {
+  RecordingCleanseObserver observer;
+  {
+    ws::ClientFrameDecoder decoder(128, ws::PayloadSensitivity::NonSensitive,
+                                   &observer);
+    std::vector<ws::Message> output;
+    const auto payload = initialized_payload_bytes(64, 31);
+    feed_initialized_payload(decoder, initialized_payload_frame(payload), output);
+    decoder.recycle_payload(output[0].payload);
+    SYNC_REQUIRE(output[0].payload.empty());
+    output.clear();
+  }
+  SYNC_REQUIRE(observer.all_zero);
+  SYNC_REQUIRE(observer.cleansed_bytes == 64);
+}
+
+SYNC_TEST(warm_partial_binary_is_unpublished_but_entire_initialized_extent_is_cleansed) {
+  RecordingCleanseObserver observer;
+  {
+    ws::ClientFrameDecoder decoder(128, ws::PayloadSensitivity::NonSensitive,
+                                   &observer);
+    std::vector<ws::Message> output;
+    const auto payload = initialized_payload_bytes(64, 39);
+    feed_initialized_payload(decoder, initialized_payload_frame(payload), output);
+    decoder.recycle_payload(output[0].payload);
+    output.clear();
+    const auto next = initialized_payload_frame(initialized_payload_bytes(64, 91));
+    feed_initialized_payload(decoder, std::span(next).first(10), output);
+    SYNC_REQUIRE(output.empty());
+    SYNC_REQUIRE(decoder.message_in_progress());
+  }
+  SYNC_REQUIRE(observer.all_zero);
+  SYNC_REQUIRE(observer.cleansed_bytes == 64);
+}
+
+SYNC_TEST(recycling_changing_sizes_never_exposes_previous_payload_or_old_stash) {
+  ws::ClientFrameDecoder decoder(512);
+  std::vector<ws::Message> output;
+  unsigned seed = 1;
+  for (const auto size : {64, 64, 32, 64, 0, 129, 129, 3, 256, 16, 256}) {
+    const auto payload = initialized_payload_bytes(size, seed++);
+    feed_initialized_payload(decoder, initialized_payload_frame(payload), output);
+    SYNC_REQUIRE(output.size() == 1);
+    require_initialized_payload(output[0], payload);
+    decoder.recycle_payload(output[0].payload);
+    SYNC_REQUIRE(output[0].payload.empty());
+    output.clear();
+  }
+
+  // Recycling a larger allocation can return the old private cache allocation
+  // to the caller. Its public size must be zero even when that cache had data.
+  const auto first = initialized_payload_bytes(300, 2);
+  const auto second = initialized_payload_bytes(400, 3);
+  feed_initialized_payload(decoder, initialized_payload_frame(first), output);
+  feed_initialized_payload(decoder, initialized_payload_frame(second), output);
+  require_initialized_payload(output[0], first);
+  require_initialized_payload(output[1], second);
+  decoder.recycle_payload(output[0].payload);
+  decoder.recycle_payload(output[1].payload);
+  SYNC_REQUIRE(output[0].payload.empty());
+  SYNC_REQUIRE(output[1].payload.empty());
+}
+
+SYNC_TEST(warmed_binary_cache_preserves_control_text_and_fragment_fallback) {
+  ws::ClientFrameDecoder decoder(1024);
+  std::vector<ws::Message> output;
+  const auto warm = initialized_payload_bytes(512, 7);
+  feed_initialized_payload(decoder, initialized_payload_frame(warm), output);
+  decoder.recycle_payload(output[0].payload);
+  output.clear();
+
+  const auto ping = initialized_payload_bytes(7, 8);
+  feed_initialized_payload(
+      decoder, initialized_payload_frame(ping, ws::Opcode::Ping), output);
+  require_initialized_payload(output[0], ping);
+  SYNC_REQUIRE(output[0].opcode == ws::Opcode::Ping);
+  decoder.recycle_payload(output[0].payload);
+  output.clear();
+
+  const auto text = bytes({'o', 'k'});
+  feed_initialized_payload(
+      decoder, initialized_payload_frame(text, ws::Opcode::Text), output);
+  require_initialized_payload(output[0], text);
+  decoder.recycle_payload(output[0].payload);
+  output.clear();
+
+  auto first = initialized_payload_bytes(100, 9);
+  const auto second = initialized_payload_bytes(200, 10);
+  feed_initialized_payload(
+      decoder, initialized_payload_frame(first, ws::Opcode::Binary, false), output);
+  SYNC_REQUIRE(output.empty());
+  feed_initialized_payload(
+      decoder, initialized_payload_frame(ping, ws::Opcode::Ping), output);
+  require_initialized_payload(output[0], ping);
+  output.clear();
+  feed_initialized_payload(
+      decoder, initialized_payload_frame(second, ws::Opcode::Continuation), output);
+  first.insert(first.end(), second.begin(), second.end());
+  require_initialized_payload(output[0], first);
+  decoder.recycle_payload(output[0].payload);
+  output.clear();
+  feed_initialized_payload(decoder, initialized_payload_frame(warm), output);
+  require_initialized_payload(output[0], warm);
+}
+
+SYNC_TEST(recycled_cache_does_not_bypass_invalid_header_text_or_close_validation) {
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    ws::ClientFrameDecoder decoder(64);
+    std::vector<ws::Message> output;
+    feed_initialized_payload(
+        decoder, initialized_payload_frame(initialized_payload_bytes(32, 1)), output);
+    decoder.recycle_payload(output[0].payload);
+    output.clear();
+
+    std::vector<std::byte> encoded;
+    ws::DecodeError error;
+    if (mode == 0) {
+      encoded = initialized_payload_frame(initialized_payload_bytes(65, 2));
+      error = ws::DecodeError::MessageTooLarge;
+    } else if (mode == 1) {
+      encoded = initialized_payload_frame(initialized_payload_bytes(10, 2));
+      encoded[1] = std::byte{10};
+      error = ws::DecodeError::UnmaskedClientFrame;
+    } else if (mode == 2) {
+      encoded = initialized_payload_frame(bytes({0xff}), ws::Opcode::Text);
+      error = ws::DecodeError::InvalidTextPayload;
+    } else {
+      encoded = initialized_payload_frame(bytes({0}), ws::Opcode::Close);
+      error = ws::DecodeError::InvalidControlFrame;
+    }
+    SYNC_REQUIRE(decoder.feed(encoded, output) == error);
+    SYNC_REQUIRE(output.empty());
+    SYNC_REQUIRE(decoder.feed({}, output) == ws::DecodeError::Terminal);
+  }
+}
+
+SYNC_TEST(shared_payload_quota_and_terminal_release_cover_initialized_cache) {
+  const std::size_t overhead = empty_pmr_vector_overhead();
+  const std::size_t idle = idle_payload_decoder_overhead();
+  const std::size_t cleanup_headroom = 3 * overhead;
+  const std::size_t second_size = 40 + cleanup_headroom;
+  const std::size_t message_limit = 128 + cleanup_headroom;
+
+  // Two idle decoders, the first 32-byte cache and three empty proxies fit.
+  // The second payload is larger than the remaining cleanup headroom, so its
+  // reservation fails. fail() can still construct its three replacement PMR
+  // vectors before it swaps and destroys the old storage on MSVC Debug.
+  ws::PayloadMemoryResource budget(2 * idle + 32 + cleanup_headroom);
+  {
+    ws::ClientFrameDecoder first(message_limit,
+                                 ws::PayloadSensitivity::NonSensitive, nullptr,
+                                 message_limit, &budget);
+    std::vector<ws::Message> output;
+    output.reserve(1);
+    feed_initialized_payload(
+        first, initialized_payload_frame(initialized_payload_bytes(32, 1)), output);
+    first.recycle_payload(output[0].payload);
+    SYNC_REQUIRE(output[0].payload.empty());
+    // The output Message still owns an empty PMR vector proxy until clear().
+    SYNC_REQUIRE(budget.used_bytes() == idle + overhead + 32);
+    output.clear();
+    SYNC_REQUIRE(budget.used_bytes() == idle + 32);
+
+    {
+      ws::ClientFrameDecoder second(message_limit,
+                                    ws::PayloadSensitivity::NonSensitive, nullptr,
+                                    message_limit, &budget);
+      SYNC_REQUIRE(second.feed(masked_binary_header(second_size), output) ==
+                   ws::DecodeError::ResourceExhausted);
+      SYNC_REQUIRE(output.empty());
+      SYNC_REQUIRE(budget.used_bytes() == 2 * idle + 32);
+    }
+    SYNC_REQUIRE(budget.used_bytes() == idle + 32);
+    SYNC_REQUIRE(first.feed(masked_binary_header(message_limit + 1), output) ==
+                 ws::DecodeError::MessageTooLarge);
+    SYNC_REQUIRE(budget.used_bytes() == idle);
+    SYNC_REQUIRE(budget.peak_bytes() <= budget.limit_bytes());
+  }
+  SYNC_REQUIRE(budget.used_bytes() == 0);
+}
+
+SYNC_TEST(recycle_preserves_sensitive_and_oversize_early_return_contract) {
+  for (const bool sensitive : {false, true}) {
+    RecordingCleanseObserver observer;
+    ws::ClientFrameDecoder decoder(
+        128, sensitive ? ws::PayloadSensitivity::Sensitive
+                       : ws::PayloadSensitivity::NonSensitive,
+        &observer, 16);
+    std::vector<ws::Message> output;
+    const auto payload = initialized_payload_bytes(32, 4);
+    feed_initialized_payload(decoder, initialized_payload_frame(payload), output);
+    decoder.recycle_payload(output[0].payload);
+    require_initialized_payload(output[0], payload);
+    ws::cleanse_message_payloads(output, &observer);
+    SYNC_REQUIRE(observer.all_zero);
+    SYNC_REQUIRE(observer.cleansed_bytes == 32);
+  }
+}
+
+SYNC_TEST(recycling_previous_message_while_next_is_partial_cannot_alias_active_storage) {
+  ws::ClientFrameDecoder decoder(256);
+  std::vector<ws::Message> output;
+  const auto first = initialized_payload_bytes(128, 2);
+  const auto second = initialized_payload_bytes(128, 3);
+  feed_initialized_payload(decoder, initialized_payload_frame(first), output);
+  const auto encoded = initialized_payload_frame(second);
+  SYNC_REQUIRE(decoder.feed(std::span(encoded).first(30), output) ==
+               ws::DecodeError::None);
+  SYNC_REQUIRE(output.size() == 1);
+  decoder.recycle_payload(output[0].payload);
+  SYNC_REQUIRE(output[0].payload.empty());
+  output.clear();
+  feed_initialized_payload(decoder, std::span(encoded).subspan(30), output);
+  require_initialized_payload(output[0], second);
+}
+
+SYNC_TEST(full_rgba_packet_reuses_one_initialized_allocation_with_distinct_bytes) {
+  constexpr std::size_t size = 8'294'464;
+  const std::size_t overhead = empty_pmr_vector_overhead();
+  const std::size_t idle = idle_payload_decoder_overhead();
+  // A completed output owns one extra proxy. Leave four proxy slots for the
+  // temporary Message moves; this changes no allowed payload allocation size.
+  ws::PayloadMemoryResource budget(idle + size + 4 * overhead);
+  {
+    ws::ClientFrameDecoder decoder(size, ws::PayloadSensitivity::NonSensitive,
+                                   nullptr, size, &budget);
+    std::vector<ws::Message> output;
+    output.reserve(1);
+    const std::byte* first_storage = nullptr;
+    for (unsigned seed = 1; seed <= 3; ++seed) {
+      const auto expected = initialized_payload_bytes(size, seed * 37);
+      const auto encoded = initialized_payload_frame(expected);
+      feed_initialized_payload(decoder, encoded, output, 65'536);
+      SYNC_REQUIRE(output.size() == 1);
+      require_initialized_payload(output[0], expected);
+      if (first_storage != nullptr) {
+        SYNC_REQUIRE(output[0].payload.data() == first_storage);
+      } else {
+        first_storage = output[0].payload.data();
+      }
+      SYNC_REQUIRE(budget.used_bytes() == idle + size + overhead);
+      decoder.recycle_payload(output[0].payload);
+      SYNC_REQUIRE(output[0].payload.empty());
+      output.clear();
+      SYNC_REQUIRE(budget.used_bytes() == idle + size);
+      SYNC_REQUIRE(budget.peak_bytes() <= budget.limit_bytes());
+    }
+  }
+  SYNC_REQUIRE(budget.used_bytes() == 0);
+}
+
+SYNC_TEST(cold_and_growing_header_do_not_initialize_unreceived_payload) {
+  for (const bool warm : {false, true}) {
+    RecordingCleanseObserver observer;
+    {
+      ws::ClientFrameDecoder decoder(512, ws::PayloadSensitivity::NonSensitive,
+                                     &observer);
+      std::vector<ws::Message> output;
+      if (warm) {
+        feed_initialized_payload(
+            decoder, initialized_payload_frame(initialized_payload_bytes(64, 1)),
+            output);
+        decoder.recycle_payload(output[0].payload);
+        output.clear();
+      }
+      const auto payload = initialized_payload_bytes(256, 2);
+      const auto encoded = initialized_payload_frame(payload);
+      feed_initialized_payload(
+          decoder, std::span(encoded).first(encoded.size() - payload.size()), output);
+      SYNC_REQUIRE(output.empty());
+      SYNC_REQUIRE(decoder.message_in_progress());
+    }
+    SYNC_REQUIRE(observer.all_zero);
+    SYNC_REQUIRE(observer.cleansed_bytes == (warm ? 64U : 0U));
+  }
 }
