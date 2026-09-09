@@ -49,9 +49,10 @@ using noisefactor::sync::protocol::FrameView;
 }  // namespace
 
 // Compare with the original three-stage conversion for every channel/alpha
-// pair, including odd widths, unaligned starts, and different row padding.
+// pair, including odd dimensions, unaligned starts, and different row padding.
+// The image exceeds the parallel threshold and has two unequal row ranges.
 SYNC_TEST(camera_fitter_matches_vimage_for_all_channel_and_alpha_values) {
-  constexpr std::uint32_t width = 257, height = 256;
+  constexpr std::uint32_t width = 257, height = 1025;
   constexpr std::size_t source_stride = width * 4 + 13;
   constexpr std::size_t output_stride = width * 4 + 17;
   std::vector<std::byte> source(3 + source_stride * height + 7, std::byte{0x5a});

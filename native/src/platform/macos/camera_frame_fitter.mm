@@ -6,6 +6,11 @@
 #include <cstring>
 #include <vector>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#include <dispatch/dispatch.h>
+#endif
+
 namespace noisefactor::sync::camera {
 
 namespace {
@@ -59,8 +64,77 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
          fill(right, placement.y, canvas.width - right, placement.height);
 }
 
-// Straight alpha is premultiplied first, then permutation and opaque alpha
-// are combined in one image pass. The source is never written.
+#if defined(__aarch64__)
+// Match vImage's rounded color * alpha / 255. The largest intermediate is
+// 65407, so each lane remains within 16 bits.
+[[nodiscard]] inline auto premultiply_channels(uint8x16_t color, uint8x16_t alpha) noexcept
+    -> uint8x16_t {
+  const auto low = vaddq_u16(vmull_u8(vget_low_u8(color), vget_low_u8(alpha)),
+                            vdupq_n_u16(128));
+  const auto high = vaddq_u16(vmull_u8(vget_high_u8(color), vget_high_u8(alpha)),
+                             vdupq_n_u16(128));
+  return vcombine_u8(vshrn_n_u16(vsraq_n_u16(low, low, 8), 8),
+                      vshrn_n_u16(vsraq_n_u16(high, high, 8), 8));
+}
+
+// Each invocation writes only its row range and uses no scratch storage.
+void convert_straight_rows(const protocol::FrameView& frame,
+                           const vImage_Buffer& destination,
+                           std::uint32_t first, std::uint32_t end) noexcept {
+  for (std::uint32_t y = first; y < end; ++y) {
+    const auto* in = reinterpret_cast<const std::uint8_t*>(frame.payload.data()) +
+                     static_cast<std::size_t>(y) * frame.row_stride;
+    auto* out = static_cast<std::uint8_t*>(destination.data) +
+                static_cast<std::size_t>(y) * destination.rowBytes;
+    std::uint32_t x = 0;
+    for (; frame.width - x >= 16; x += 16, in += 64, out += 64) {
+      const uint8x16x4_t rgba = vld4q_u8(in);
+      const uint8x16x4_t bgra = {{premultiply_channels(rgba.val[2], rgba.val[3]),
+                                  premultiply_channels(rgba.val[1], rgba.val[3]),
+                                  premultiply_channels(rgba.val[0], rgba.val[3]),
+                                  vdupq_n_u8(255)}};
+      vst4q_u8(out, bgra);
+    }
+    for (; x < frame.width; ++x, in += 4, out += 4) {
+      const auto multiply = [alpha = in[3]](std::uint8_t value) {
+        const std::uint32_t scaled = std::uint32_t(value) * alpha + 128U;
+        return static_cast<std::uint8_t>((scaled + (scaled >> 8)) >> 8);
+      };
+      const auto r = in[0], g = in[1], b = in[2];
+      out[0] = multiply(b);
+      out[1] = multiply(g);
+      out[2] = multiply(r);
+      out[3] = 255;
+    }
+  }
+}
+
+void convert_straight_into(const protocol::FrameView& frame,
+                           const vImage_Buffer& destination) noexcept {
+  constexpr std::uint64_t parallel_pixels = 512U * 512U;
+  if (frame.height < 2 || std::uint64_t(frame.width) * frame.height < parallel_pixels) {
+    convert_straight_rows(frame, destination, 0, frame.height);
+    return;
+  }
+  struct Work {
+    const protocol::FrameView& frame;
+    const vImage_Buffer& destination;
+  } work{frame, destination};
+  // Exactly two ranges, synchronously joined before the borrowed frame or
+  // destination can be reused. Dispatch owns the reusable worker pool.
+  dispatch_apply_f(2, DISPATCH_APPLY_AUTO, &work, [](void* context, std::size_t index) {
+    const auto& job = *static_cast<Work*>(context);
+    const auto middle = job.frame.height / 2;
+    convert_straight_rows(job.frame, job.destination,
+                          index == 0 ? 0 : middle,
+                          index == 0 ? middle : job.frame.height);
+  });
+}
+#endif
+
+// ARM64 combines straight-alpha conversion in one pass. Other targets
+// premultiply first, then combine permutation and opaque alpha in a second
+// pass. The source is never written.
 [[nodiscard]] auto convert_into(const protocol::FrameView& frame,
                                 vImage_Buffer& destination) noexcept -> bool {
   vImage_Buffer source{
@@ -71,6 +145,10 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
   };
   const uint8_t permute[4] = {2, 1, 0, 3};
   if (frame.alpha_mode == kAlphaStraight) {
+#if defined(__aarch64__)
+    convert_straight_into(frame, destination);
+    return true;
+#else
     if (vImagePremultiplyData_RGBA8888(&source, &destination, kvImageNoFlags) !=
         kvImageNoError) {
       return false;
@@ -78,6 +156,7 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
     return vImagePermuteChannelsWithMaskedInsert_ARGB8888(
                &destination, &destination, permute, kAlphaChannelMask, kBlackOpaqueBgra,
                kvImageNoFlags) == kvImageNoError;
+#endif
   }
   // Retain this path: fused out-of-place conversion used more CPU on M2.
   if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) !=

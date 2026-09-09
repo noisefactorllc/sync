@@ -113,8 +113,9 @@ diagnosed. Remove it when the fix ships.
   effect. A repeated candidate measurement failed its diagnostic deadline
   and has no accepted FPS. The prepared report retains both failed attempts. Publication is pending.
   This candidate has not shipped. Sustained 1080p60 remains unresolved.
-  The macOS camera fitter now removes one image pass for straight-alpha
-  input. This shared native change applies to web and desktop senders.
+  The macOS camera fitter reduces conversion passes for straight-alpha
+  input. On Apple Silicon, two row ranges each use one pass per pixel.
+  This shared native change applies to web and desktop senders.
   It reduces conversion work; it does not establish a delivery-stall fix.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
