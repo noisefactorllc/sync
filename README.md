@@ -65,6 +65,12 @@ diagnosed. Remove it when the fix ships.
   on a later run. New pooling changes are therefore not required to reproduce
   the loss. Sender backpressure increased while rendering continued near
   60 FPS. The cause remains unresolved. These tests do not establish a GC fix.
+  The [source byte-budget report](https://sync.noisedeck.app/performance/research-2026-09-09-source-byte-budgets/)
+  records a separate bounded queue experiment. Its two-packet source limit
+  averaged 59.730 FPS in web and 59.668 in desktop over three minutes.
+  Both still had seconds below 50. The sequential runs do not establish
+  a performance benefit or the effect on latency. The report retains one
+  rejected marker-check attempt. Its cause remains unproved.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
