@@ -60,6 +60,11 @@ diagnosed. Remove it when the fix ships.
   The [30-minute direct-receiver report](https://sync.noisedeck.app/performance/research-2026-09-08-direct-rgba-web-30m/)
   records both symptoms. Its experimental path still has unresolved stalls;
   it is not a released fix.
+  The [allocation pooling report](https://sync.noisedeck.app/performance/research-2026-09-09-allocation-pooling-round2/)
+  records 13 short web and desktop tests. The unchanged receiver also slowed
+  on a later run. New pooling changes are therefore not required to reproduce
+  the loss. Sender backpressure increased while rendering continued near
+  60 FPS. The cause remains unresolved. These tests do not establish a GC fix.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
