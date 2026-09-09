@@ -94,6 +94,16 @@ diagnosed. Remove it when the fix ships.
   not prove zero allocation or a GC fix. These sequential runs do not
   establish a performance benefit. The candidate has not shipped.
   The [fixed source encoder report](https://sync.noisedeck.app/performance/research-2026-09-09-fixed-source-encoder/) is live.
+  A separate native socket experiment passed its pixel, source and cleanup
+  checks but failed both three-minute delivery checkpoints. A fixed
+  262,144-byte HTTP send buffer averaged 18.313 unique pairs/s on web and
+  16.321 on desktop. Each run had 174 complete seconds below 50.
+  This setting fails release requirements and is not a released workaround.
+  Mean initial native write time decreased while mean callback time
+  increased. These native measurements include setup and cleanup. Lost event
+  records prevent a complete per-write reconstruction. The sequential tests
+  do not establish an exclusive cause or explain the earlier source-entry
+  gaps. The [fixed socket buffer report](https://sync.noisedeck.app/performance/research-2026-09-09-native-send-buffer/) is live.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
