@@ -77,6 +77,12 @@ diagnosed. Remove it when the fix ships.
   Desktop averaged 58.015 FPS and had five seconds below 50. Pixel checks
   passed in both contexts. These short runs do not establish sustained
   60 FPS or a general pooling benefit. The candidate has not shipped.
+  The [native write report](https://sync.noisedeck.app/performance/research-2026-09-09-native-write-cpu/)
+  records a 227.731 ms write with 4.019 ms of thread CPU time. These timings
+  do not distinguish scheduling delay from a system wait. Web and desktop
+  observations still had seconds below 50. One source renderer stopped
+  before cleanup. Its caller remains unknown. The report retains that
+  rejected attempt. These diagnostics do not establish a GC cause or fix.
 - **Content blockers block the loopback health request.** uBlock Origin,
   uBlock Origin Lite, and AdGuard ship EasyPrivacy and "block LAN" rules that
   stop public pages from reaching `127.0.0.1`. Chrome logs
