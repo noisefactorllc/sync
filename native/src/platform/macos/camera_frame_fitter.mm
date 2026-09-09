@@ -29,8 +29,6 @@ constexpr std::uint16_t kAlphaStraight = 2;
 
 // Opaque black in the 32BGRA byte order the canvas uses.
 constexpr Pixel_8888 kBlackOpaqueBgra = {0, 0, 0, 255};
-// vImage's channel mask for the last of four channels: alpha in BGRA.
-constexpr uint8_t kAlphaChannelMask = 0x1;
 
 [[nodiscard]] auto region(std::span<std::byte> canvas_bytes, std::size_t canvas_stride,
                           std::uint32_t x, std::uint32_t y, std::uint32_t width,
@@ -78,9 +76,10 @@ constexpr uint8_t kAlphaChannelMask = 0x1;
 }
 
 // Each invocation writes only its row range and uses no scratch storage.
-void convert_straight_rows(const protocol::FrameView& frame,
-                           const vImage_Buffer& destination,
-                           std::uint32_t first, std::uint32_t end) noexcept {
+template <bool Straight>
+void convert_rows(const protocol::FrameView& frame,
+                   const vImage_Buffer& destination,
+                   std::uint32_t first, std::uint32_t end) noexcept {
   for (std::uint32_t y = first; y < end; ++y) {
     const auto* in = reinterpret_cast<const std::uint8_t*>(frame.payload.data()) +
                      static_cast<std::size_t>(y) * frame.row_stride;
@@ -89,31 +88,40 @@ void convert_straight_rows(const protocol::FrameView& frame,
     std::uint32_t x = 0;
     for (; frame.width - x >= 16; x += 16, in += 64, out += 64) {
       const uint8x16x4_t rgba = vld4q_u8(in);
-      const uint8x16x4_t bgra = {{premultiply_channels(rgba.val[2], rgba.val[3]),
-                                  premultiply_channels(rgba.val[1], rgba.val[3]),
-                                  premultiply_channels(rgba.val[0], rgba.val[3]),
-                                  vdupq_n_u8(255)}};
+      uint8x16x4_t bgra = {{rgba.val[2], rgba.val[1], rgba.val[0], vdupq_n_u8(255)}};
+      if constexpr (Straight) {
+        bgra.val[0] = premultiply_channels(bgra.val[0], rgba.val[3]);
+        bgra.val[1] = premultiply_channels(bgra.val[1], rgba.val[3]);
+        bgra.val[2] = premultiply_channels(bgra.val[2], rgba.val[3]);
+      }
       vst4q_u8(out, bgra);
     }
     for (; x < frame.width; ++x, in += 4, out += 4) {
-      const auto multiply = [alpha = in[3]](std::uint8_t value) {
-        const std::uint32_t scaled = std::uint32_t(value) * alpha + 128U;
-        return static_cast<std::uint8_t>((scaled + (scaled >> 8)) >> 8);
-      };
       const auto r = in[0], g = in[1], b = in[2];
-      out[0] = multiply(b);
-      out[1] = multiply(g);
-      out[2] = multiply(r);
+      if constexpr (Straight) {
+        const auto multiply = [alpha = in[3]](std::uint8_t value) {
+          const std::uint32_t scaled = std::uint32_t(value) * alpha + 128U;
+          return static_cast<std::uint8_t>((scaled + (scaled >> 8)) >> 8);
+        };
+        out[0] = multiply(b);
+        out[1] = multiply(g);
+        out[2] = multiply(r);
+      } else {
+        out[0] = b;
+        out[1] = g;
+        out[2] = r;
+      }
       out[3] = 255;
     }
   }
 }
 
-void convert_straight_into(const protocol::FrameView& frame,
-                           const vImage_Buffer& destination) noexcept {
+template <bool Straight>
+void convert_arm64_into(const protocol::FrameView& frame,
+                        const vImage_Buffer& destination) noexcept {
   constexpr std::uint64_t parallel_pixels = 512U * 512U;
   if (frame.height < 2 || std::uint64_t(frame.width) * frame.height < parallel_pixels) {
-    convert_straight_rows(frame, destination, 0, frame.height);
+    convert_rows<Straight>(frame, destination, 0, frame.height);
     return;
   }
   struct Work {
@@ -125,18 +133,27 @@ void convert_straight_into(const protocol::FrameView& frame,
   dispatch_apply_f(2, DISPATCH_APPLY_AUTO, &work, [](void* context, std::size_t index) {
     const auto& job = *static_cast<Work*>(context);
     const auto middle = job.frame.height / 2;
-    convert_straight_rows(job.frame, job.destination,
-                          index == 0 ? 0 : middle,
-                          index == 0 ? middle : job.frame.height);
+    convert_rows<Straight>(job.frame, job.destination,
+                           index == 0 ? 0 : middle,
+                           index == 0 ? middle : job.frame.height);
   });
 }
 #endif
 
-// ARM64 combines straight-alpha conversion in one pass. Other targets
-// premultiply first, then combine permutation and opaque alpha in a second
-// pass. The source is never written.
+// ARM64 combines channel permutation, optional premultiplication, and opaque
+// alpha in one pass. Other targets use vImage. The source is never written.
 [[nodiscard]] auto convert_into(const protocol::FrameView& frame,
                                 vImage_Buffer& destination) noexcept -> bool {
+#if defined(__aarch64__)
+  if (frame.alpha_mode == kAlphaStraight) {
+    convert_arm64_into<true>(frame, destination);
+  } else {
+    convert_arm64_into<false>(frame, destination);
+  }
+  return true;
+#else
+  // vImage's channel mask for the last of four channels: alpha in BGRA.
+  constexpr uint8_t kAlphaChannelMask = 0x1;
   vImage_Buffer source{
       .data = const_cast<std::byte*>(frame.payload.data()),
       .height = frame.height,
@@ -145,10 +162,6 @@ void convert_straight_into(const protocol::FrameView& frame,
   };
   const uint8_t permute[4] = {2, 1, 0, 3};
   if (frame.alpha_mode == kAlphaStraight) {
-#if defined(__aarch64__)
-    convert_straight_into(frame, destination);
-    return true;
-#else
     if (vImagePremultiplyData_RGBA8888(&source, &destination, kvImageNoFlags) !=
         kvImageNoError) {
       return false;
@@ -156,9 +169,8 @@ void convert_straight_into(const protocol::FrameView& frame,
     return vImagePermuteChannelsWithMaskedInsert_ARGB8888(
                &destination, &destination, permute, kAlphaChannelMask, kBlackOpaqueBgra,
                kvImageNoFlags) == kvImageNoError;
-#endif
   }
-  // Retain this path: fused out-of-place conversion used more CPU on M2.
+  // Preserve the established vImage conversion on other architectures.
   if (vImagePermuteChannels_ARGB8888(&source, &destination, permute, kvImageNoFlags) !=
       kvImageNoError) {
     return false;
@@ -166,6 +178,7 @@ void convert_straight_into(const protocol::FrameView& frame,
   return vImageOverwriteChannelsWithScalar_ARGB8888(255, &destination, &destination,
                                                     kAlphaChannelMask, kvImageNoFlags) ==
          kvImageNoError;
+#endif
 }
 
 [[nodiscard]] auto ensure_capacity(std::vector<std::byte>& buffer, std::size_t bytes) noexcept
