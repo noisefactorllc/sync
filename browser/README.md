@@ -5,19 +5,18 @@
 may be supplied for development and tests.
 
 Passive `probe()` and `connect()` calls never initiate pairing. On browsers
-with loopback permission discovery, they query `loopback-network` and report a
-typed permission-required or permission-denied result before making a network
-request. The client queries the legacy `local-network-access` descriptor only
+with loopback permission discovery, they query `loopback-network` before any
+network request. They report a typed permission-required or permission-denied
+result. The client queries the legacy `local-network-access` descriptor only
 when `loopback-network` is genuinely unsupported. If neither descriptor exists,
-the bounded request remains the graceful compatibility path; an absent daemon
-is still reported as unavailable rather than treated as an application error.
+the bounded request remains the compatibility path. The client still reports
+an absent daemon as unavailable rather than treating it as an application error.
 
 Call `pair(name)` only from a deliberate user action such as a click. The
 explicit health request may produce the browser's loopback-network prompt, and
-the native companion then shows a separate per-origin pairing prompt. The SDK
-returns the resulting token but does not store it, log it, add it to a URL or
-subprotocol, update the client's configured token, retry, or connect
-automatically. The host application owns secure token persistence and creates
+the native companion then shows a separate per-origin pairing prompt. The SDK returns the resulting token. It does not store or log the token.
+It does not add the token to a URL or subprotocol or update the client's
+configured token. It does not retry or connect automatically. The host application owns secure token persistence and creates
 a new client with that token:
 
 ```js
