@@ -357,10 +357,15 @@ The browser SDK can connect any web renderer to Sync. It includes direct RGBA,
 Canvas 2D, WebGL2, and WebGPU export queues. The dependency-free source modules
 live in [`browser/`](browser/).
 
-The local SDK candidate is `@noisefactor/sync` 0.2.0. Build the local
-distribution with `npm run package:sdk`. This procedure does not publish the
-package to npm. You can then install its tarball or vendor the generated modules. See the
-[developer guide](docs/developers.md) for both procedures and the complete API.
+[Sync SDK 0.2.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.2.0) includes an installable tarball and browser modules.
+Install the tarball in your application:
+
+```bash
+npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/noisefactor-sync-0.2.0.tgz
+```
+
+You can then import from `@noisefactor/sync`.
+See the [developer guide](docs/developers.md) for direct browser imports, local builds, and the complete API.
 
 Passive discovery never starts pairing. A deliberate user action must call
 `pair()`. The host application owns storage for the returned token. See the

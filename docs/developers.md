@@ -3,10 +3,28 @@
 Sync lets a web application publish rendered frames to native video tools on the same computer.
 The browser SDK supports direct RGBA bytes, Canvas 2D, WebGL2, and WebGPU.
 
-The SDK candidate is `@noisefactor/sync` 0.2.0.
-These local installation procedures do not publish the package to npm.
+The SDK package is `@noisefactor/sync` 0.2.0.
+The SDK and native companion have separate versions.
 
-## Install the local candidate
+## Install the SDK
+
+Install the released tarball in your application:
+
+```bash
+npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/noisefactor-sync-0.2.0.tgz
+```
+
+You can then import from `@noisefactor/sync`.
+This command installs the GitHub release asset directly.
+It does not require an npm account.
+
+For direct browser imports, download the [modules ZIP](https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/sync-sdk-0.2.0-modules.zip).
+Extract `modules/` into your application's static assets.
+Import `index.js` from that directory.
+Keep the complete directory because its files use relative imports.
+The [release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.2.0) includes SHA-256 checksums for both downloads.
+
+## Build the SDK locally
 
 Build the distribution from the repository root:
 
@@ -38,11 +56,12 @@ Its files use relative imports between the client, protocol, diagnostics, and qu
 ## Start a compatible companion
 
 The SDK does not install or update the native Sync companion.
-For candidate testing, build and run the daemon from the same source checkout.
-Follow the [native build instructions](../README.md#building-the-native-daemon).
+SDK 0.2.0 targets native preview 0.2.66.
+That companion version adds third-party `app://` origins and native statistics.
+Check the [download page](https://sync.noisedeck.app/#download) for available installers.
 
-You can also [download a published companion](https://sync.noisedeck.app/#download) for its documented integrations.
-A published build can differ from this local SDK candidate until a compatible release ships.
+For source testing, build and run the daemon from the same source checkout.
+Follow the [native build instructions](../README.md#building-the-native-daemon).
 
 ## Pair from a user action
 
