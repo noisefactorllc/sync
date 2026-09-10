@@ -1,0 +1,731 @@
+{
+  "scope": "browser-and-syphon",
+  "browser": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+    "webgpu": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": ""
+    }
+  },
+  "adapters": [
+    {
+      "kind": "rgba",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "canvas",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgl2-default",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgl2-framebuffer",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgpu-rgba8unorm",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgpu-bgra8unorm",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgpu-rgba8unorm-srgb",
+      "bytesCompared": 24,
+      "exact": true
+    },
+    {
+      "kind": "webgpu-bgra8unorm-srgb",
+      "bytesCompared": 24,
+      "exact": true
+    }
+  ],
+  "native": [
+    {
+      "kind": "rgba",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 5,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 5,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 5,
+          "lastPresentationTimeUs": 1789061347543300,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "canvas",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 5,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 5,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 5,
+          "lastPresentationTimeUs": 1789061347653400,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgl2-default",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 4,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 4,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 4,
+          "lastPresentationTimeUs": 1789061347738900,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgl2-framebuffer",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 6,
+          "sent": 5,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 5,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 5,
+          "lastPresentationTimeUs": 1789061347861900,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgpu-rgba8unorm",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 4,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 4,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 4,
+          "lastPresentationTimeUs": 1789061347967000,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgpu-bgra8unorm",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 4,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 4,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 4,
+          "lastPresentationTimeUs": 1789061348070400,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgpu-rgba8unorm-srgb",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 5,
+          "sent": 4,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 4,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 4,
+          "lastPresentationTimeUs": 1789061348177400,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    },
+    {
+      "kind": "webgpu-bgra8unorm-srgb",
+      "receiver": {
+        "exact": true,
+        "rgba": [
+          255,
+          0,
+          0,
+          255,
+          0,
+          255,
+          0,
+          255,
+          0,
+          0,
+          255,
+          128,
+          255,
+          255,
+          255,
+          255,
+          0,
+          255,
+          255,
+          255,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "diagnostic": {
+        "schemaVersion": 1,
+        "sdkVersion": "0.2.0",
+        "daemonVersion": "0.2.0",
+        "protocolVersion": 1,
+        "connected": true,
+        "providers": [
+          {
+            "id": "syphon",
+            "direction": "send",
+            "available": true,
+            "selected": true
+          }
+        ],
+        "frame": {
+          "width": 3,
+          "height": 2,
+          "format": "rgba8unorm",
+          "colorSpace": "srgb",
+          "alphaMode": "straight",
+          "fps": 60
+        },
+        "local": {
+          "accepted": 6,
+          "sent": 5,
+          "droppedBusy": 0,
+          "droppedBackpressure": 0,
+          "failed": 0
+        },
+        "native": {
+          "accepted": 5,
+          "dropped": 0,
+          "rejected": 0,
+          "failed": 0,
+          "lastSequence": 5,
+          "lastPresentationTimeUs": 1789061348301800,
+          "checksum": "0000000000000000"
+        },
+        "nativeError": null,
+        "error": null
+      }
+    }
+  ],
+  "soak": {
+    "durationMs": 12000,
+    "receiver": {
+      "available": true,
+      "serverFound": true,
+      "framesSeen": 751,
+      "markers": 751,
+      "duplicateMarkers": 0,
+      "probeDropped": 0,
+      "invalidMarkers": 0,
+      "dimensionMismatches": 0,
+      "commandErrors": 0,
+      "missedSequences": 0,
+      "firstSequence": 1,
+      "lastSequence": 751,
+      "latencyUs": {
+        "min": 493,
+        "p50": 1611,
+        "p95": 2653,
+        "p99": 4182,
+        "max": 15788
+      },
+      "browserAgeUs": {
+        "p50": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "transportLatencyUs": {
+        "p50": 1611,
+        "p95": 2653,
+        "p99": 4182
+      }
+    },
+    "rssKb": [
+      21584,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664,
+      21664
+    ],
+    "diagnostic": {
+      "schemaVersion": 1,
+      "sdkVersion": "0.2.0",
+      "daemonVersion": "0.2.0",
+      "protocolVersion": 1,
+      "connected": true,
+      "providers": [
+        {
+          "id": "syphon",
+          "direction": "send",
+          "available": true,
+          "selected": true
+        }
+      ],
+      "frame": {
+        "width": 64,
+        "height": 32,
+        "format": "rgba8unorm",
+        "colorSpace": "srgb",
+        "alphaMode": "straight",
+        "fps": 60
+      },
+      "local": {
+        "accepted": 752,
+        "sent": 752,
+        "droppedBusy": 0,
+        "droppedBackpressure": 0,
+        "failed": 0
+      },
+      "native": {
+        "accepted": 752,
+        "dropped": 0,
+        "rejected": 0,
+        "failed": 0,
+        "lastSequence": 752,
+        "lastPresentationTimeUs": 1789061360366900,
+        "checksum": "0000000000000000"
+      },
+      "nativeError": null,
+      "error": null
+    }
+  }
+}

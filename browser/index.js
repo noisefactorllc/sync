@@ -6,6 +6,12 @@ export {
   PIXEL_FORMAT,
 } from './protocol.js';
 export { SyncFrameSink } from './frame-sink.js';
+export { createDiagnosticSnapshot } from './diagnostics.js';
+export { SYNC_SDK_VERSION } from './version.js';
+export { RgbaExportQueue } from './adapters/rgba.js';
+export { CanvasExportQueue } from './adapters/canvas.js';
+export { WebGL2ExportQueue } from './adapters/webgl2.js';
+export { WebGPUExportQueue } from './adapters/webgpu.js';
 export {
   SYNC_DEFAULT_ENDPOINT,
   SYNC_ERROR_CODE,

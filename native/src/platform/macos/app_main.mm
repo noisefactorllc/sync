@@ -602,7 +602,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
 - (void)openGuide:(id)sender {
   (void)sender;
   [NSWorkspace.sharedWorkspace
-      openURL:[NSURL URLWithString:@"https://noisedeck.app/docs/Sync.md"]];
+      openURL:[NSURL URLWithString:@"https://sync.noisedeck.app/#docs"]];
 }
 
 - (void)openSource:(id)sender {

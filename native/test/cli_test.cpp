@@ -242,11 +242,13 @@ SYNC_TEST(cli_static_test_mode_preserves_the_exact_legacy_shape) {
   }
 }
 
-SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
+SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_application_origins) {
   for (const std::string_view packaged_origin : {
            "app://noisedeck",
            "app://polymorphic",
            "app://visualize",
+           "app://other",
+           "app://com.example.visualizer",
        }) {
     const auto receiver = parse({"--port", "0", "--test-origin",
                                  packaged_origin, "--test-token", "test-token",
@@ -257,7 +259,8 @@ SYNC_TEST(cli_static_test_mode_accepts_exact_packaged_product_origins) {
   }
 
   for (const std::string_view rejected_origin : {
-           "app://other",
+           "app://127.0.0.1",
+           "app://com.example.visualizer:1234",
            "APP://polymorphic",
            "app://Polymorphic",
            "app://polymorphic/",

@@ -1,0 +1,25 @@
+{
+  "name": "@noisefactor/sync",
+  "version": "0.2.0",
+  "description": "Send browser video to the local Sync companion",
+  "type": "module",
+  "license": "MIT",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js" }
+  },
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noisefactorllc/sync.git",
+    "directory": "browser"
+  },
+  "homepage": "https://sync.noisedeck.app/",
+  "files": [
+    "LICENSE", "README.md", "index.js", "index.d.ts", "client.js",
+    "protocol.js", "frame-sink.js", "stats.js", "diagnostics.js", "version.js",
+    "export-queue.js", "adapters/rgba.js", "adapters/canvas.js",
+    "adapters/webgl2.js", "adapters/webgpu.js"
+  ]
+}

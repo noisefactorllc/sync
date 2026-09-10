@@ -16,7 +16,7 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr wchar_t kMessage[] = L"Sync: waiting for Noisedeck";
+constexpr wchar_t kMessage[] = L"Sync: waiting for video";
 // Deliberately not pure black: a viewer has to be able to tell a drawn card
 // from a dead signal, and 0x14 reads as "off" without reading as "broken".
 constexpr float kBackgroundLevel = 0x14 / 255.0F;

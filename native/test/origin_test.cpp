@@ -52,7 +52,7 @@ SYNC_TEST(origin_accepts_only_trustworthy_http_loopback_forms) {
   require_rejected("http://localhost.example", OriginError::InsecureRemote);
 }
 
-SYNC_TEST(origin_accepts_only_exact_packaged_product_origins) {
+SYNC_TEST(origin_accepts_generic_lowercase_packaged_application_origins) {
   require_normalized("app://noisedeck", "app://noisedeck");
   require_normalized("app://polymorphic", "app://polymorphic");
   require_normalized("app://visualize", "app://visualize");
@@ -68,7 +68,17 @@ SYNC_TEST(origin_accepts_only_exact_packaged_product_origins) {
   require_rejected("app://Visualize");
   require_rejected("app://visualize:1");
   require_rejected("app://visualize/");
-  require_rejected("app://other");
+  require_normalized("app://other", "app://other");
+  require_normalized("app://independent-visualizer", "app://independent-visualizer");
+  require_normalized("app://com.example.visualizer", "app://com.example.visualizer");
+  for (const std::string_view origin : {
+      "app://", "app://Other", "app://example.com:443", "app://example.com/",
+      "app://example.com/path", "app://user@example.com", "app://example.com?x",
+      "app://example.com#x", "app://127.0.0.1", "app://[::1]", "app://2130706433",
+      "app://0x7f000001", "app://example.1", "app://xn--bcher-kva.example",
+      "app://example%2ecom", "app://example_com", "app://example.com.",
+      "app://.example", "app://-example", "app://example-", "app://a..b",
+  }) require_rejected(origin);
 }
 
 SYNC_TEST(origin_rejects_opaque_credentials_and_non_origin_components) {

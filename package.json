@@ -9,6 +9,9 @@
   },
   "type": "module",
   "scripts": {
+    "package:sdk": "node scripts/package-sdk.mjs",
+    "examples": "node examples/server.mjs",
+    "test:sdk": "node --test --test-timeout=30000 test/browser/*.test.js test/packaging/sdk-package.test.js",
     "test:meta": "node --test --test-timeout=30000 test/meta/*.test.js",
     "test:unit": "node --test --test-timeout=30000 test/meta/*.test.js test/browser/*.test.js test/soak/*.test.js test/soak/lib/*.test.js test/acceptance/*.test.mjs",
     "test:browser": "node --test --test-timeout=30000 test/browser/*.test.js",
@@ -20,6 +23,8 @@
     "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js",
     "test:linux:containers": "scripts/test-linux-containers.sh",
     "test:acceptance:unit": "node --test --test-timeout=30000 test/acceptance/*.test.mjs",
+    "test:acceptance:interop": "node test/acceptance/interoperability.mjs",
+    "test:acceptance:examples": "node test/acceptance/interoperability-examples.mjs",
     "test:soak": "node test/acceptance/daemon-memory-soak.mjs",
     "test:soak:unit": "node --test --test-timeout=30000 test/soak/*.test.js test/soak/lib/*.test.js",
     "test:soak:long": "node test/soak/run.mjs"

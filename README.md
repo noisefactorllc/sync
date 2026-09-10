@@ -165,8 +165,8 @@ they support.
 | Camera | Ubuntu 24.04 x86_64 | Ubuntu `v4l2loopback` packages | No kernel module is bundled; one-time setup configures the stock module |
 
 The camera provider publishes a 1920×1080 stream, so any app that picks a
-camera can use it. While no sender is live the camera shows a dark card
-reading "Sync: waiting for Noisedeck" rather than a black picture.
+camera can use it. While no sender is live, the camera shows a dark Sync
+waiting card instead of a black picture.
 
 On **macOS** it is a CoreMediaIO system extension shipping inside Sync.app,
 appearing as "Sync Camera". macOS activates it only for an app under
@@ -353,11 +353,19 @@ Factor release workflow.
 
 ## Browser SDK
 
-The dependency-free browser modules live in [`browser/`](browser/). Passive
-discovery never initiates pairing. A deliberate user action must call
+The browser SDK can connect any web renderer to Sync. It includes direct RGBA,
+Canvas 2D, WebGL2, and WebGPU export queues. The dependency-free source modules
+live in [`browser/`](browser/).
+
+The local SDK candidate is `@noisefactor/sync` 0.2.0. Build the local
+distribution with `npm run package:sdk`. This procedure does not publish the
+package to npm. You can then install its tarball or vendor the generated modules. See the
+[developer guide](docs/developers.md) for both procedures and the complete API.
+
+Passive discovery never starts pairing. A deliberate user action must call
 `pair()`. The host application owns storage for the returned token. See the
-[browser client guide](browser/README.md) for the API and loopback Permissions
-Policy requirements.
+[browser client guide](browser/README.md) for permission and lifecycle details.
+Runnable [browser and Electron examples](examples/) cover all three GPU modes.
 
 ```js
 import { SyncBridgeClient } from './browser/index.js'

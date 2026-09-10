@@ -211,8 +211,13 @@ NormalizeOriginResult normalize_origin(std::string_view input) noexcept {
   for (const unsigned char byte : input) {
     if (byte < 0x21U || byte > 0x7eU) return result;
   }
-  if (input == "app://noisedeck" || input == "app://polymorphic" ||
-      input == "app://visualize") {
+  if (input.starts_with("app://")) {
+    const auto host = input.substr(6);
+    if (!valid_dns_host(host) || has_disallowed_alabel(host) ||
+        has_whatwg_numeric_alias(host)) return result;
+    for (const char byte : host) {
+      if (byte != ascii_lower(byte)) return result;
+    }
     append(input);
     result.error = OriginError::None;
     return result;

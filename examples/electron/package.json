@@ -1,0 +1,12 @@
+{
+  "name": "sync-interoperability-electron-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "electron main.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.0.0"
+  }
+}

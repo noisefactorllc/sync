@@ -9,7 +9,7 @@
 namespace noisefactor::sync::camera {
 namespace {
 
-constexpr std::string_view kMessage = "Sync: waiting for Noisedeck";
+constexpr std::string_view kMessage = "Sync: waiting for video";
 constexpr std::uint32_t kGlyphWidth = 5;
 constexpr std::uint32_t kGlyphHeight = 7;
 constexpr std::uint32_t kGlyphAdvance = 6;

@@ -70,7 +70,7 @@ void fill_black_opaque(std::span<std::byte> bgra, std::size_t stride, CameraCanv
       (__bridge id)kCTForegroundColorAttributeName : (__bridge id)ink,
     };
     NSAttributedString* text =
-        [[NSAttributedString alloc] initWithString:@"Sync: waiting for Noisedeck"
+        [[NSAttributedString alloc] initWithString:@"Sync: waiting for video"
                                         attributes:attributes];
     CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)text);
     CGColorRelease(ink);

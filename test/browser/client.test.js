@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { decodeFrameHeaderV1 } from '../../browser/protocol.js';
 
 import {
   SYNC_DEFAULT_ENDPOINT,
@@ -175,6 +176,72 @@ class ExportQueue {
     this.closeOptions.push(options);
   }
 }
+
+test('sender statistics use the control queue and preserve uint64 checksums', async (t) => {
+  const commands = [];
+  scriptedControl({ onControl(message, socket) {
+    commands.push(message.type);
+    if (message.type === 'getStats') {
+      socket.message('{"type":"stats","id":"sender_1","accepted":1,"dropped":0,' +
+        '"rejected":0,"failed":0,"lastSequence":1,"lastPresentationTimeUs":1000,' +
+        '"checksum":18446744073709551615}');
+    }
+  } });
+  const bridge = client();
+  t.after(() => bridge.close());
+  const sender = await bridge.createSender('Independent visualizer', {
+    exportQueue: new ExportQueue(), maxBufferedFrames: 2,
+  });
+  const [first, second] = await Promise.all([sender.getStats(), sender.getStats()]);
+  assert.equal(first.checksum, 'ffffffffffffffff');
+  assert.equal(second.accepted, 1);
+  assert.deepEqual(commands, ['hello', 'createSender', 'getStats', 'getStats']);
+  sender.close();
+  await sender.closed;
+  await assert.rejects(sender.getStats(), SyncLifecycleError);
+});
+
+test('wrong sender statistics terminate the control session', async (t) => {
+  scriptedControl({ onControl(message, socket) {
+    if (message.type === 'getStats') {
+      socket.message('{"type":"stats","id":"another-sender","accepted":1,"dropped":0,' +
+        '"rejected":0,"failed":0,"lastSequence":1,"lastPresentationTimeUs":1000,"checksum":0}');
+    }
+  } });
+  const bridge = client();
+  t.after(() => bridge.close());
+  const sender = await bridge.createSender('Independent visualizer', {
+    exportQueue: new ExportQueue(), maxBufferedFrames: 2,
+  });
+  await assert.rejects(sender.getStats(), SyncProtocolError);
+  assert.equal(bridge.connected, false);
+  await assert.rejects(sender.closed, SyncProtocolError);
+});
+
+test('raw sender copies pixels before returning and applies its default pressure budget', async (t) => {
+  scriptedControl();
+  const bridge = client();
+  t.after(() => bridge.close());
+  const sender = await bridge.createRgbaSender('Independent canvas', {
+    clock: { timeOrigin: 0 }, maxBufferedFrames: undefined,
+  });
+  sender.configure({ width: 1, height: 1, format: 'rgba8unorm',
+    colorSpace: 'srgb', alphaMode: 'straight', fps: 60 });
+  const data = new Uint8Array([10, 20, 30, 255]);
+  const socket = FakeWebSocket.instances[1];
+  let sent;
+  socket.onSend = value => { sent = new Uint8Array(value).slice(); };
+  assert.equal(sender.submit({ width: 1, height: 1, rowStride: 4, data }, 10), true);
+  data.fill(0);
+  assert.deepEqual([...sent.slice(64)], [10, 20, 30, 255]);
+  assert.equal(decodeFrameHeaderV1(sent).presentationTimeUs, 10000);
+  socket.bufferedAmount = 69;
+  assert.equal(sender.submit({ width: 1, height: 1, rowStride: 4, data }, 20), false);
+  assert.equal(sender.stats.sent, 1);
+  assert.equal(sender.stats.droppedBackpressure, 1);
+  sender.close();
+  await sender.closed;
+});
 
 class ResourceExportQueue extends ExportQueue {
   constructor() {

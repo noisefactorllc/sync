@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sync interoperability example</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Noise Factor Sync</p>
+      <h1>Interoperability example</h1>
+      <p>This app sends one animated source through Canvas, WebGL2, or WebGPU.</p>
+    </header>
+
+    <section class="controls" aria-label="Sync controls">
+      <label for="mode">Renderer</label>
+      <select id="mode">
+        <option value="canvas">Canvas 2D</option>
+        <option value="webgl2">WebGL2</option>
+        <option value="webgpu">WebGPU</option>
+      </select>
+      <button id="connect" type="button">Connect</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="diagnostics" type="button" disabled>Copy diagnostics</button>
+    </section>
+
+    <section class="preview" aria-label="Rendered output">
+      <div id="surface"></div>
+      <div class="readout">
+        <p id="status" role="status" aria-live="polite">Ready to connect.</p>
+        <output id="stats">accepted 0 · sent 0 · dropped 0 · failed 0</output>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

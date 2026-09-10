@@ -848,6 +848,15 @@ if(APPLE)
   target_link_libraries(sync_syphon_receiver_probe
     PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
   )
+  add_executable(sync_syphon_pixels_probe native/test/macos/syphon_pixels_probe.mm)
+  target_compile_features(sync_syphon_pixels_probe PRIVATE cxx_std_20)
+  set_target_properties(sync_syphon_pixels_probe PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_syphon_pixels_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_syphon_pixels_probe
+    PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
   add_test(
     NAME sync_syphon_missing_pool_diagnostics
     COMMAND ${CMAKE_COMMAND}

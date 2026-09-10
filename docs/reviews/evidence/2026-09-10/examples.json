@@ -1,0 +1,119 @@
+{
+  "browser": "151.0.7922.34",
+  "electron": "44.0.0",
+  "permissions": "Test-origin grants in Chrome; scoped app policy in Electron; native approval fixture.",
+  "results": [
+    {
+      "host": "http-loopback",
+      "mode": "canvas",
+      "stats": "accepted 10 \u00b7 sent 10 \u00b7 dropped 22 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "http-loopback",
+      "mode": "webgl2",
+      "stats": "accepted 18 \u00b7 sent 10 \u00b7 dropped 21 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "http-loopback",
+      "mode": "webgpu",
+      "stats": "accepted 17 \u00b7 sent 10 \u00b7 dropped 24 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "https",
+      "mode": "canvas",
+      "stats": "accepted 10 \u00b7 sent 10 \u00b7 dropped 21 \u00b7 failed 0",
+      "origins": [
+        "https://127.0.0.1:56670"
+      ]
+    },
+    {
+      "host": "https",
+      "mode": "webgl2",
+      "stats": "accepted 17 \u00b7 sent 10 \u00b7 dropped 22 \u00b7 failed 0",
+      "origins": [
+        "https://127.0.0.1:56670"
+      ]
+    },
+    {
+      "host": "https",
+      "mode": "webgpu",
+      "stats": "accepted 18 \u00b7 sent 10 \u00b7 dropped 23 \u00b7 failed 0",
+      "origins": [
+        "https://127.0.0.1:56670"
+      ]
+    },
+    {
+      "host": "delegated-iframe",
+      "mode": "canvas",
+      "stats": "accepted 10 \u00b7 sent 10 \u00b7 dropped 118 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "delegated-iframe",
+      "mode": "webgl2",
+      "stats": "accepted 19 \u00b7 sent 10 \u00b7 dropped 119 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "delegated-iframe",
+      "mode": "webgpu",
+      "stats": "accepted 20 \u00b7 sent 10 \u00b7 dropped 116 \u00b7 failed 0",
+      "origins": [
+        "http://127.0.0.1:56669"
+      ]
+    },
+    {
+      "host": "http-loopback",
+      "denial": "Pairing denied"
+    },
+    {
+      "host": "http-loopback",
+      "pendingStartCanceled": true
+    },
+    {
+      "host": "electron",
+      "mode": "canvas",
+      "stats": "accepted 10 \u00b7 sent 10 \u00b7 dropped 207 \u00b7 failed 0",
+      "origins": [
+        "app://com.example.visualizer"
+      ]
+    },
+    {
+      "host": "electron",
+      "mode": "webgl2",
+      "stats": "accepted 20 \u00b7 sent 10 \u00b7 dropped 205 \u00b7 failed 0",
+      "origins": [
+        "app://com.example.visualizer"
+      ]
+    },
+    {
+      "host": "electron",
+      "mode": "webgpu",
+      "stats": "accepted 19 \u00b7 sent 10 \u00b7 dropped 212 \u00b7 failed 0",
+      "origins": [
+        "app://com.example.visualizer"
+      ]
+    },
+    {
+      "host": "electron",
+      "contextLoss": "The WebGL2 context was lost."
+    },
+    {
+      "host": "electron",
+      "daemonLoss": "Sync sender connection was lost"
+    }
+  ]
+}

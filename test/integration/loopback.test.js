@@ -412,8 +412,15 @@ function webSocketForOrigin(origin) {
       if (this.readyState !== OriginWebSocket.OPEN || !this._client) {
         throw new Error("WebSocket is not open");
       }
-      if (typeof value !== "string") throw new TypeError("test WebSocket accepts text only");
-      this._client.send(0x1, Buffer.from(value, "utf8"));
+      if (typeof value === "string") {
+        this._client.send(0x1, Buffer.from(value, "utf8"));
+      } else if (value instanceof ArrayBuffer) {
+        this._client.send(0x2, Buffer.from(value));
+      } else if (ArrayBuffer.isView(value)) {
+        this._client.send(0x2, Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+      } else {
+        throw new TypeError("test WebSocket accepts text or binary data");
+      }
     }
 
     close() {
@@ -825,6 +832,46 @@ test("browser SDK performs a bounded health probe against the real loopback daem
   } finally {
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
+});
+
+test("independent packaged app pairs, sends pixels, reads statistics, and isolates its token", async (t) => {
+  const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), "sync-independent-app-"));
+  const daemon = await spawnPairingDaemon(path.join(directory, "state", "pairings"), "approve");
+  const clients = [];
+  t.after(async () => {
+    for (const bridge of clients) bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+    await rm(directory, { recursive: true });
+  });
+  const makeClient = (origin, token) => {
+    const bridge = new SyncBridgeClient({
+      endpoint: `http://127.0.0.1:${daemon.ready.port}`, token,
+      fetch: healthFetchForOrigin(origin), WebSocket: webSocketForOrigin(origin),
+      timeoutMs: TIMEOUT_MS,
+    });
+    clients.push(bridge);
+    return bridge;
+  };
+  const origin = "app://com.example.visualizer";
+  const pairing = makeClient(origin);
+  const { token } = await pairing.pair("Independent visualizer");
+  pairing.close();
+  await assert.rejects(makeClient("app://another.visualizer", token).connect(), SyncAuthenticationError);
+  const bridge = makeClient(origin, token);
+  const sender = await bridge.createRgbaSender("Independent output", { clock: { timeOrigin: 0 } });
+  sender.configure({ width: 2, height: 1, format: "rgba8unorm",
+    colorSpace: "srgb", alphaMode: "straight", fps: 30 });
+  const pixels = new Uint8Array([255, 0, 0, 255, 0, 127, 255, 128]);
+  assert.equal(sender.submit({ width: 2, height: 1, rowStride: 8, data: pixels }, 1), true);
+  assert.equal(sender.stats.sent, 1, 'the socket accepts the binary frame');
+  const deadline = Date.now() + TIMEOUT_MS;
+  let stats;
+  do { stats = await sender.getStats(); } while (stats.accepted === 0 && Date.now() < deadline);
+  assert.equal(stats.accepted, 1);
+  assert.equal(stats.checksum, fnv1a32(pixels).toString(16).padStart(16, "0"));
+  assert.equal(stats.lastPresentationTimeUs, 1000);
+  sender.close();
+  await sender.closed;
 });
 
 test("packaged Polymorphic origin reaches native health and authenticated control", async () => {

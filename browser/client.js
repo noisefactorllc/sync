@@ -1,4 +1,6 @@
 import { SyncFrameSink } from './frame-sink.js';
+import { decodeSenderStats } from './stats.js';
+import { RgbaExportQueue } from './adapters/rgba.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_HEALTH_BYTES = 65_536;
@@ -601,6 +603,18 @@ class SyncSenderSink {
     return this._frameSink === null ? this._finalStats : this._frameSink.stats;
   }
 
+  getStats() {
+    if (this._closed) return Promise.reject(new SyncLifecycleError('sender is closed'));
+    return this._client._scheduleControl(this._session, () => {
+      if (this._closed) throw new SyncLifecycleError('sender is closed');
+      return this._client._exchange(
+        { type: 'getStats', senderId: this.id },
+        (_value, raw) => decodeSenderStats(raw, this.id),
+        this._session,
+      );
+    });
+  }
+
   configure(descriptor) {
     if (this._closed) throw new SyncLifecycleError('sender is closed');
     return this._frameSink.configure(descriptor);
@@ -790,6 +804,18 @@ export class SyncBridgeClient {
     });
     this._connectPromise = tracked;
     return tracked;
+  }
+
+  async createRgbaSender(name, options = {}) {
+    const exportQueue = new RgbaExportQueue();
+    try {
+      const budget = options.maxBufferedBytes === undefined && options.maxBufferedFrames === undefined
+        ? { maxBufferedFrames: 2 } : {};
+      return await this.createSender(name, { ...options, ...budget, exportQueue });
+    } catch (error) {
+      exportQueue.close();
+      throw error;
+    }
   }
 
   createSender(name, options) {
@@ -1238,7 +1264,7 @@ export class SyncBridgeClient {
       return;
     }
     this._clearControlPending();
-    pending.resolve(value);
+    pending.resolve({ value, raw: data });
   }
 
   async _exchange(command, validate, session) {
@@ -1268,7 +1294,7 @@ export class SyncBridgeClient {
       this._terminateControl(error, true, session);
     }
 
-    const value = await response;
+    const { value, raw } = await response;
     let remoteError;
     try {
       remoteError = daemonError(value);
@@ -1281,7 +1307,7 @@ export class SyncBridgeClient {
     }
     if (remoteError) throw remoteError;
     try {
-      return validate(value);
+      return validate(value, raw);
     } catch (error) {
       const normalized = error instanceof SyncBridgeError
         ? error

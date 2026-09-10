@@ -152,7 +152,7 @@ test("native menu guide opens the shipped public documentation asset", () => {
   const appSource = readFileSync(
     path.join(sourceDirectory, "native/src/platform/macos/app_main.mm"), "utf8",
   );
-  assert.match(appSource, /https:\/\/noisedeck\.app\/docs\/Sync\.md/);
+  assert.match(appSource, /https:\/\/sync\.noisedeck\.app\/#docs/);
   assert.doesNotMatch(appSource, /https:\/\/noisedeck\.app\/docs\/Sync"/);
 });
 
