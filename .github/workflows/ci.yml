@@ -318,11 +318,14 @@ jobs:
           $note | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Unregister the camera source
-        if: always()
+        if: >-
+          always() &&
+          steps.camera_capability.outcome != '' &&
+          steps.camera_capability.outcome != 'skipped'
         shell: pwsh
         run: |
-          # always(), so a failed test does not leave a registered camera
-          # behind on a reused runner.
+          # Remove the registration after setup starts, including on failure or cancellation.
+          # An earlier failure can skip registration before syncd exists.
           & "build/$env:BUILD_TYPE/syncd.exe" --unregister-camera
           exit 0
 
