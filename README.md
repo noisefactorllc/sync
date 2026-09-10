@@ -370,10 +370,10 @@ See the [developer guide](docs/developers.md) for direct browser imports, local 
 Passive discovery never starts pairing. A deliberate user action must call
 `pair()`. The host application owns storage for the returned token. See the
 [browser client guide](browser/README.md) for permission and lifecycle details.
-Runnable [browser and Electron examples](examples/) cover all three GPU modes.
+Runnable [browser and Electron examples](examples/) cover Canvas 2D, WebGL2, and WebGPU.
 
 ```js
-import { SyncBridgeClient } from './browser/index.js'
+import { SyncBridgeClient } from '@noisefactor/sync'
 
 const pairingClient = new SyncBridgeClient()
 const { token } = await pairingClient.pair('My visual app')
