@@ -236,7 +236,7 @@ SYNC_TEST(mac_prompt_approval_copies_security_identity_and_uses_deny_default) {
     SYNC_REQUIRE(record->message ==
                  "Security identity: https://example.com\n"
                  "Unverified app label: Nøise Deck\n\n"
-                 "Allow this origin to publish through Sync?");
+                 "Allow this origin to publish video and capture audio inputs through Sync?");
     SYNC_REQUIRE(record->default_button == "Deny");
     SYNC_REQUIRE(record->alternate_button == "Allow");
     SYNC_REQUIRE(record->ui_deadline == 200ms);

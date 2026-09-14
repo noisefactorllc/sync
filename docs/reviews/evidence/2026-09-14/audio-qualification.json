@@ -1,0 +1,252 @@
+{
+  "recordedAtUtc": "2026-09-14T03:31:31.206746+00:00",
+  "sdkVersion": "0.3.0",
+  "sourceState": "Release candidate working tree based on Sync 948335b00284cd18db0fefda5d61797bb2e3a97c; file hashes below bind the tested inputs.",
+  "sourceSha256": {
+    "native/src/audio_native.cpp": "f9776f5abf01f09337e15ebba6f1b9687f558c29e8de085ae2a6a7c169483267",
+    "native/src/audio_capture.cpp": "817ee0ae4d083ccdf88873fcff94e8f5f30be97bb4382233f841e515789e14aa",
+    "native/src/server.cpp": "aac487e58eb5a5b75b6280e2bbfb592bde5839cae1b554305a87c825d578462d",
+    "native/test/audio_native_probe.cpp": "6a11d2d15e8821c04327b34bd981bbf79dfd454c6c1b8b8e6797145f6ec005f4",
+    "scripts/test-linux-audio.sh": "d4b2b16cbbae47663f4f7ed1fc5cb583964919a70051c9db85655a45c68e0156",
+    "test/linux/jack-audio-source.cpp": "8c881ce13374e7b5c52b8b013bdb9f8a848feb22a62829865e609c48d4a44acb",
+    "test/acceptance/native-audio-jack.mjs": "ba41d82eec15d8f4d192702cac178b0f0614afc95475bc33358e0ce361645e60",
+    "browser/client.js": "b8c4ba705343f1d87538dcfa0bec17adebdc75d3b29b949114b2e69e5928e0c1",
+    "browser/version.js": "40a61b4da7ca483c3b9d8a7672db5572be7e3af2ce29b80ebdcb77982a2a38b5",
+    "native/src/main.cpp": "32feb837e417b1222a078a3596dc12dab29c85e7319d4bb687140a128e2c975d"
+  },
+  "macos": {
+    "coreAudioInventory": {
+      "type": "audioSources",
+      "sources": [
+        {
+          "id": "audio_65f94909608250b5695e6ee91bb19df3b06d5f26485d9afa751945ef87983f68",
+          "name": "Apple Inc.: MacBook Air Microphone (CoreAudio)",
+          "channelCount": 1,
+          "sampleRate": 48000
+        }
+      ]
+    },
+    "physicalCaptureTested": false
+  },
+  "linux": {
+    "os": "Ubuntu 24.04 ARM64 Docker on macOS",
+    "physicalHardwareTested": false,
+    "jack": {
+      "type": "audioNativeProbe",
+      "sourceId": "audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+      "captureMilliseconds": 2000,
+      "sampleRate": 48000,
+      "channelCount": 32,
+      "readCalls": 266,
+      "packets": 246,
+      "receivedFrames": 95168,
+      "finiteSamples": 3045376,
+      "nonfiniteSamples": 0,
+      "allSamplesFinite": true,
+      "firstFrame": 0,
+      "lastFrameExclusive": 95168,
+      "cursorDiscontinuities": 0,
+      "droppedFrames": 0,
+      "jackPattern": {
+        "startupFramesIgnored": 1024,
+        "validatedFrames": 94144,
+        "mismatches": 0
+      },
+      "qualified": true
+    },
+    "pipewireViaPwJack": {
+      "type": "audioNativeProbe",
+      "sourceId": "audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+      "captureMilliseconds": 2000,
+      "sampleRate": 48000,
+      "channelCount": 32,
+      "readCalls": 256,
+      "packets": 238,
+      "receivedFrames": 95232,
+      "finiteSamples": 3047424,
+      "nonfiniteSamples": 0,
+      "allSamplesFinite": true,
+      "firstFrame": 0,
+      "lastFrameExclusive": 95232,
+      "cursorDiscontinuities": 0,
+      "droppedFrames": 0,
+      "jackPattern": {
+        "startupFramesIgnored": 1024,
+        "validatedFrames": 94208,
+        "mismatches": 0
+      },
+      "qualified": true
+    },
+    "chromiumNoisedeck": {
+      "recordedAtUtc": "2026-09-14T03:35:12.370Z",
+      "browser": "148.0.7778.96",
+      "route": "JACK source \u2192 RtAudio \u2192 production syncd \u2192 SDK \u2192 Noisedeck AudioWorklet \u2192 channel choices and raw values",
+      "physicalHardwareTested": false,
+      "durationSeconds": 30,
+      "connection": {
+        "connected": true,
+        "snapshot": {
+          "status": {
+            "state": "idle",
+            "message": "",
+            "deviceCount": 2,
+            "rawState": "idle",
+            "legacyState": "idle"
+          },
+          "devices": [
+            {
+              "id": "sync-audio:audio_9208aa58555ef7879b9f45f3b13a562a37c98e8f365a4d9e03717acd0c5d2d30",
+              "name": "system (Jack) \u00b7 Sync",
+              "channelCount": 2,
+              "sampleRate": 48000,
+              "connected": true,
+              "captureState": "idle",
+              "rawState": "idle",
+              "error": ""
+            },
+            {
+              "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+              "name": "SyncTest32 (Jack) \u00b7 Sync",
+              "channelCount": 32,
+              "sampleRate": 48000,
+              "connected": true,
+              "captureState": "idle",
+              "rawState": "idle",
+              "error": ""
+            }
+          ],
+          "inputs": []
+        }
+      },
+      "source": {
+        "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+        "name": "SyncTest32 (Jack) \u00b7 Sync",
+        "channelCount": 32,
+        "sampleRate": 48000,
+        "connected": true,
+        "captureState": "idle",
+        "rawState": "idle",
+        "error": ""
+      },
+      "choices": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
+        "31",
+        "32"
+      ],
+      "rawValues": [
+        0.015625,
+        -0.03125,
+        0.046875,
+        -0.0625,
+        0.078125,
+        -0.09375,
+        0.109375,
+        -0.125,
+        0.140625,
+        -0.15625,
+        0.171875,
+        -0.1875,
+        0.203125,
+        -0.21875,
+        0.234375,
+        -0.25,
+        0.265625,
+        -0.28125,
+        0.296875,
+        -0.3125,
+        0.328125,
+        -0.34375,
+        0.359375,
+        -0.375,
+        0.390625,
+        -0.40625,
+        0.421875,
+        -0.4375,
+        0.453125,
+        -0.46875,
+        0.484375,
+        -0.5
+      ],
+      "nativePackets": {
+        "packets": 4330,
+        "frames": 1481664,
+        "validatedFrames": 1480640,
+        "droppedFrames": "1024",
+        "mismatchedPackets": 0,
+        "verified": true
+      },
+      "status": "passed"
+    }
+  },
+  "windows": {
+    "status": "pending hosted CI and desktop qualification"
+  },
+  "limitations": [
+    "Software source is not physical AudioFuse qualification.",
+    "macOS inventory does not qualify capture or microphone permission.",
+    "No simultaneous native video load was generated by these audio tests.",
+    "No sample-accurate A/V synchronization or resampling is claimed."
+  ],
+  "localChecks": {
+    "sdk": {
+      "passed": 153,
+      "failed": 0
+    },
+    "javascriptUnit": {
+      "passed": 247,
+      "failed": 0
+    },
+    "macosCTestGroups": {
+      "passed": 22,
+      "failed": 0
+    },
+    "realLoopback": {
+      "passed": 30,
+      "failed": 0
+    },
+    "noisedeckAudioBrowser": {
+      "passed": 7,
+      "failed": 0
+    },
+    "noisedeckNode": {
+      "passed": 128,
+      "failed": 0,
+      "skipped": 1
+    },
+    "releaseWorkflowPolicy": {
+      "passed": 37,
+      "failed": 0
+    },
+    "workflowLint": "passed (existing sync-camera self-hosted runner label verified separately)",
+    "shellcheck": "passed"
+  }
+}

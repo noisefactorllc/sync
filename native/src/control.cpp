@@ -20,7 +20,8 @@ ControlMessage::~ControlMessage() noexcept { clear_sensitive(); }
 
 ControlMessage::ControlMessage(ControlMessage &&other)
     : type(other.type), protocol_versions(std::move(other.protocol_versions)),
-      name(std::move(other.name)), sender_id(std::move(other.sender_id)) {
+      name(std::move(other.name)), sender_id(std::move(other.sender_id)),
+      source_id(std::move(other.source_id)) {
   token.reserve(256);
   token.assign(other.token);
   other.clear_sensitive();
@@ -36,6 +37,7 @@ ControlMessage &ControlMessage::operator=(ControlMessage &&other) {
   protocol_versions = std::move(other.protocol_versions);
   name = std::move(other.name);
   sender_id = std::move(other.sender_id);
+  source_id = std::move(other.source_id);
   other.clear_sensitive();
   return *this;
 }
@@ -60,6 +62,7 @@ enum class Field : std::uint8_t {
   ProtocolVersions = 2,
   Name = 3,
   SenderId = 4,
+  SourceId = 5,
 };
 
 constexpr std::uint8_t field_bit(Field field) {
@@ -386,6 +389,8 @@ private:
       return Field::Name;
     if (key == "senderId")
       return Field::SenderId;
+    if (key == "sourceId")
+      return Field::SourceId;
     return std::nullopt;
   }
 
@@ -489,6 +494,8 @@ private:
       return parse_bounded_string(message_.name, 64);
     case Field::SenderId:
       return parse_bounded_string(message_.sender_id, 128);
+    case Field::SourceId:
+      return parse_bounded_string(message_.source_id, 128);
     }
     return ParseError::MalformedJson;
   }
@@ -570,6 +577,15 @@ private:
       message_.type = MessageType::CloseSender;
       allowed |= field_bit(Field::SenderId);
       required = allowed;
+    } else if (type_ == "listAudioSources") {
+      message_.type = MessageType::ListAudioSources;
+    } else if (type_ == "openAudioSource" || type_ == "readAudioSource" ||
+               type_ == "closeAudioSource") {
+      message_.type = type_ == "openAudioSource" ? MessageType::OpenAudioSource
+                    : type_ == "readAudioSource" ? MessageType::ReadAudioSource
+                                                : MessageType::CloseAudioSource;
+      allowed |= field_bit(Field::SourceId);
+      required = allowed;
     } else {
       return failure(ParseError::UnsupportedMessage);
     }
@@ -595,6 +611,10 @@ private:
     if (message_.type == MessageType::Hello) {
       message_.token.reserve(token_.bytes.size());
       message_.token.assign(token_.view());
+    }
+    if ((seen_fields_ & field_bit(Field::SourceId)) != 0 &&
+        !valid_sender_id(message_.source_id)) {
+      return failure(ParseError::InvalidValue);
     }
     return {.error = ParseError::None, .message = std::move(message_)};
   }
@@ -714,6 +734,43 @@ void append_number(std::string &output, std::uint64_t value) {
 
 ParseResult parse_message(std::string_view json, CleanseObserver* observer) {
   return Parser(json, observer).parse();
+}
+
+std::string encode_audio_sources(std::span<const audio::Source> sources) {
+  if (sources.size() > 32) throw std::invalid_argument("Too many audio sources");
+  std::string output = "{\"type\":\"audioSources\",\"sources\":[";
+  bool first = true;
+  for (const auto &source : sources) {
+    if (source.id.size() > 128 || source.name.size() > 256 ||
+        source.channels == 0 || source.channels > audio::kMaximumChannels)
+      throw std::invalid_argument("Invalid audio source");
+    if (!first) output.push_back(',');
+    first = false;
+    output.append("{\"id\":"); append_json_string(output, source.id);
+    output.append(",\"name\":"); append_json_string(output, source.name);
+    output.append(",\"channelCount\":"); append_number(output, source.channels);
+    output.append(",\"sampleRate\":"); append_number(output, source.sample_rate);
+    output.push_back('}');
+  }
+  output.append("]}");
+  if (output.size() > 16384) throw std::invalid_argument("Audio catalog too large");
+  return output;
+}
+
+std::string encode_audio_opened(std::string_view id, const audio::Packet &format) {
+  std::string output = "{\"type\":\"audioSourceOpened\",\"id\":";
+  append_json_string(output, id);
+  output.append(",\"channelCount\":"); append_number(output, format.channels);
+  output.append(",\"sampleRate\":"); append_number(output, format.sample_rate);
+  output.push_back('}');
+  return output;
+}
+
+std::string encode_audio_closed(std::string_view id) {
+  std::string output = "{\"type\":\"audioSourceClosed\",\"id\":";
+  append_json_string(output, id);
+  output.push_back('}');
+  return output;
 }
 
 std::string encode_welcome(std::uint16_t protocol_version,

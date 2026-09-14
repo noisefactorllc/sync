@@ -4,6 +4,7 @@
 #include <sync/pairing_store.hpp>
 #include <sync/publisher_hub.hpp>
 #include <sync/server.hpp>
+#include <sync/audio_capture.hpp>
 
 #include <sync/platform/ndi_publisher.hpp>
 
@@ -370,6 +371,19 @@ int run_with_providers(nfsync::ServerOptions &options,
                  camera_available, camera_publisher, camera_reason);
 
   assembly.apply(options);
+  std::unique_ptr<nfsync::audio::InputBackend> audio_backend;
+  // Protocol v1 and released video SDKs accept at most four capabilities.
+  // Preserve every explicitly selected video provider; normal platform
+  // defaults have room for audio alongside their implemented video providers.
+  if (options.provider_count < options.providers.size()) {
+    audio_backend = nfsync::audio::make_native_input_backend();
+    options.audio_backend = audio_backend.get();
+    options.providers[options.provider_count++] = {
+        .id = "audio", .direction = nfsync::ProviderDirection::Receive,
+        .available = true, .selected = true};
+  } else {
+    std::cerr << "syncd: native audio is unavailable when all four video providers are explicitly selected\n";
+  }
 #if defined(__APPLE__)
   options.platform_event_pump = pump_macos_events;
 #elif defined(_WIN32)

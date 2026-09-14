@@ -1,0 +1,93 @@
+{
+  "recordedAtUtc": "2026-09-14T02:29:53.517357+00:00",
+  "status": "Local development candidate; not a released hardware compatibility certification",
+  "browser": "Chromium 148.0.7778.96",
+  "nativeMacOS": {
+    "build": "passed",
+    "ctestGroupsPassed": 22,
+    "ctestGroupsFailed": 0
+  },
+  "nativeLinux": {
+    "environment": "Ubuntu 24.04 ARM64 Docker container",
+    "targets": [
+      "syncd",
+      "sync_protocol_tests",
+      "sync_audio_test_server"
+    ],
+    "build": "passed",
+    "projectWarningsAsErrors": true,
+    "ctestGroupsPassed": 1,
+    "hardwareCaptureTested": false,
+    "jackCapture": {
+      "status": "passed",
+      "channelsSelectable": 32,
+      "durationSeconds": 30,
+      "validatedFrames": 1479072,
+      "droppedFrames": "1088",
+      "mismatchedPackets": 0,
+      "evidence": "audio-jack.json",
+      "physicalHardwareTested": false
+    }
+  },
+  "syncBrowserAndPackaging": {
+    "tests": 174,
+    "pass": 166,
+    "fail": 0,
+    "skipped": 8
+  },
+  "syncRealLoopback": {
+    "tests": 27,
+    "pass": 27,
+    "fail": 0,
+    "skipped": 0
+  },
+  "noisedeckBrowser": {
+    "passed": 37,
+    "failed": 0,
+    "nativeAudioCases": 7,
+    "existingBrowserCaptureCases": 30,
+    "nativeFixtureChannelCounts": [
+      1,
+      2,
+      8,
+      32
+    ],
+    "cleanupRetest": {
+      "passed": 7,
+      "failed": 0,
+      "slowOpenMustCompleteBeforeCleanupPasses": true
+    }
+  },
+  "noisedeckNode": {
+    "tests": 33,
+    "pass": 32,
+    "fail": 0,
+    "skipped": 1
+  },
+  "releaseWorkflow": {
+    "tests": 37,
+    "pass": 37,
+    "fail": 0,
+    "skipped": 0
+  },
+  "audioSdkSnapshot": {
+    "version": "0.2.0-audio.0",
+    "modulesMatchingSyncSource": 12,
+    "manifestAndClosureVerified": true
+  },
+  "nativeHardwareEnumeration": [
+    {
+      "name": "Apple Inc.: MacBook Air Microphone (CoreAudio)",
+      "channelCount": 1,
+      "sampleRate": 48000
+    }
+  ],
+  "notEstablished": [
+    "AudioFuse hardware capture",
+    "physical 32-channel capture",
+    "signed installed macOS audio permissions",
+    "Windows hardware or build qualification",
+    "Linux x86_64 package installation and PipeWire routing",
+    "long-duration simultaneous audio/video performance"
+  ]
+}

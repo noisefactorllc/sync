@@ -22,6 +22,10 @@ function resolveDaemonPath(value = process.env.SYNC_DAEMON_PATH) {
 }
 const SYNCD = resolveDaemonPath();
 const PAIRING_TEST_SERVER = path.join(path.dirname(SYNCD), "sync_pairing_test_server");
+const AUDIO_TEST_SERVER = path.join(
+  path.dirname(SYNCD),
+  `sync_audio_test_server${path.extname(SYNCD).toLowerCase() === ".exe" ? ".exe" : ""}`,
+);
 const SYPHON_PROBE = path.join(path.dirname(SYNCD), "sync_syphon_discovery_probe");
 const FIXTURE = path.join(ROOT, "test", "fixtures", "frame-v1.bin");
 const ORIGIN = "https://client.example";
@@ -43,10 +47,10 @@ const EXPECTED_PRODUCT_VERSION = process.env.SYNC_VERSION ?? "0.2.0";
 // Every platform offers a camera publisher, but the GPU-sharing providers are
 // native to their respective desktop OSes. Linux exposes camera and NDI only.
 const DEFAULT_PROVIDER_IDS = process.platform === "win32"
-  ? ["spout", "ndi", "camera"]
+  ? ["spout", "ndi", "camera", "audio"]
   : process.platform === "darwin"
-    ? ["syphon", "ndi", "camera"]
-    : ["ndi", "camera"];
+    ? ["syphon", "ndi", "camera", "audio"]
+    : ["ndi", "camera", "audio"];
 
 function withTimeout(promise, description, timeoutMs = TIMEOUT_MS) {
   let timer;
@@ -834,6 +838,144 @@ test("browser SDK performs a bounded health probe against the real loopback daem
   }
 });
 
+test("all four explicit video providers preserve the legacy capability bound", async () => {
+  const providerIds = ["syphon", "spout", "ndi", "camera"];
+  const daemon = await spawnDaemon({ arguments: [
+    "--port", "0", "--test-origin", ORIGIN, "--test-token", TOKEN,
+    ...providerIds.flatMap((id) => ["--publisher", id]),
+  ] });
+  let providers = [];
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`, token: TOKEN, timeoutMs: TIMEOUT_MS,
+  });
+  try {
+    const result = await bridge.probe();
+    assert.equal(result.available, true, result.message);
+    providers = result.health.capabilities.providers;
+    assert.deepEqual(providers.map((provider) => provider.id), providerIds);
+    assert.equal(providers.length, 4);
+  } finally {
+    bridge.close();
+    const diagnostics = expectedProviderDiagnostics(providers).source.replace(/\$$/, "");
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready, {
+      expectedStderr: new RegExp(diagnostics +
+        "syncd: native audio is unavailable when all four video providers are explicitly selected\\n$"),
+    });
+  }
+});
+
+test("native audio transport preserves 1, 2, 8, and 32 ordered float32 channels", async () => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: "audio-test-token",
+    fetch: healthFetchForOrigin("http://127.0.0.1:8000"),
+    WebSocket: webSocketForOrigin("http://127.0.0.1:8000"),
+    timeoutMs: TIMEOUT_MS,
+  });
+  const expectedValues = [
+    0.03125, 0.0625, 0.09375, 0.125, 0.15625, 0.1875, 0.21875, 0.25,
+    0.28125, 0.3125, 0.34375, 0.375, 0.40625, 0.4375, 0.46875, 0.5,
+    0.53125, 0.5625, 0.59375, 0.625, 0.65625, 0.6875, 0.71875, 0.75,
+    0.78125, 0.8125, 0.84375, 0.875, 0.90625, 0.9375, 0.96875, 1,
+  ];
+  try {
+    const sources = await bridge.listAudioSources();
+    for (const channelCount of [1, 2, 8, 32]) {
+      const sourceId = `audio_${channelCount}`;
+      assert.deepEqual(sources.find((source) => source.id === sourceId), {
+        id: sourceId,
+        name: `${channelCount} channel fixture`,
+        channelCount,
+        sampleRate: 48_000,
+      });
+      assert.deepEqual(await bridge.openAudioSource(sourceId), {
+        type: "audioSourceOpened",
+        id: sourceId,
+        channelCount,
+        sampleRate: 48_000,
+      });
+
+      const deadline = Date.now() + TIMEOUT_MS;
+      let packet;
+      do {
+        packet = await bridge.readAudioSource(sourceId);
+      } while (packet.frameCount === 0 && Date.now() < deadline);
+      assert.ok(packet.frameCount > 0, `${sourceId} produces frames within the bound`);
+      assert.equal(packet.channelCount, channelCount);
+      assert.equal(packet.sampleRate, 48_000);
+      assert.equal(packet.planes.length, channelCount);
+      assert.equal(typeof packet.firstFrame, "bigint");
+      assert.equal(typeof packet.droppedFrames, "bigint");
+      for (let channel = 0; channel < channelCount; channel += 1) {
+        assert.equal(packet.planes[channel].length, packet.frameCount);
+        for (const sample of packet.planes[channel]) {
+          assert.equal(sample, expectedValues[channel],
+                       `channel ${channel + 1} keeps its exact float32 value`);
+        }
+      }
+      assert.deepEqual(await bridge.closeAudioSource(sourceId), {
+        type: "audioSourceClosed",
+        id: sourceId,
+      });
+    }
+  } finally {
+    bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("native audio close during a slow open releases the connection-owned capture", async () => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  let opening;
+  let observer;
+  try {
+    opening = await authenticateControl(
+      daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+    );
+    assert.equal((await opening.client.nextJson("audio fixture welcome")).type, "welcome");
+    opening.client.sendJson({ type: "openAudioSource", sourceId: "audio_slow" });
+    opening.client.sendJson({ type: "listAudioSources" });
+    const busy = await opening.client.nextJson("overlapping audio request rejection");
+    assert.deepEqual(busy, {
+      type: "error",
+      code: "audio_busy",
+      message: "Audio request already pending",
+    });
+    const close = await opening.client.nextFrame("audio busy close");
+    assert.equal(close.opcode, 0x8);
+    opening.client.send(0x8, close.payload);
+    await opening.client.waitClosed();
+
+    observer = await authenticateControl(
+      daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+    );
+    assert.equal((await observer.client.nextJson("audio cleanup observer welcome")).type,
+                 "welcome");
+    const deadline = Date.now() + TIMEOUT_MS;
+    let active;
+    let completed;
+    do {
+      observer.client.sendJson({ type: "listAudioSources" });
+      const listed = await observer.client.nextJson("audio cleanup status");
+      assert.equal(listed.type, "audioSources");
+      active = listed.sources.find((source) => source.id === "audio_active")?.name;
+      completed = listed.sources.find(
+        (source) => source.id === "audio_slow_completed",
+      )?.name;
+      if (active !== "0" || completed !== "1") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } while ((active !== "0" || completed !== "1") && Date.now() < deadline);
+    assert.equal(completed, "1", "the pending driver open completed exactly once");
+    assert.equal(active, "0", "its capture was destroyed after the owner disconnected");
+  } finally {
+    opening?.client.destroy();
+    observer?.client.destroy();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
 test("independent packaged app pairs, sends pixels, reads statistics, and isolates its token", async (t) => {
   const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), "sync-independent-app-"));
   const daemon = await spawnPairingDaemon(path.join(directory, "state", "pairings"), "approve");
@@ -967,16 +1109,25 @@ test("browser SDK pairs, authenticates, rotates, revokes, and reports native den
     const first = await bridge().pair("Noisedeck");
     assert.match(first.token, /^[a-f0-9]{64}$/);
     assert.equal((await bridge(first.token).connect()).type, "welcome");
+    // This fixture has no audio driver. A fresh pairing must pass the consent
+    // gate and reach that unavailable driver, rather than reuse an old grant.
+    await assert.rejects(bridge(first.token).listAudioSources(),
+      error => error.daemonCode === 'audio_unavailable');
     for (const client of clients) client.close();
     clients.clear();
     await stop();
 
     daemon = await spawnPairingDaemon(storePath, "approve");
+    assert.equal((await bridge(first.token).connect()).type, "welcome");
+    await assert.rejects(bridge(first.token).listAudioSources(),
+      error => error.daemonCode === 'audio_pairing_required');
     const rotated = await bridge().pair("Noisedeck restarted");
     assert.match(rotated.token, /^[a-f0-9]{64}$/);
     assert.notEqual(rotated.token, first.token);
     await assert.rejects(bridge(first.token).connect(), SyncAuthenticationError);
     assert.equal((await bridge(rotated.token).connect()).type, "welcome");
+    await assert.rejects(bridge(rotated.token).listAudioSources(),
+      error => error.daemonCode === 'audio_unavailable');
     for (const client of clients) client.close();
     clients.clear();
 
@@ -2309,13 +2460,13 @@ test("syncd Syphon mode reports truthful healthy degradation or sender availabil
     const healthBody = JSON.parse(response.body.toString("utf8"));
     reportedProviders = healthBody.capabilities.providers;
     assert.equal(healthBody.version, EXPECTED_PRODUCT_VERSION);
-    assert.equal(healthBody.capabilities.receive, false);
+    assert.equal(healthBody.capabilities.receive, true);
     assert.deepEqual(healthBody.capabilities.providers, [{
       id: "syphon",
       direction: "send",
       available: healthBody.capabilities.send,
       selected: true,
-    }]);
+    }, { id: "audio", direction: "receive", available: true, selected: true }]);
     if (!discovery.available) assert.equal(healthBody.capabilities.send, false);
 
     const control = await upgrade({
@@ -2442,14 +2593,14 @@ test("syncd no-argument production mode uses the default port and dynamic pairin
       assert.deepEqual(providers.map((provider) => provider.id).sort(),
                        [...DEFAULT_PROVIDER_IDS].sort());
       for (const provider of providers) {
-        assert.equal(provider.direction, "send");
+        assert.equal(provider.direction, provider.id === "audio" ? "receive" : "send");
         // Naming no publisher configures every platform provider, so each
         // is selected; whether its runtime loaded is a separate question.
         assert.equal(provider.selected, true, `${provider.id} must be selected`);
         assert.equal(typeof provider.available, "boolean");
       }
       assert.equal(body.capabilities.send,
-                   providers.some((provider) => provider.available));
+                   providers.some((provider) => provider.direction === "send" && provider.available));
     }
     const unknownControl = await upgrade({
       port: 53979,
@@ -2511,7 +2662,7 @@ test("syncd production --port remains healthy when explicit Syphon discovery is 
         direction: "send",
         available: false,
         selected: true,
-      }]);
+      }, { id: "audio", direction: "receive", available: true, selected: true }]);
     }
   } finally {
     if (daemon) {

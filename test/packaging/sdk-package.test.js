@@ -20,7 +20,7 @@ test('packed SDK installs in an external project and emits literal frame bytes',
   });
   const [artifact] = JSON.parse(stdout);
   assert.equal(artifact.name, '@noisefactor/sync');
-  assert.equal(artifact.version, '0.2.0');
+  assert.equal(artifact.version, '0.3.0');
   const manifest = JSON.parse(await readFile(path.join(root, 'browser/package.json'), 'utf8'));
   assert.deepEqual(artifact.files.map(file => file.path).sort(), [...manifest.files, 'package.json'].sort());
   await writeFile(path.join(directory, 'package.json'), '{"private":true,"type":"module"}');
@@ -38,8 +38,10 @@ test('packed SDK installs in an external project and emits literal frame bytes',
     assert.equal(sink.submit({width:1,height:1,rowStride:4,data:pixels}, 1), true);
     pixels.fill(0);
     assert.deepEqual([...packet.slice(64)], [255,0,32,255]);
-    assert.equal(SYNC_SDK_VERSION, '0.2.0');
+    assert.equal(SYNC_SDK_VERSION, '0.3.0');
     assert.equal(typeof SyncBridgeClient.prototype.createRgbaSender, 'function');
+    for (const method of ['listAudioSources', 'openAudioSource', 'readAudioSource', 'closeAudioSource'])
+      assert.equal(typeof SyncBridgeClient.prototype[method], 'function');
     sink.close();
   `;
   await run(process.execPath, ['--input-type=module', '-e', sample], { cwd: directory, timeout: 5000 });

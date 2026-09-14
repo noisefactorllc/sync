@@ -66,7 +66,7 @@ bool build_presentation(const pairing::PromptRequest& request,
   constexpr std::string_view identity = "Security identity: ";
   constexpr std::string_view label = "\nUnverified app label: ";
   constexpr std::string_view question =
-      "\n\nAllow this origin to publish video from this machine through "
+      "\n\nAllow this origin to publish video and capture audio inputs through "
       "Sync?";
   return append(output.title_bytes, output.title_length, title) &&
          append(output.message_bytes, output.message_length, identity) &&

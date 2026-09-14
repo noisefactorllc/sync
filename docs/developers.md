@@ -1,28 +1,33 @@
 # Sync developer guide
 
-Sync lets a web application publish rendered frames to native video tools on the same computer.
-The browser SDK supports direct RGBA bytes, Canvas 2D, WebGL2, and WebGPU.
+Sync lets a web application publish rendered frames to native video tools and
+receive native multichannel audio on the same computer. The browser SDK supports
+direct RGBA bytes, Canvas 2D, WebGL2, WebGPU, and bounded audio-source reads.
+The audio research, protocol, limitations, and qualification record live in
+[Audio input](audio-input.md).
 
-The SDK package is `@noisefactor/sync` 0.2.0.
+The SDK package source is `@noisefactor/sync` 0.3.0. Its public release assets
+are being prepared at the URLs below and are not available until the
+`sdk-v0.3.0` release is published.
 The SDK and native companion have separate versions.
 
 ## Install the SDK
 
-Install the released tarball in your application:
+After SDK 0.3.0 is published, install its release tarball in your application:
 
 ```bash
-npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/noisefactor-sync-0.2.0.tgz
+npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.3.0/noisefactor-sync-0.3.0.tgz
 ```
 
 You can then import from `@noisefactor/sync`.
 This command installs the GitHub release asset directly.
 It does not require an npm account.
 
-For direct browser imports, download the [modules ZIP](https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/sync-sdk-0.2.0-modules.zip).
+For direct browser imports, download the [modules ZIP](https://github.com/noisefactorllc/sync/releases/download/sdk-v0.3.0/sync-sdk-0.3.0-modules.zip).
 Extract `modules/` into your application's static assets.
 Import `index.js` from that directory.
 Keep the complete directory because its files use relative imports.
-The [release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.2.0) includes SHA-256 checksums for both downloads.
+The [release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0) includes SHA-256 checksums for both downloads once published.
 
 ## Build the SDK locally
 
@@ -35,15 +40,15 @@ npm run package:sdk
 The command creates these versioned files:
 
 ```text
-dist/sdk/0.2.0/modules/
-dist/sdk/0.2.0/noisefactor-sync-0.2.0.tgz
-dist/sdk/0.2.0/SHA256SUMS
+dist/sdk/0.3.0/modules/
+dist/sdk/0.3.0/noisefactor-sync-0.3.0.tgz
+dist/sdk/0.3.0/SHA256SUMS
 ```
 
 Install the tarball from the path that applies to your application:
 
 ```bash
-npm install /absolute/path/to/sync/dist/sdk/0.2.0/noisefactor-sync-0.2.0.tgz
+npm install /absolute/path/to/sync/dist/sdk/0.3.0/noisefactor-sync-0.3.0.tgz
 ```
 
 You can then import from `@noisefactor/sync`.
@@ -56,9 +61,10 @@ Its files use relative imports between the client, protocol, diagnostics, and qu
 ## Start a compatible companion
 
 The SDK does not install or update the native Sync companion.
-SDK 0.2.0 targets native preview 0.2.66.
-That companion version adds third-party `app://` origins and native statistics.
 Check the [download page](https://sync.noisedeck.app/#download) for available installers.
+For audio, check the connected companion's capabilities instead of comparing
+its product version with the SDK version. A compatible companion advertises a
+selected and available `audio` provider whose direction is `receive`.
 
 For source testing, build and run the daemon from the same source checkout.
 Follow the [native build instructions](../README.md#building-the-native-daemon).
@@ -106,6 +112,52 @@ They return or throw a permission result instead of starting pairing.
 The default daemon endpoint is `http://127.0.0.1:53979`.
 The `endpoint` option also accepts an explicit IPv4 or IPv6 loopback URL with a port.
 It rejects remote hosts, credentials, paths, queries, and fragments.
+
+## Receive native audio
+
+SDK 0.3.0 adds native audio-source discovery and bounded PCM reads. Check the
+companion capability before offering the device picker, and let the user choose
+a source before opening it:
+
+```js
+const audio = new SyncBridgeClient({ token });
+try {
+  const welcome = await audio.connect();
+  const supportsAudio = welcome.capabilities.providers.some(provider =>
+    provider.id === 'audio' && provider.direction === 'receive' &&
+    provider.available && provider.selected);
+  if (!supportsAudio) throw new Error('Install a Sync companion with audio input');
+
+  const sources = await audio.listAudioSources();
+  const selectedSourceId = await chooseAudioSource(sources);
+  const format = await audio.openAudioSource(selectedSourceId);
+  try {
+    const packet = await audio.readAudioSource(selectedSourceId);
+    consumeAudio(packet.planes, format, packet.firstFrame, packet.droppedFrames);
+  } finally {
+    await audio.closeAudioSource(selectedSourceId);
+  }
+} finally {
+  audio.close();
+}
+```
+
+Each client owns one capture. Use separate clients for separate audio sources
+and for video output. `readAudioSource()` is a bounded pull operation; avoid a
+busy polling loop. Reset queued browser audio when `firstFrame` stops following
+the preceding cursor or `droppedFrames` changes.
+
+Audio requires fresh origin pairing after the companion restarts, even when a
+stored token remains valid for video. When an operation reports the daemon code
+`audio_pairing_required`, ask the user to start pairing again. The opened format
+reports the channel count and sample rate that the native backend actually
+provided. The API does not add channels missing from that backend and does not
+provide sample-accurate audio/video synchronization. See the
+[audio contract and qualification matrix](audio-input.md#release-qualification-matrix).
+On Linux, follow the documented
+[`pw-jack` service setup](audio-input.md#linux-jack-through-pipewire); installing
+the package alone does not make an already-running service load PipeWire's JACK
+compatibility library.
 
 ## Configure a sender
 
@@ -342,7 +394,7 @@ Release all other resources that your application owns.
 
 ## Public exports
 
-SDK version 0.2.0 exports:
+SDK version 0.3.0 exports:
 
 - `SyncBridgeClient` and `SYNC_DEFAULT_ENDPOINT`
 - `SyncFrameSink`
@@ -357,7 +409,10 @@ SDK version 0.2.0 exports:
 - `SYNC_ERROR_CODE`
 - `SyncBridgeError` and the typed Sync error subclasses
 
-`SYNC_SDK_VERSION` is `0.2.0`.
+The TypeScript declarations also export `AudioSourceFormat`, `AudioSource`, and
+`AudioPacket` for the audio methods on `SyncBridgeClient`.
+
+`SYNC_SDK_VERSION` is `0.3.0`.
 The SDK version and the companion product version are independent.
 
 ## Platform outputs

@@ -1,0 +1,159 @@
+{
+  "recordedAtUtc": "2026-09-14T02:27:48.949Z",
+  "browser": "148.0.7778.96",
+  "route": "JACK source \u2192 RtAudio \u2192 production syncd \u2192 SDK \u2192 Noisedeck AudioWorklet \u2192 channel choices and raw values",
+  "physicalHardwareTested": false,
+  "durationSeconds": 30,
+  "connection": {
+    "connected": true,
+    "snapshot": {
+      "status": {
+        "state": "idle",
+        "message": "",
+        "deviceCount": 2,
+        "rawState": "idle",
+        "legacyState": "idle"
+      },
+      "devices": [
+        {
+          "id": "sync-audio:audio_9208aa58555ef7879b9f45f3b13a562a37c98e8f365a4d9e03717acd0c5d2d30",
+          "name": "system (Jack) \u00b7 Sync",
+          "channelCount": 2,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "idle",
+          "rawState": "idle",
+          "error": ""
+        },
+        {
+          "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+          "name": "SyncTest32 (Jack) \u00b7 Sync",
+          "channelCount": 32,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "idle",
+          "rawState": "idle",
+          "error": ""
+        }
+      ],
+      "inputs": []
+    }
+  },
+  "source": {
+    "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+    "name": "SyncTest32 (Jack) \u00b7 Sync",
+    "channelCount": 32,
+    "sampleRate": 48000,
+    "connected": true,
+    "captureState": "idle",
+    "rawState": "idle",
+    "error": ""
+  },
+  "choices": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "30",
+    "31",
+    "32"
+  ],
+  "rawValues": [
+    0.015625,
+    -0.03125,
+    0.046875,
+    -0.0625,
+    0.078125,
+    -0.09375,
+    0.109375,
+    -0.125,
+    0.140625,
+    -0.15625,
+    0.171875,
+    -0.1875,
+    0.203125,
+    -0.21875,
+    0.234375,
+    -0.25,
+    0.265625,
+    -0.28125,
+    0.296875,
+    -0.3125,
+    0.328125,
+    -0.34375,
+    0.359375,
+    -0.375,
+    0.390625,
+    -0.40625,
+    0.421875,
+    -0.4375,
+    0.453125,
+    -0.46875,
+    0.484375,
+    -0.5
+  ],
+  "nativePackets": {
+    "packets": 4323,
+    "frames": 1479072,
+    "validatedFrames": 1479072,
+    "droppedFrames": "1088",
+    "mismatchedPackets": 0,
+    "verified": true
+  },
+  "status": "passed",
+  "environment": {
+    "native": "Ubuntu 24.04 ARM64 Docker container",
+    "driver": "RtAudio 6.0.1 JACK backend in production syncd",
+    "jack": "jackd2 1.9.21, dummy driver, 48 kHz, 1024-frame periods, 128-port maximum, non-realtime mode",
+    "browserHost": "macOS",
+    "authentication": "isolated static test-token mode; interactive pairing is covered separately",
+    "transport": "container relay bound to its container interface; Docker publication bound to host 127.0.0.1; socat 65536-byte buffer and TCP_NODELAY on both sockets",
+    "simultaneousNativeVideo": false
+  },
+  "testSourceSha256": {
+    "test/linux/jack-audio-source.cpp": "8c881ce13374e7b5c52b8b013bdb9f8a848feb22a62829865e609c48d4a44acb",
+    "test/acceptance/native-audio-jack.mjs": "23f69a0a3efe0f35aed5ac9956cc1dcb705a8386157056cdeb76e6a6feab751d"
+  },
+  "driverDiagnostics": [
+    "JackTimedDriver::Process XRun = 215 usec",
+    "JackTimedDriver::Process XRun = 21 usec",
+    "JackEngine::XRun: client = SyncTest32 was not finished, state = Triggered",
+    "JackTimedDriver::Process XRun = 19 usec",
+    "JackTimedDriver::Process XRun = 52 usec",
+    "JackTimedDriver::Process XRun = 33 usec",
+    "JackEngine::XRun: client = SyncTest32 was not finished, state = Running"
+  ],
+  "driverDiagnosticScope": "JACK server log collected after the run, including idle time after the browser closed; not a count of capture-time xruns",
+  "postRunInspection": {
+    "command": "jack_lsp -c",
+    "sourceOutputPortsRemaining": 32,
+    "syncCapturePortsRemaining": 0,
+    "connectionsRemaining": 0,
+    "scope": "Manual native graph inspection after the acceptance browser closed"
+  }
+}

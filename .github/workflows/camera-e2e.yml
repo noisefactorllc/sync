@@ -66,6 +66,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      audio_source_id:
+        description: 'Optional exact source ID for two seconds of native audio qualification (metadata only)'
+        required: false
+        type: string
 
 # One camera, one machine: two runs registering different builds of the media
 # source at once would each invalidate the other.
@@ -135,6 +140,45 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "configure failed" }
           cmake --build build --config $env:BUILD_TYPE --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Inventory native audio inputs without capture
+        shell: pwsh
+        run: |
+          & "build/$env:BUILD_TYPE/sync_audio_native_probe.exe" --list |
+            Tee-Object -FilePath audio-inventory.json
+          if ($LASTEXITCODE -ne 0) { throw "native audio inventory failed" }
+          Get-Content audio-inventory.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Qualify the explicitly selected native audio source
+        if: github.event_name == 'workflow_dispatch' && inputs.audio_source_id != ''
+        shell: pwsh
+        env:
+          SYNC_AUDIO_SOURCE_ID: ${{ inputs.audio_source_id }}
+        run: |
+          if ($env:SYNC_AUDIO_SOURCE_ID -notmatch '^audio_[0-9a-f]{64}$') {
+            throw "invalid native audio source ID"
+          }
+          $probe = Start-Process -FilePath "build/$env:BUILD_TYPE/sync_audio_native_probe.exe" `
+            -ArgumentList '--source-id', $env:SYNC_AUDIO_SOURCE_ID `
+            -RedirectStandardOutput audio-capture.json -RedirectStandardError audio-capture.log `
+            -NoNewWindow -PassThru
+          if (-not $probe.WaitForExit(10000)) {
+            $probe.Kill()
+            throw "native audio probe timed out"
+          }
+          Get-Content audio-capture.json | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($probe.ExitCode -ne 0) {
+            Get-Content audio-capture.log
+            throw "native audio qualification failed"
+          }
+
+      - name: Upload native audio evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-windows-native-audio
+          path: audio-*.json
+          if-no-files-found: warn
 
       # syncd registers the SyncCamera.dll sitting beside itself, so this
       # points the machine's CLSID at the build this commit just produced.

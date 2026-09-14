@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
   <!-- Lets Sync.app activate the bundled Sync Camera system extension.
        Applied to the Sync executable and the app bundle at signing time by
        the release harness; local unsigned builds do not use it. -->

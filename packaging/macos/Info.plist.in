@@ -28,6 +28,8 @@
   <true/>
   <key>NSCameraUsageDescription</key>
   <string>Sync feeds its own Sync Camera so other apps can use Noisedeck's output as a camera.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Sync captures selected audio interface channels for Noisedeck audio controls.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSSystemExtensionUsageDescription</key>

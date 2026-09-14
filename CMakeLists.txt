@@ -46,6 +46,26 @@ endif()
 
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+set(RTAUDIO_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(RTAUDIO_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(RTAUDIO_STATIC_MSVCRT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(rtaudio
+  URL https://codeload.github.com/thestk/rtaudio/tar.gz/b4f04903312e0e0efffbe77655172e0f060dc085
+  URL_HASH SHA256=8f6119875e28e3a7a6c5bc8ba8aa2d2644a8d6166bd1ff7ee07ca6f0d29b88cf
+)
+FetchContent_MakeAvailable(rtaudio)
+# Keep our warnings-as-errors gate without applying it to pinned upstream code.
+if(MSVC)
+  target_compile_options(rtaudio PRIVATE /WX-)
+else()
+  target_compile_options(rtaudio PRIVATE -Wno-error)
+endif()
+
 find_package(OpenSSL 3 REQUIRED)
 
 # libuv reaches this project two ways: a CONFIG package from vcpkg or Conan
@@ -74,6 +94,7 @@ else()
 endif()
 
 add_library(sync_protocol
+  native/src/audio_capture.cpp
   native/src/control.cpp
   native/src/daemon_metrics.cpp
   native/src/frame_receiver.cpp
@@ -105,6 +126,7 @@ if(WIN32)
 endif()
 
 add_executable(sync_protocol_tests
+  native/test/audio_capture_test.cpp
   native/test/control_test.cpp
   native/test/frame_receiver_test.cpp
   native/test/publisher_hub_test.cpp
@@ -123,10 +145,18 @@ add_executable(syncd
   native/src/main.cpp
   native/src/server.cpp
 )
+add_library(sync_audio_native native/src/audio_native.cpp)
+target_link_libraries(sync_audio_native PUBLIC sync_protocol PRIVATE rtaudio)
+add_executable(sync_audio_native_probe native/test/audio_native_probe.cpp)
+target_compile_features(sync_audio_native_probe PRIVATE cxx_std_20)
+target_link_libraries(sync_audio_native_probe PRIVATE sync_audio_native)
+target_link_libraries(syncd PRIVATE sync_audio_native)
 target_compile_features(syncd PRIVATE cxx_std_20)
 target_link_libraries(syncd PRIVATE sync_cli sync_ndi_publisher ${SYNC_LIBUV_TARGET})
 
 enable_testing()
+add_executable(sync_audio_test_server native/test/audio_test_server.cpp native/src/server.cpp)
+target_link_libraries(sync_audio_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
 add_test(NAME sync_protocol_tests COMMAND sync_protocol_tests)
 
 add_executable(sync_pairing_store_tests
@@ -506,6 +536,10 @@ add_test(NAME sync_ndi_publisher_tests COMMAND sync_ndi_publisher_tests)
 
 if(APPLE)
   enable_language(OBJCXX)
+  target_sources(sync_audio_native PRIVATE native/src/platform/macos/audio_permission.mm)
+  set_target_properties(sync_audio_native PROPERTIES OBJCXX_STANDARD 20)
+  find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  target_link_libraries(sync_audio_native PRIVATE ${AVFOUNDATION_FRAMEWORK})
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
   find_library(SERVICE_MANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)

@@ -1,4 +1,4 @@
-export const SYNC_SDK_VERSION: '0.2.0';
+export const SYNC_SDK_VERSION: '0.3.0';
 export const SYNC_DEFAULT_ENDPOINT: 'http://127.0.0.1:53979';
 export type ColorSpace = 'srgb' | 'display-p3';
 export type AlphaMode = 'opaque' | 'straight' | 'premultiplied';
@@ -149,6 +149,10 @@ export interface ClientOptions {
   maxControlMessageBytes?: number;
 }
 export class SyncBridgeClient {
+  listAudioSources(): Promise<AudioSource[]>;
+  openAudioSource(sourceId: string): Promise<AudioSourceFormat & { type: 'audioSourceOpened'; id: string }>;
+  readAudioSource(sourceId: string): Promise<AudioPacket>;
+  closeAudioSource(sourceId: string): Promise<{ type: 'audioSourceClosed'; id: string }>;
   constructor(options?: ClientOptions);
   readonly connected: boolean;
   readonly welcome: Welcome | null;
@@ -158,6 +162,15 @@ export class SyncBridgeClient {
   createSender<Source>(name: string, options: SenderOptions<Source>): Promise<Sender<Source>>;
   createRgbaSender(name: string, options?: RgbaSenderOptions): Promise<Sender<RgbaSource>>;
   close(): void;
+}
+
+export interface AudioSourceFormat { channelCount: number; sampleRate: number; }
+export interface AudioSource extends AudioSourceFormat { id: string; name: string; }
+export interface AudioPacket extends AudioSourceFormat {
+  frameCount: number;
+  firstFrame: bigint;
+  droppedFrames: bigint;
+  planes: Float32Array[];
 }
 export type SyncErrorCode =
   | 'SYNC_UNAVAILABLE' | 'SYNC_TIMEOUT' | 'SYNC_AUTHENTICATION' | 'SYNC_PROTOCOL'

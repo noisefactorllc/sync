@@ -39,7 +39,7 @@ bool build_presentation(const pairing::PromptRequest& request,
   constexpr std::string_view identity = "Security identity: ";
   constexpr std::string_view label = "\nUnverified app label: ";
   constexpr std::string_view question =
-      "\n\nAllow this origin to publish through Sync?";
+      "\n\nAllow this origin to publish video and capture audio inputs through Sync?";
   constexpr std::string_view deny = "Deny";
   constexpr std::string_view allow = "Allow";
   return append(output.header_bytes, output.header_length, header) &&

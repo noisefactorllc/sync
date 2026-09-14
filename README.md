@@ -29,8 +29,15 @@ Sync is under active development. This source tree currently includes:
   bounded helper supervision; and
 - native, browser, protocol, security-boundary, and real-loopback tests.
 
+The SDK 0.3.0 source candidate and native companion source include audio input
+for 1–32 channels per source. Native interfaces feed browser audio controls over
+the same authenticated loopback service used for video. The public SDK and
+audio-capable companion releases are still pending, and current evidence is not
+a general hardware compatibility claim. See the
+[audio research, design, and qualification matrix](docs/audio-input.md).
+
 Both companions are previews and are not ready for general use.
-Reverse-direction native sources and automatic updates are not part of the
+Reverse-direction native video sources and automatic updates are not part of the
 current public implementation.
 
 ## Known issues
@@ -316,8 +323,9 @@ Syphon source revision `71351d4b484cd2d1917867f7846a5cdca724552d`; use that
 same revision for local release-equivalent packages.
 
 ```bash
+SYNC_PRODUCT_VERSION=X.Y.Z
 cmake -S . -B build-package \
-  -DSYNC_PRODUCT_VERSION=0.2.0 \
+  -DSYNC_PRODUCT_VERSION="$SYNC_PRODUCT_VERSION" \
   -DSYNC_SYPHON_FRAMEWORK_PATH=/absolute/path/to/Syphon.framework
 cmake --build build-package --target sync_macos_dmg -j4
 SYNC_PACKAGE_DIR=build-package/package \
@@ -336,9 +344,10 @@ Packaging requires Windows 10 or newer, an x64 MSVC toolchain, Inno Setup 6
 `SpoutLibrary.dll`.
 
 ```powershell
+$SyncProductVersion = "X.Y.Z"
 cmake -S . -B build-package -A x64 `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-  -DSYNC_PRODUCT_VERSION=0.2.0 `
+  -DSYNC_PRODUCT_VERSION="$SyncProductVersion" `
   -DSYNC_SPOUT_LIBRARY_PATH=C:\absolute\path\to\SpoutLibrary.dll `
   -DSYNC_WINDOWS_DEPENDENCY_PATH="$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
 cmake --build build-package --config Release --target sync_windows_installer --parallel 4
@@ -354,14 +363,16 @@ Factor release workflow.
 ## Browser SDK
 
 The browser SDK can connect any web renderer to Sync. It includes direct RGBA,
-Canvas 2D, WebGL2, and WebGPU export queues. The dependency-free source modules
-live in [`browser/`](browser/).
+Canvas 2D, WebGL2, and WebGPU export queues plus native audio-source discovery
+and bounded PCM reads. The dependency-free source modules live in
+[`browser/`](browser/).
 
-[Sync SDK 0.2.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.2.0) includes an installable tarball and browser modules.
-Install the tarball in your application:
+The [Sync SDK 0.3.0 release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
+will include an installable tarball, browser modules, and SHA-256 checksums.
+After that release is published, install the tarball in your application:
 
 ```bash
-npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.2.0/noisefactor-sync-0.2.0.tgz
+npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.3.0/noisefactor-sync-0.3.0.tgz
 ```
 
 You can then import from `@noisefactor/sync`.
@@ -371,6 +382,11 @@ Passive discovery never starts pairing. A deliberate user action must call
 `pair()`. The host application owns storage for the returned token. See the
 [browser client guide](browser/README.md) for permission and lifecycle details.
 Runnable [browser and Electron examples](examples/) cover Canvas 2D, WebGL2, and WebGPU.
+Audio integrations must check for a selected and available `audio` provider
+with direction `receive`; the SDK and companion product versions are
+independent. See the [developer audio example](docs/developers.md#receive-native-audio).
+Linux users who need JACK through PipeWire must start Sync through `pw-jack`;
+see the [explicit service setup](docs/audio-input.md#linux-jack-through-pipewire).
 
 ```js
 import { SyncBridgeClient } from '@noisefactor/sync'

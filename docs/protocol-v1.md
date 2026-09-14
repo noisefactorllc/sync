@@ -14,12 +14,17 @@ HTTP and WebSocket traffic use the same port.
 | `/health` | HTTP GET or OPTIONS | Browser-visible health and capabilities |
 | `/status` | HTTP GET without `Origin` | Local companion status and active sender count |
 | `/pair` | WebSocket text | User-approved token creation |
-| `/control` | WebSocket text | Authentication and sender control |
+| `/control` | WebSocket text; binary audio replies in the audio development extension | Authentication and I/O control |
 | `/senders/{id}` | WebSocket binary | Frame data for one sender |
 
 The daemon accepts HTTP/1.1 headers up to 16 KiB.
 It closes a connection if the complete header does not arrive in one second.
 The daemon requires a valid loopback `Host` header.
+
+The [audio input extension](audio-input.md#wire-format) adds source discovery,
+capture ownership, and bounded float32 PCM responses to `/control`. Video
+frame encoding and sender-data sockets retain their existing formats. The
+audio extension is development work, not a claim about released v1 binaries.
 
 ## Origins
 

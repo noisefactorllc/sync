@@ -276,6 +276,59 @@ function client(options = {}) {
   });
 }
 
+function audioPacket(channels = 32, frames = 2) {
+  const buffer = new ArrayBuffer(32 + channels * frames * 4);
+  const view = new DataView(buffer);
+  new Uint8Array(buffer, 0, 4).set([78, 65, 85, 68]);
+  view.setUint16(4, 1, true);
+  view.setUint16(6, channels, true);
+  view.setUint32(8, 48000, true);
+  view.setUint32(12, frames, true);
+  view.setBigUint64(16, 9007199254740993n, true);
+  for (let frame = 0; frame < frames; frame++)
+    for (let channel = 0; channel < channels; channel++)
+      view.setFloat32(32 + (frame * channels + channel) * 4, (channel + 1) / 32, true);
+  return buffer;
+}
+
+test('audio source capture preserves 32 distinct planes and uint64 frame positions', async (t) => {
+  const source = { id: 'audio_32', name: 'Interface', channelCount: 32, sampleRate: 48000 };
+  scriptedControl({ onControl(message, socket) {
+    if (message.type === 'listAudioSources') socket.message(JSON.stringify({ type: 'audioSources', sources: [source] }));
+    if (message.type === 'openAudioSource') socket.message(JSON.stringify({ type: 'audioSourceOpened', id: source.id, channelCount: 32, sampleRate: 48000 }));
+    if (message.type === 'readAudioSource') socket.message(audioPacket());
+    if (message.type === 'closeAudioSource') socket.message(JSON.stringify({ type: 'audioSourceClosed', id: source.id }));
+  } });
+  const bridge = client();
+  t.after(() => bridge.close());
+  assert.deepEqual(await bridge.listAudioSources(), [source]);
+  assert.equal((await bridge.openAudioSource(source.id)).channelCount, 32);
+  const frame = await bridge.readAudioSource(source.id);
+  assert.equal(frame.firstFrame, 9007199254740993n);
+  assert.equal(frame.planes.length, 32);
+  for (let channel = 0; channel < 32; channel++)
+    assert.deepEqual([...frame.planes[channel]], [(channel + 1) / 32, (channel + 1) / 32]);
+  await bridge.closeAudioSource(source.id);
+  assert.equal(bridge.connected, true);
+});
+
+test('malformed audio packets terminate the session without exposing samples', async (t) => {
+  for (const mutate of [
+    b => { new DataView(b).setUint16(6, 33, true); return b; },
+    b => b.slice(0, -1),
+    b => { new DataView(b).setFloat32(32, NaN, true); return b; },
+    b => { new DataView(b).setUint32(12, 481, true); return b; },
+  ]) {
+    scriptedControl({ onControl(message, socket) {
+      if (message.type === 'readAudioSource') socket.message(mutate(audioPacket()));
+    } });
+    const bridge = client();
+    t.after(() => bridge.close());
+    await assert.rejects(bridge.readAudioSource('audio_32'), SyncProtocolError);
+    assert.equal(bridge.connected, false);
+  }
+});
+
 function permissionScript(steps) {
   const calls = [];
   return {

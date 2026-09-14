@@ -5,6 +5,7 @@ import { RgbaExportQueue } from './adapters/rgba.js';
 const PROTOCOL_VERSION = 1;
 const MAX_HEALTH_BYTES = 65_536;
 const MAX_CONTROL_BYTES = 16_384;
+const MAX_AUDIO_BYTES = 32 + 32 * 480 * 4;
 const MAX_PAIRING_BYTES = 1_024;
 const MAX_HEALTH_CHUNKS = 1_024;
 const MAX_PROVIDERS = 4;
@@ -319,6 +320,40 @@ function daemonError(value) {
     return new SyncUnavailableError(value.message, options);
   }
   return new SyncLifecycleError(value.message, options);
+}
+
+function validateAudioFormat(value) {
+  if (!Number.isInteger(value.channelCount) || value.channelCount < 1 || value.channelCount > 32 ||
+      !Number.isInteger(value.sampleRate) || value.sampleRate < 8000 || value.sampleRate > 384000) {
+    throw new SyncProtocolError('invalid audio channel count or sample rate');
+  }
+}
+
+function decodeAudioPacket(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 32 || buffer.byteLength > MAX_AUDIO_BYTES) {
+    throw new SyncProtocolError('audio packet is not bounded binary PCM');
+  }
+  const view = new DataView(buffer);
+  if (view.getUint32(0) !== 0x4e415544 || view.getUint16(4, true) !== 1) {
+    throw new SyncProtocolError('unsupported audio packet');
+  }
+  const channelCount = view.getUint16(6, true);
+  const sampleRate = view.getUint32(8, true);
+  const frameCount = view.getUint32(12, true);
+  validateAudioFormat({ channelCount, sampleRate });
+  if (frameCount > 480 || buffer.byteLength !== 32 + channelCount * frameCount * 4) {
+    throw new SyncProtocolError('invalid audio packet length');
+  }
+  const planes = Array.from({ length: channelCount }, () => new Float32Array(frameCount));
+  for (let frame = 0; frame < frameCount; frame++) {
+    for (let channel = 0; channel < channelCount; channel++) {
+      const sample = view.getFloat32(32 + (frame * channelCount + channel) * 4, true);
+      if (!Number.isFinite(sample)) throw new SyncProtocolError('nonfinite audio sample');
+      planes[channel][frame] = sample;
+    }
+  }
+  return { channelCount, sampleRate, frameCount, planes,
+    firstFrame: view.getBigUint64(16, true), droppedFrames: view.getBigUint64(24, true) };
 }
 
 function pairingDaemonError(value) {
@@ -806,6 +841,62 @@ export class SyncBridgeClient {
     return tracked;
   }
 
+  async _audioRequest(type, sourceId, validate) {
+    if (sourceId !== undefined && (typeof sourceId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(sourceId))) {
+      throw new SyncConfigurationError('invalid audio source ID');
+    }
+    await this.connect();
+    const session = this._controlSession;
+    return this._scheduleControl(session, () => this._exchange(
+      { type, ...(sourceId === undefined ? {} : { sourceId }) }, validate, session,
+      type === 'openAudioSource' ? 60_000 : this._timeoutMs,
+    ));
+  }
+
+  listAudioSources() {
+    return this._audioRequest('listAudioSources', undefined, (message) => {
+      exactKeys(message, ['type', 'sources'], 'audio source list');
+      if (message.type !== 'audioSources' || !Array.isArray(message.sources) || message.sources.length > 32)
+        throw new SyncProtocolError('invalid audio source list');
+      const ids = new Set();
+      for (const source of message.sources) {
+        exactKeys(source, ['id', 'name', 'channelCount', 'sampleRate'], 'audio source');
+        boundedString(source.id, 128, 'audio source ID', /^[A-Za-z0-9_-]+$/);
+        boundedString(source.name, 256, 'audio source name');
+        validateAudioFormat(source);
+        if (ids.has(source.id)) throw new SyncProtocolError('duplicate audio source ID');
+        ids.add(source.id);
+      }
+      return message.sources;
+    });
+  }
+
+  // One capture per client connection. Use separate clients for independent
+  // devices so a slow device cannot delay another source's PCM delivery.
+  openAudioSource(sourceId) {
+    return this._audioRequest('openAudioSource', sourceId, (message) => {
+      exactKeys(message, ['type', 'id', 'channelCount', 'sampleRate'], 'audio source opened');
+      if (message.type !== 'audioSourceOpened' || message.id !== sourceId)
+        throw new SyncProtocolError('wrong audio source opened');
+      validateAudioFormat(message);
+      return message;
+    });
+  }
+
+  readAudioSource(sourceId) {
+    return this._audioRequest('readAudioSource', sourceId, decodeAudioPacket);
+  }
+
+  closeAudioSource(sourceId) {
+    return this._audioRequest('closeAudioSource', sourceId, (message) => {
+      exactKeys(message, ['type', 'id'], 'audio source closed');
+      if (message.type !== 'audioSourceClosed' || message.id !== sourceId)
+        throw new SyncProtocolError('wrong audio source closed');
+      return message;
+    });
+  }
+
   async createRgbaSender(name, options = {}) {
     const exportQueue = new RgbaExportQueue();
     try {
@@ -1223,6 +1314,7 @@ export class SyncBridgeClient {
   }
 
   _installControlHandlers(socket, session) {
+    socket.binaryType = 'arraybuffer';
     const message = (event) => this._receiveControl(event.data, session);
     const error = () => this._terminateControl(
       new SyncUnavailableError('control connection failed'), true, session,
@@ -1243,6 +1335,11 @@ export class SyncBridgeClient {
     const pending = this._controlPending;
     if (!pending) {
       this._terminateControl(new SyncProtocolError('unexpected control message'), true, session);
+      return;
+    }
+    if (pending.audio && data instanceof ArrayBuffer && data.byteLength <= MAX_AUDIO_BYTES) {
+      this._clearControlPending();
+      pending.resolve({ value: data, raw: null });
       return;
     }
     if (typeof data !== 'string' || data.length > this._maxControlMessageBytes ||
@@ -1267,7 +1364,7 @@ export class SyncBridgeClient {
     pending.resolve({ value, raw: data });
   }
 
-  async _exchange(command, validate, session) {
+  async _exchange(command, validate, session, timeoutMs = this._timeoutMs) {
     this._assertSession(session);
     if (this._controlPending) throw new SyncProtocolError('more than one control request is in flight');
     const body = JSON.stringify(command);
@@ -1281,8 +1378,8 @@ export class SyncBridgeClient {
         this._clearControlPending();
         reject(error);
         this._terminateControl(error, true, session);
-      }, this._timeoutMs);
-      this._controlPending = { resolve, reject, timer, session };
+      }, timeoutMs);
+      this._controlPending = { resolve, reject, timer, session, audio: command.type === 'readAudioSource' };
     });
     try {
       session.socket.send(body);

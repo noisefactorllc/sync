@@ -1,7 +1,7 @@
 {
   "name": "@noisefactor/sync",
-  "version": "0.2.0",
-  "description": "Send browser video to the local Sync companion",
+  "version": "0.3.0",
+  "description": "Publish browser video and receive native multichannel audio through Sync",
   "type": "module",
   "license": "MIT",
   "main": "./index.js",

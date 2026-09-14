@@ -107,6 +107,10 @@ struct Connection {
   std::size_t slot = kMaximumConnections;
   ConnectionRole role = ConnectionRole::Http;
   bool closing = false;
+  bool audio_pending = false;
+  bool handle_closed = false;
+  std::unique_ptr<audio::Capture> audio_capture;
+  std::string audio_source_id;
   bool transport_close_pending = false;
   bool websocket_close_sent = false;
   bool websocket_close_received = false;
@@ -645,8 +649,11 @@ class Server {
     uv_close(reinterpret_cast<uv_handle_t*>(&connection.handle), [](uv_handle_t* handle) {
       auto* closed = static_cast<Connection*>(handle->data);
       closed->server.connection_closed(*closed);
-      delete closed;
+      closed->handle_closed = true;
+      if (!closed->audio_pending) delete closed;
     });
+    if (!connection.audio_pending && connection.audio_capture)
+      audio_request(connection, control::MessageType::CloseAudioSource, {}, true);
   }
 
   void connection_closed(Connection& connection) {
@@ -1151,7 +1158,14 @@ class Server {
             queue_pairing_error(*target, "store_failure",
                                 "Pairing store failed");
           } else {
-            queue_text(*target, paired, true);
+            if (queue_text(*target, paired, true)) {
+              const bool approved = std::find(audio_approved_origins_.begin(),
+                  audio_approved_origins_.end(), target->origin) != audio_approved_origins_.end();
+              if (!approved) {
+                audio_approved_origins_[audio_approval_cursor_] = target->origin;
+                audio_approval_cursor_ = (audio_approval_cursor_ + 1) % audio_approved_origins_.size();
+              }
+            }
             start_websocket_close(*target, 1000);
           }
         } else if (issued.commit ==
@@ -1770,6 +1784,107 @@ class Server {
     case control::MessageType::CloseSender:
       close_sender(connection, message.sender_id);
       break;
+    case control::MessageType::ListAudioSources:
+    case control::MessageType::OpenAudioSource:
+    case control::MessageType::ReadAudioSource:
+    case control::MessageType::CloseAudioSource:
+      audio_request(connection, message.type, message.source_id);
+      break;
+    }
+  }
+
+  // Device enumeration, opening, and closing can block in an OS driver. Keep
+  // those operations off the video/control loop, with one job per connection.
+  struct AudioWork {
+    uv_work_t request{};
+    Connection *connection;
+    audio::InputBackend *backend;
+    control::MessageType type;
+    std::string source_id;
+    bool cleanup;
+    std::string text;
+    std::vector<std::byte> binary;
+  };
+
+  void audio_request(Connection &connection, control::MessageType type,
+                     std::string source_id, bool cleanup = false) {
+    // Audio expands the older video-only grant. Require a fresh explicit
+    // pairing in this daemon lifetime; persisted video tokens still work for
+    // video but cannot silently acquire microphone/device-list access.
+    if (!cleanup && options_.pairing_authority &&
+        std::find(audio_approved_origins_.begin(), audio_approved_origins_.end(),
+                  connection.origin) == audio_approved_origins_.end()) {
+      queue_text(connection, control::encode_error("audio_pairing_required",
+          "Connect Sync audio again to approve audio input access"));
+      return;
+    }
+    if (connection.audio_pending) {
+      queue_error_and_close(connection, "audio_busy", "Audio request already pending");
+      return;
+    }
+    auto *work = new AudioWork{{}, &connection, options_.audio_backend, type,
+                              std::move(source_id), cleanup, {}, {}};
+    work->request.data = work;
+    connection.audio_pending = true;
+    const int result = uv_queue_work(&loop_, &work->request, [](uv_work_t *request) {
+      auto &job = *static_cast<AudioWork *>(request->data);
+      auto &owner = *job.connection;
+      try {
+        if (job.cleanup) { owner.audio_capture.reset(); return; }
+        if (!job.backend) throw std::runtime_error("Audio capture is unavailable");
+        switch (job.type) {
+        case control::MessageType::ListAudioSources:
+          job.text = control::encode_audio_sources(job.backend->sources());
+          break;
+        case control::MessageType::OpenAudioSource:
+          if (owner.audio_capture) throw std::runtime_error("Close the current audio source first");
+          owner.audio_capture = job.backend->open(job.source_id);
+          if (!owner.audio_capture) throw std::runtime_error("Audio source could not be opened");
+          owner.audio_source_id = job.source_id;
+          job.text = control::encode_audio_opened(job.source_id, owner.audio_capture->read());
+          break;
+        case control::MessageType::ReadAudioSource:
+          if (!owner.audio_capture || owner.audio_source_id != job.source_id)
+            throw std::runtime_error("Audio source is not open on this connection");
+          job.binary = audio::encode_packet(owner.audio_capture->read());
+          break;
+        case control::MessageType::CloseAudioSource:
+          if (owner.audio_source_id != job.source_id)
+            throw std::runtime_error("Audio source is not owned by this connection");
+          owner.audio_capture.reset();
+          job.text = control::encode_audio_closed(job.source_id);
+          break;
+        default: break;
+        }
+      } catch (const std::exception &) {
+        // Driver messages can include paths and are unbounded. Use a bounded
+        // protocol error; the app must never substitute a different device.
+        job.text = control::encode_error("audio_unavailable", "Audio source unavailable, busy, disconnected, or permission denied");
+      } catch (...) {
+        job.text = control::encode_error("audio_unavailable", "Audio capture failed");
+      }
+    }, [](uv_work_t *request, int) {
+      std::unique_ptr<AudioWork> job(static_cast<AudioWork *>(request->data));
+      auto &owner = *job->connection;
+      auto &server = owner.server;
+      owner.audio_pending = false;
+      if (owner.closing) {
+        if (owner.audio_capture)
+          server.audio_request(owner, control::MessageType::CloseAudioSource, {}, true);
+        else if (owner.handle_closed) delete &owner;
+        return;
+      }
+      if (!job->binary.empty())
+        server.queue_write(owner, websocket::encode_server_frame(websocket::Opcode::Binary, job->binary), false);
+      else server.queue_text(owner, job->text);
+    });
+    if (result != 0) {
+      delete work;
+      connection.audio_pending = false;
+      connection.audio_capture.reset();
+      if (connection.closing) {
+        if (connection.handle_closed) delete &connection;
+      } else queue_error_and_close(connection, "audio_unavailable", "Audio worker unavailable");
     }
   }
 
@@ -2010,6 +2125,8 @@ class Server {
   std::uint16_t port_ = 0;
   std::string instance_id_;
   std::array<Connection *, kMaximumConnections> connections_{};
+  std::array<NormalizedOrigin, kMaximumPairingOrigins> audio_approved_origins_{};
+  std::size_t audio_approval_cursor_ = 0;
   std::array<Sender, kMaximumSenders> senders_{};
   FramePublisher &publisher_;
   FrameReceiver receiver_;

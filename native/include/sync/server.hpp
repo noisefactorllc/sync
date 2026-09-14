@@ -9,6 +9,7 @@
 namespace noisefactor::sync {
 
 class DaemonMetrics;
+namespace audio { class InputBackend; }
 
 namespace pairing {
 class PairingAuthority;
@@ -45,6 +46,7 @@ struct ServerOptions {
   pairing::PairingAuthority *pairing_authority = nullptr;
   pairing::PairingPrompt *pairing_prompt = nullptr;
   DaemonMetrics *metrics = nullptr;
+  audio::InputBackend *audio_backend = nullptr;
   void (*platform_event_pump)(void *context) noexcept = nullptr;
   void *platform_event_pump_context = nullptr;
 };

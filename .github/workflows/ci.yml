@@ -63,6 +63,10 @@ jobs:
       - name: Run native tests
         run: ctest --test-dir build --output-on-failure
 
+      - name: Enumerate real CoreAudio inputs without capture
+        if: matrix.name == 'Release'
+        run: build/sync_audio_native_probe --list
+
       - name: Run JavaScript unit tests and test coverage guard
         run: npm run test:unit
 
@@ -106,9 +110,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev \
-            dpkg-dev file procps
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev libasound2-dev libjack-jackd2-dev \
+            dpkg-dev file procps jackd2 pipewire pipewire-jack jq
 
       - name: Configure and build
         env:
@@ -134,6 +138,20 @@ jobs:
           SYNC_DAEMON_PATH=build/syncd npm run test:integration
           SYNC_DAEMON_PATH=build/syncd SYNC_CTL_PATH=build/syncctl \
             npm run test:integration:linux
+
+      - name: Qualify 32-channel native JACK and PipeWire capture
+        if: matrix.name == 'Release'
+        run: |
+          scripts/test-linux-audio.sh build audio-qualification/jack jack
+          scripts/test-linux-audio.sh build audio-qualification/pipewire pipewire
+
+      - name: Upload native audio qualification
+        if: always() && matrix.name == 'Release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-linux-native-audio
+          path: audio-qualification/
+          if-no-files-found: error
 
       - name: Build and verify Debian package
         if: matrix.name == 'Release'
@@ -170,7 +188,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev
+            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev libasound2-dev libjack-jackd2-dev
 
       - name: Build and test the camera-free ARM64 surface
         run: |
@@ -343,6 +361,13 @@ jobs:
           $env:SYNC_DAEMON_PATH = "build/$env:BUILD_TYPE/syncd.exe"
           npm run test:integration
           if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
+
+      - name: Enumerate real WASAPI inputs without capture
+        if: matrix.name == 'Release'
+        shell: pwsh
+        run: |
+          & "build/$env:BUILD_TYPE/sync_audio_native_probe.exe" --list
+          if ($LASTEXITCODE -ne 0) { throw "WASAPI inventory failed" }
 
   windows-package:
     name: Windows package

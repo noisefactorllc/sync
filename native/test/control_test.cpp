@@ -118,6 +118,28 @@ SYNC_TEST(control_parses_valid_stats_and_close_sender_requests) {
   SYNC_REQUIRE(close.message->sender_id == "sender_A-9");
 }
 
+SYNC_TEST(control_accepts_audio_source_requests_without_sender_fields) {
+  const auto list = control::parse_message("{\"type\":\"listAudioSources\"}");
+  SYNC_REQUIRE(list.error == control::ParseError::None);
+  for (const auto type : {"openAudioSource", "readAudioSource", "closeAudioSource"}) {
+    const std::string request = std::string("{\"type\":\"") + type +
+        "\",\"sourceId\":\"coreaudio_0123456789abcdef\"}";
+    const auto result = control::parse_message(request);
+    SYNC_REQUIRE(result.error == control::ParseError::None);
+    require_error(std::string("{\"type\":\"") + type + "\"}",
+                  control::ParseError::MissingField);
+    require_error(std::string("{\"type\":\"") + type + "\",\"sourceId\":\"\"}",
+                  control::ParseError::InvalidValue);
+    require_error(std::string("{\"type\":\"") + type +
+                      "\",\"sourceId\":\"device\",\"senderId\":\"sender\"}",
+                  control::ParseError::UnknownField);
+  }
+  require_error("{\"type\":\"listAudioSources\",\"sourceId\":\"device\"}",
+                control::ParseError::UnknownField);
+  require_error("{\"type\":\"openAudioSource\",\"sourceId\":\"a\",\"sourceId\":\"b\"}",
+                control::ParseError::DuplicateField);
+}
+
 SYNC_TEST(
     control_rejects_malformed_json_trailing_data_escapes_surrogates_and_utf8) {
   require_error("", control::ParseError::MalformedJson);

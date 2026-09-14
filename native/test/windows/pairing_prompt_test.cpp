@@ -202,7 +202,7 @@ SYNC_TEST(windows_prompt_approval_copies_security_identity_into_message) {
     SYNC_REQUIRE(record->message ==
                  "Security identity: https://example.com\n"
                  "Unverified app label: Nøise Deck\n\n"
-                 "Allow this origin to publish video from this machine "
+                 "Allow this origin to publish video and capture audio inputs "
                  "through Sync?");
   }
   require_single_worker_thread(*record);

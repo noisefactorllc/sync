@@ -4,7 +4,7 @@
 The default endpoint is `http://127.0.0.1:53979`.
 You can supply an explicit IPv4 or IPv6 loopback endpoint for development.
 
-The local SDK candidate is `@noisefactor/sync` 0.2.0.
+The SDK version is `@noisefactor/sync` 0.3.0.
 The local installation procedures do not publish the package to npm.
 Read the [repository developer guide](https://github.com/noisefactorllc/sync/blob/main/docs/developers.md) for tarball and vendored-module procedures.
 The SDK does not install the native companion.
@@ -113,6 +113,43 @@ They do not convert color spaces, premultiply alpha, or remove premultiplication
 Set the descriptor to match the bytes that your renderer produces.
 
 See the [repository examples](https://github.com/noisefactorllc/sync/tree/main/examples) for Canvas 2D, WebGL2, and WebGPU source code.
+
+## Receive native audio
+
+SDK 0.3.0 adds native audio input. After pairing, check for an available,
+selected `audio` provider with direction `receive`. Older companions do not
+provide it. Device discovery reports the actual channel count, capped at 32.
+Let the user choose a source before opening it:
+
+```js
+const welcome = await sync.connect();
+const supportsAudio = welcome.capabilities.providers.some(provider =>
+  provider.id === 'audio' && provider.direction === 'receive' &&
+  provider.available && provider.selected);
+if (!supportsAudio) throw new Error('Install a Sync version with audio input');
+
+const sources = await sync.listAudioSources();
+// selectedSourceId comes from the user's choice in sources.
+const format = await sync.openAudioSource(selectedSourceId);
+const packet = await sync.readAudioSource(selectedSourceId);
+// packet.planes contains one Float32Array per channel; indexes are zero-based.
+// format.channelCount and format.sampleRate describe the opened native stream.
+await sync.closeAudioSource(selectedSourceId);
+```
+
+Each client owns one capture. Use separate clients for separate audio sources
+and for video output. Close the client on stop or error to release its device.
+`readAudioSource()` is a bounded pull operation; an empty packet means no new
+frames are ready. Avoid a busy polling loop. Deliver nonempty packets to a
+bounded AudioWorklet queue, and reset queued data when `firstFrame` ceases to
+match the preceding frame cursor or `droppedFrames` changes.
+
+Audio requires fresh origin pairing after the companion restarts, even if a
+stored token still works for video. Handle `audio_pairing_required` by asking
+the user to connect again. Device channel exposure depends on the OS backend;
+this API does not add missing hardware channels or supply sample-accurate
+audio/video synchronization. See the [native audio contract and qualification
+record](https://github.com/noisefactorllc/sync/blob/main/docs/audio-input.md).
 
 ## Stop and diagnose
 

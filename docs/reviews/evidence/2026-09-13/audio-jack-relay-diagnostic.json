@@ -1,0 +1,103 @@
+{
+  "recordedAtUtc": "2026-09-14T02:21:40.961Z",
+  "browser": "148.0.7778.96",
+  "route": "JACK dummy server → 32 JACK output ports → RtAudio → production syncd → SDK → Noisedeck AudioWorklet → channel picker and raw values",
+  "connection": {
+    "connected": true,
+    "snapshot": {
+      "status": {
+        "state": "idle",
+        "message": "",
+        "deviceCount": 2,
+        "rawState": "idle",
+        "legacyState": "idle"
+      },
+      "devices": [
+        {
+          "id": "sync-audio:audio_9208aa58555ef7879b9f45f3b13a562a37c98e8f365a4d9e03717acd0c5d2d30",
+          "name": "system (Jack) · Sync",
+          "channelCount": 2,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "idle",
+          "rawState": "idle",
+          "error": ""
+        },
+        {
+          "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+          "name": "SyncTest32 (Jack) · Sync",
+          "channelCount": 32,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "idle",
+          "rawState": "idle",
+          "error": ""
+        }
+      ],
+      "inputs": []
+    }
+  },
+  "source": {
+    "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+    "name": "SyncTest32 (Jack) · Sync",
+    "channelCount": 32,
+    "sampleRate": 48000,
+    "connected": true,
+    "captureState": "idle",
+    "rawState": "idle",
+    "error": ""
+  },
+  "status": "failed",
+  "error": "TimeoutError: page.waitForFunction: Timeout 12000ms exceeded.",
+  "snapshot": {
+    "audio": {
+      "status": {
+        "state": "idle",
+        "message": "",
+        "deviceCount": 2,
+        "rawState": "idle",
+        "legacyState": "idle"
+      },
+      "devices": [
+        {
+          "id": "sync-audio:audio_9208aa58555ef7879b9f45f3b13a562a37c98e8f365a4d9e03717acd0c5d2d30",
+          "name": "system (Jack) · Sync",
+          "channelCount": 2,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "idle",
+          "rawState": "idle",
+          "error": ""
+        },
+        {
+          "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+          "name": "SyncTest32 (Jack) · Sync",
+          "channelCount": 32,
+          "sampleRate": 48000,
+          "connected": true,
+          "captureState": "active",
+          "rawState": "ready",
+          "error": ""
+        }
+      ],
+      "inputs": [
+        {
+          "id": "sync-audio:audio_c94e7334b6a4b361d8ad991e890b52bc4f0f6e8bc12c5ed08da7e0a0c34d7aa7",
+          "name": "SyncTest32 (Jack) · Sync",
+          "channelCount": 32,
+          "captureState": "active",
+          "rawState": "ready",
+          "error": "",
+          "connected": true
+        }
+      ]
+    },
+    "packets": {
+      "packets": 272,
+      "frames": 130560,
+      "droppedFrames": "434144",
+      "mismatchedSamples": 0,
+      "verified": true
+    }
+  }
+}

@@ -9,6 +9,7 @@
 
 #include <sync/secure_memory.hpp>
 #include <sync/server.hpp>
+#include <sync/audio_capture.hpp>
 
 namespace noisefactor::sync::control {
 
@@ -17,6 +18,10 @@ enum class MessageType {
   CreateSender,
   GetStats,
   CloseSender,
+  ListAudioSources,
+  OpenAudioSource,
+  ReadAudioSource,
+  CloseAudioSource,
 };
 
 struct ControlMessage {
@@ -34,6 +39,7 @@ struct ControlMessage {
   std::vector<std::uint16_t> protocol_versions;
   std::string name;
   std::string sender_id;
+  std::string source_id;
 };
 
 enum class ParseError {
@@ -83,5 +89,8 @@ std::string encode_sender_closed(std::string_view id);
 std::string encode_stats(std::string_view id,
                          const SenderStatsPayload &payload);
 std::string encode_error(std::string_view code, std::string_view message);
+std::string encode_audio_sources(std::span<const audio::Source> sources);
+std::string encode_audio_opened(std::string_view id, const audio::Packet &format);
+std::string encode_audio_closed(std::string_view id);
 
 } // namespace noisefactor::sync::control
