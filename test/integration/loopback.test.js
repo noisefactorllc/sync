@@ -1085,6 +1085,9 @@ test("native audio retains bounded connection slots until blocked cleanup comple
       );
       try {
         assert.equal((await opening.client.nextJson("blocked capture welcome")).type, "welcome");
+        // The blocked opener sends no reply. Flush the overlapping request
+        // immediately instead of waiting for Linux's delayed TCP ACK.
+        opening.client.socket.setNoDelay(true);
         opening.client.sendJson({ type: "openAudioSource", sourceId: "audio_blocked" });
         opening.client.sendJson({ type: "listAudioSources" });
         assert.equal((await opening.client.nextJson("overlapping request")).code, "audio_busy");
