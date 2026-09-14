@@ -97,6 +97,7 @@ struct PairingIssueResult {
 struct PairingAuthenticationResult {
   PairingStoreError error = PairingStoreError::Io;
   bool authenticated = false;
+  bool audio_approved = false;
 };
 
 struct PairingRevocationResult {
@@ -120,9 +121,13 @@ class PairingStore {
   PairingStore& operator=(PairingStore&& other) noexcept;
 
   [[nodiscard]] PairingStoreError open(PairingStoreOptions options) noexcept;
-  [[nodiscard]] PairingIssueResult issue(const NormalizedOrigin& origin) noexcept;
+  // Audio requires explicit approval; callers issuing only video grants retain
+  // the default. Rotation replaces the old credential and its grant together.
   [[nodiscard]] PairingIssueResult issue(const NormalizedOrigin& origin,
-                                         PairingCommitGate& gate) noexcept;
+                                         bool audio_approved = false) noexcept;
+  [[nodiscard]] PairingIssueResult issue(const NormalizedOrigin& origin,
+                                         PairingCommitGate& gate,
+                                         bool audio_approved = false) noexcept;
   [[nodiscard]] PairingAuthenticationResult authenticate(
       const NormalizedOrigin& origin, std::string_view token) noexcept;
   [[nodiscard]] PairingRevocationResult revoke(const NormalizedOrigin& origin) noexcept;
@@ -132,6 +137,7 @@ class PairingStore {
   struct Record {
     NormalizedOrigin origin{};
     std::array<unsigned char, 32> digest{};
+    bool audio_approved = false;
   };
   struct PersistResult {
     PairingStoreError error = PairingStoreError::Io;

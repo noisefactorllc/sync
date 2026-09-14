@@ -4,16 +4,23 @@
 #include "pairing_prompt_internal.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
 #include <utility>
 
 #include <mach/message.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace noisefactor::sync::platform {
 namespace {
@@ -35,6 +42,7 @@ bool append(std::span<char> output,
 
 bool build_presentation(const pairing::PromptRequest& request,
                         prompt_test::Presentation& output) noexcept {
+  output.generation = request.generation;
   constexpr std::string_view header = "Sync pairing request";
   constexpr std::string_view identity = "Security identity: ";
   constexpr std::string_view label = "\nUnverified app label: ";
@@ -78,10 +86,12 @@ class CoreFoundationAdapter final : public prompt_test::Adapter {
         kCFUserNotificationAlertMessageKey,
         kCFUserNotificationDefaultButtonTitleKey,
         kCFUserNotificationAlternateButtonTitleKey,
+        kCFUserNotificationAlertTopMostKey,
     };
-    const void* values[] = {header, message, default_button, alternate_button};
+    const void* values[] = {
+        header, message, default_button, alternate_button, kCFBooleanTrue};
     CFDictionaryRef dictionary = CFDictionaryCreate(
-        kCFAllocatorDefault, keys, values, 4,
+        kCFAllocatorDefault, keys, values, 5,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     SInt32 error = 0;
     if (dictionary != nullptr) {
@@ -143,6 +153,135 @@ class CoreFoundationAdapter final : public prompt_test::Adapter {
 
   CFUserNotificationRef notification_ = nullptr;
 };
+
+// The helper's prompt worker owns this adapter. Neither pipe IO nor human
+// interaction runs on the helper's libuv/platform-event-pump thread.
+class ParentPipeAdapter final : public prompt_test::Adapter {
+ public:
+  explicit ParentPipeAdapter(std::string session) : session_(std::move(session)) {
+    struct stat input{}, output{};
+    usable_ = session_.size() == 36 &&
+              ::fstat(STDIN_FILENO, &input) == 0 && S_ISFIFO(input.st_mode) &&
+              ::fstat(STDOUT_FILENO, &output) == 0 && S_ISFIFO(output.st_mode);
+    for (const int descriptor : {STDIN_FILENO, STDOUT_FILENO}) {
+      const int flags = ::fcntl(descriptor, F_GETFL);
+      if (!usable_ || flags < 0 || ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0 ||
+          ::fcntl(descriptor, F_SETNOSIGPIPE, 1) != 0) usable_ = false;
+    }
+  }
+
+  bool create(const prompt_test::Presentation& presentation,
+              std::chrono::milliseconds ui_deadline) override {
+    if (!usable_ || generation_ != 0 || presentation.generation == 0) return false;
+    generation_ = presentation.generation;
+    const auto deadline = std::chrono::duration_cast<std::chrono::milliseconds>(
+        (std::chrono::steady_clock::now() + ui_deadline).time_since_epoch()).count();
+    return send(@{ @"type": @"pairingRequest", @"session": string(session_),
+                   @"generation": string(std::to_string(generation_)),
+                   @"deadlineMs": @(deadline), @"header": string(presentation.header()),
+                   @"message": string(presentation.message()) });
+  }
+
+  prompt_test::AdapterResponse receive(std::chrono::milliseconds slice) override {
+    using Response = prompt_test::AdapterResponse;
+    if (!usable_) return Response::Failed;
+    const auto deadline = std::chrono::steady_clock::now() + slice;
+    for (;;) {
+      const auto newline = pending_.find('\n');
+      if (newline != std::string::npos) {
+        const auto line = pending_.substr(0, newline);
+        pending_.erase(0, newline + 1);
+        NSData* bytes = [NSData dataWithBytes:line.data() length:line.size()];
+        id decoded = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+        if (![decoded isKindOfClass:NSDictionary.class]) return fail();
+        NSDictionary* record = decoded;
+        NSSet* keys = [NSSet setWithArray:record.allKeys];
+        if (![keys isEqualToSet:[NSSet setWithArray:@[@"type", @"session", @"generation", @"decision"]]] ||
+            ![record[@"type"] isEqual:@"pairingDecision"] ||
+            ![record[@"session"] isKindOfClass:NSString.class] ||
+            ![record[@"generation"] isKindOfClass:NSString.class] ||
+            ![record[@"decision"] isKindOfClass:NSString.class]) return fail();
+        const bool allow = [record[@"decision"] isEqual:@"allow"];
+        if (!allow && ![record[@"decision"] isEqual:@"deny"]) return fail();
+        // An already-cancelled generation or an old app instance cannot approve
+        // the new request. Continue waiting within this bounded receive slice.
+        if ([record[@"session"] isEqual:string(session_)] &&
+            [record[@"generation"] isEqual:string(std::to_string(generation_))])
+          return allow ? Response::Approved : Response::Denied;
+      } else {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) return Response::SliceTimedOut;
+        pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+        const int ready = ::poll(&descriptor, 1, static_cast<int>(remaining));
+        if (ready < 0) { if (errno == EINTR) continue; return fail(); }
+        if (ready == 0) return Response::SliceTimedOut;
+        char bytes[512];
+        const auto count = ::read(STDIN_FILENO, bytes, sizeof(bytes));
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (count <= 0) return fail();
+        pending_.append(bytes, static_cast<std::size_t>(count));
+        if (pending_.size() > prompt_test::kMaximumParentPairingFrameBytes) return fail();
+      }
+      if (std::chrono::steady_clock::now() >= deadline) return Response::SliceTimedOut;
+    }
+  }
+
+  void cancel() override { release(); }
+  void release() override {
+    if (generation_ == 0) return;
+    // A broken/malformed decision input must still dismiss the parent window
+    // when the independently owned output pipe remains writable.
+    (void)send(@{ @"type": @"pairingCancel", @"session": string(session_),
+                 @"generation": string(std::to_string(generation_)) });
+    generation_ = 0;
+  }
+
+ private:
+  static NSString* string(std::string_view value) {
+    return [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
+  }
+  prompt_test::AdapterResponse fail() {
+    usable_ = false;
+    return prompt_test::AdapterResponse::Failed;
+  }
+  bool send(NSDictionary* record) {
+    NSData* bytes = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+    if (bytes == nil || bytes.length + 1 > prompt_test::kMaximumParentPairingFrameBytes) {
+      usable_ = false;
+      return false;
+    }
+    std::string frame(static_cast<const char*>(bytes.bytes), bytes.length);
+    frame += '\n';
+    const auto deadline = std::chrono::steady_clock::now() + kProductionReceiveSlice;
+    std::size_t offset = 0;
+    while (offset < frame.size()) {
+      if (std::chrono::steady_clock::now() >= deadline) { usable_ = false; return false; }
+      const auto count = ::write(STDOUT_FILENO, frame.data() + offset, frame.size() - offset);
+      if (count > 0) { offset += static_cast<std::size_t>(count); continue; }
+      if (count < 0 && errno == EINTR) continue;
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now()).count();
+      if (count < 0 && errno == EAGAIN && remaining > 0) {
+        pollfd descriptor{STDOUT_FILENO, POLLOUT, 0};
+        if (::poll(&descriptor, 1, static_cast<int>(remaining)) > 0) continue;
+      }
+      usable_ = false;
+      return false;
+    }
+    return true;
+  }
+  std::string session_;
+  std::string pending_;
+  std::uint64_t generation_ = 0;
+  bool usable_ = false;
+};
+
+std::unique_ptr<prompt_test::Adapter> production_adapter() {
+  const char* session = std::getenv(prompt_test::kParentPairingSessionEnvironment);
+  if (session != nullptr) return std::make_unique<ParentPipeAdapter>(session);
+  return std::make_unique<CoreFoundationAdapter>();
+}
 
 template <typename Operation>
 bool invoke_bool(Operation&& operation) noexcept {
@@ -383,7 +522,7 @@ struct MacPairingPrompt::Impl {
 
 MacPairingPrompt::MacPairingPrompt()
     : MacPairingPrompt(std::make_unique<Impl>(
-          std::make_unique<CoreFoundationAdapter>(),
+          production_adapter(),
           std::chrono::duration_cast<std::chrono::milliseconds>(
               kProductionUiDeadline),
           kProductionReceiveSlice)) {}

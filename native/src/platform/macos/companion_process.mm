@@ -1,4 +1,5 @@
 #include "companion_process.hpp"
+#include "pairing_prompt_internal.hpp"
 
 #import <Foundation/Foundation.h>
 
@@ -7,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <set>
@@ -243,6 +246,13 @@ struct OwnedTaskState {
   __strong NSTask* task = nil;
   __strong NSPipe* stderr_pipe = nil;
   __strong NSPipe* stdout_pipe = nil;
+  __strong NSPipe* stdin_pipe = nil;
+  std::string pairing_session;
+  std::string stdout_pending;
+  std::mutex stdout_mutex;
+  std::optional<ParentPairingRequest> pairing;
+  std::uint64_t last_pairing_generation = 0;
+  bool pairing_failed = false;
   CompanionProcess::StderrCallback stderr_callback;
   CompanionProcess::ExitCallback exit_callback;
   std::vector<std::function<void()>> termination_completions;
@@ -254,8 +264,134 @@ struct OwnedTaskState {
 // record weakly instead of keeping a raw supervisor pointer.
 struct TaskOwnerState {
   std::shared_ptr<OwnedTaskState> task;
+  CompanionProcess::PairingCallback pairing_callback;
   bool active = true;
 };
+
+namespace parent_prompt = platform::pairing_prompt_testing;
+
+std::uint64_t pairing_now_ms() {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void dismiss_pairing(const std::shared_ptr<TaskOwnerState>& owner,
+                     const std::shared_ptr<OwnedTaskState>& state) {
+  state->pairing.reset();
+  if (owner->active && owner->task == state && owner->pairing_callback) {
+    auto callback = owner->pairing_callback;
+    callback(std::nullopt);
+  }
+}
+
+void close_pairing_channel(const std::shared_ptr<TaskOwnerState>& owner,
+                           const std::shared_ptr<OwnedTaskState>& state) {
+  if (state->pairing_failed) return;
+  state->pairing_failed = true;
+  state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
+  @try { [state->stdin_pipe.fileHandleForWriting closeFile]; } @catch (NSException*) {}
+  dismiss_pairing(owner, state);
+}
+
+bool write_pairing_decision(const std::shared_ptr<TaskOwnerState>& owner,
+                            const std::shared_ptr<OwnedTaskState>& state, bool allow) {
+  if (!state->pairing || state->pairing_failed || state->termination_requested) return false;
+  const auto request = *state->pairing;
+  if (pairing_now_ms() >= request.deadline_ms) {
+    // The helper owns the timeout result. A synthetic Deny here could arrive
+    // just before its deadline and incorrectly replace pairing_timeout.
+    dismiss_pairing(owner, state);
+    return false;
+  }
+  NSData* bytes = [NSJSONSerialization dataWithJSONObject:@{
+      @"type": @"pairingDecision", @"session": ns_string(request.session),
+      @"generation": ns_string(std::to_string(request.generation)),
+      @"decision": allow ? @"allow" : @"deny" } options:0 error:nil];
+  if (bytes == nil || bytes.length >= 512) { close_pairing_channel(owner, state); return false; }
+  std::string frame(static_cast<const char*>(bytes.bytes), bytes.length);
+  frame += '\n';
+  // A decision is smaller than PIPE_BUF, and the descriptor is nonblocking.
+  // Failure closes the channel; it must never turn into implicit approval.
+  const int descriptor = state->stdin_pipe.fileHandleForWriting.fileDescriptor;
+  ssize_t written;
+  do { written = ::write(descriptor, frame.data(), frame.size()); } while (written < 0 && errno == EINTR);
+  if (written != static_cast<ssize_t>(frame.size())) {
+    close_pairing_channel(owner, state);
+    return false;
+  }
+  dismiss_pairing(owner, state);
+  return true;
+}
+
+void pairing_record(const std::shared_ptr<TaskOwnerState>& owner,
+                    const std::shared_ptr<OwnedTaskState>& state,
+                    const std::string& line) {
+  if (!owner->active || owner->task != state || state->pairing_failed || state->termination_requested) return;
+  NSData* bytes = [NSData dataWithBytes:line.data() length:line.size()];
+  id value = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+  if (![value isKindOfClass:NSDictionary.class]) { close_pairing_channel(owner, state); return; }
+  NSDictionary* record = value;
+  if ([record[@"type"] isEqual:@"ready"]) return; // Existing helper startup record.
+  const bool request = [record[@"type"] isEqual:@"pairingRequest"];
+  const bool cancel = [record[@"type"] isEqual:@"pairingCancel"];
+  NSSet* keys = request
+      ? [NSSet setWithArray:@[@"type", @"session", @"generation", @"deadlineMs", @"header", @"message"]]
+      : [NSSet setWithArray:@[@"type", @"session", @"generation"]];
+  if ((!request && !cancel) || !exact_keys(record, keys) ||
+      ![record[@"session"] isKindOfClass:NSString.class] ||
+      ![record[@"generation"] isKindOfClass:NSString.class]) {
+    close_pairing_channel(owner, state); return;
+  }
+  const auto session = cpp_string(record[@"session"]);
+  const auto generation_text = cpp_string(record[@"generation"]);
+  std::uint64_t generation = 0;
+  const auto parsed = std::from_chars(generation_text.data(), generation_text.data() + generation_text.size(), generation);
+  if (generation == 0 || parsed.ec != std::errc{} || parsed.ptr != generation_text.data() + generation_text.size() ||
+      std::to_string(generation) != generation_text) {
+    close_pairing_channel(owner, state); return;
+  }
+  if (session != state->pairing_session) return;
+  if (cancel) {
+    if (state->pairing && state->pairing->generation == generation) dismiss_pairing(owner, state);
+    return;
+  }
+  if (generation <= state->last_pairing_generation) return;
+  if (state->pairing || ![record[@"deadlineMs"] isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)record[@"deadlineMs"]) == CFBooleanGetTypeID() ||
+      ![record[@"header"] isKindOfClass:NSString.class] ||
+      ![record[@"message"] isKindOfClass:NSString.class]) {
+    close_pairing_channel(owner, state); return;
+  }
+  const double deadline = [record[@"deadlineMs"] doubleValue];
+  const auto now = pairing_now_ms();
+  if (!std::isfinite(deadline) || deadline != std::floor(deadline) || deadline <= 0 ||
+      deadline > static_cast<double>(now + 30'000)) {
+    close_pairing_channel(owner, state); return;
+  }
+  ParentPairingRequest next{session, generation, static_cast<std::uint64_t>(deadline),
+      cpp_string(record[@"header"]), cpp_string(record[@"message"])};
+  if (next.header.empty() || next.header.size() > parent_prompt::kMaximumPromptHeaderBytes ||
+      next.message.empty() || next.message.size() > parent_prompt::kMaximumPromptMessageBytes) {
+    close_pairing_channel(owner, state); return;
+  }
+  state->last_pairing_generation = generation;
+  state->pairing = next;
+  if (now >= next.deadline_ms || !owner->pairing_callback) {
+    (void)write_pairing_decision(owner, state, false); return;
+  }
+  auto callback = owner->pairing_callback;
+  callback(next);
+  const std::weak_ptr<TaskOwnerState> weak_owner = owner;
+  const std::weak_ptr<OwnedTaskState> weak_state = state;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>((next.deadline_ms - now) * NSEC_PER_MSEC)),
+      dispatch_get_main_queue(), ^{
+        const auto current_owner = weak_owner.lock();
+        const auto current_state = weak_state.lock();
+        if (current_owner && current_state && current_owner->active && current_owner->task == current_state &&
+            current_state->pairing && current_state->pairing->generation == generation)
+          dismiss_pairing(current_owner, current_state);
+      });
+}
 
 } // namespace
 
@@ -465,7 +601,10 @@ CompanionProcess::CompanionProcess(CompanionProcessOptions options)
 
 CompanionProcess::~CompanionProcess() {
   const auto state = impl_->task_owner->task;
+  if (state != nullptr && !state->pairing_session.empty())
+    close_pairing_channel(impl_->task_owner, state);
   impl_->task_owner->active = false;
+  impl_->task_owner->pairing_callback = {};
   impl_->task_owner->task.reset();
   NSTask* task = state == nullptr ? nil : state->task;
   task.terminationHandler = nil;
@@ -521,6 +660,29 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
   state->stdout_pipe = [NSPipe pipe];
   task.standardError = state->stderr_pipe;
   task.standardOutput = state->stdout_pipe;
+  const int stdout_descriptor = state->stdout_pipe.fileHandleForReading.fileDescriptor;
+  const int stdout_flags = ::fcntl(stdout_descriptor, F_GETFL);
+  if (stdout_flags < 0 || ::fcntl(stdout_descriptor, F_SETFL, stdout_flags | O_NONBLOCK) != 0) {
+    error = "Could not create the Sync helper output channel.";
+    return false;
+  }
+  if (impl_->task_owner->pairing_callback) {
+    state->pairing_session = cpp_string(NSUUID.UUID.UUIDString);
+    state->stdin_pipe = [NSPipe pipe];
+    task.standardInput = state->stdin_pipe;
+    const int descriptor = state->stdin_pipe.fileHandleForWriting.fileDescriptor;
+    const int flags = ::fcntl(descriptor, F_GETFL);
+    const int descriptor_flags = ::fcntl(descriptor, F_GETFD);
+    if (flags < 0 || ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        descriptor_flags < 0 || ::fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0 ||
+        ::fcntl(descriptor, F_SETNOSIGPIPE, 1) != 0) {
+      error = "Could not create the Sync approval channel.";
+      return false;
+    }
+    NSMutableDictionary<NSString*, NSString*>* environment = [NSProcessInfo.processInfo.environment mutableCopy];
+    environment[ns_string(parent_prompt::kParentPairingSessionEnvironment)] = ns_string(state->pairing_session);
+    task.environment = environment;
+  }
   state->stderr_callback = std::move(stderr_callback);
   state->exit_callback = std::move(exit_callback);
 
@@ -546,10 +708,46 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
           }
         });
       };
-  state->stdout_pipe.fileHandleForReading.readabilityHandler =
-      ^(NSFileHandle* handle) {
-        if (handle.availableData.length == 0) handle.readabilityHandler = nil;
-      };
+  const std::weak_ptr<OwnedTaskState> weak_state = state;
+  state->stdout_pipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle* handle) {
+    const auto current_state = weak_state.lock();
+    if (!current_state) { handle.readabilityHandler = nil; return; }
+    // Foundation readDataOfLength may wait to fill the requested length.
+    // One nonblocking POSIX read delivers a short approval record immediately.
+    char bytes[parent_prompt::kMaximumParentPairingFrameBytes];
+    ssize_t count = -1;
+    int read_error = 0;
+    @try {
+      count = ::read(handle.fileDescriptor, bytes, sizeof(bytes));
+      if (count < 0) read_error = errno;
+    } @catch (NSException*) { read_error = EIO; }
+    if (count < 0 && (read_error == EINTR || read_error == EAGAIN || read_error == EWOULDBLOCK)) return;
+    if (count <= 0) handle.readabilityHandler = nil;
+    if (current_state->pairing_session.empty()) return;
+    bool failed = count <= 0;
+    std::vector<std::string> records;
+    if (!failed) {
+      std::lock_guard lock(current_state->stdout_mutex);
+      for (ssize_t i = 0; i < count; ++i) {
+        if (bytes[i] == '\n') {
+          records.push_back(std::move(current_state->stdout_pending));
+          current_state->stdout_pending.clear();
+        } else {
+          current_state->stdout_pending += bytes[i];
+          if (current_state->stdout_pending.size() >= parent_prompt::kMaximumParentPairingFrameBytes) {
+            failed = true; current_state->stdout_pending.clear(); break;
+          }
+        }
+      }
+    }
+    on_main([owner, weak_state, failed, records = std::move(records)] {
+      const auto process = owner.lock();
+      const auto current = weak_state.lock();
+      if (!process || !current || !process->active || process->task != current) return;
+      if (failed || !current->task.running) { close_pairing_channel(process, current); return; }
+      for (const auto& record : records) pairing_record(process, current, record);
+    });
+  };
   task.terminationHandler = ^(NSTask* terminated) {
     state->stderr_pipe.fileHandleForReading.readabilityHandler = nil;
     state->stdout_pipe.fileHandleForReading.readabilityHandler = nil;
@@ -558,6 +756,7 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
     on_main([owner, state, status] {
       const auto process = owner.lock();
       if (process == nullptr || !process->active) return;
+      if (process->task == state && !state->pairing_session.empty()) close_pairing_channel(process, state);
       if (process->task == state) process->task.reset();
       if (state->exit_callback) {
         auto callback = std::move(state->exit_callback);
@@ -579,6 +778,11 @@ bool CompanionProcess::start(StderrCallback stderr_callback,
     error = cpp_string(launch_error.localizedDescription);
     return false;
   }
+  // Parent keeps only its read ends for helper output and its write end for
+  // decisions. Closing the latter then produces EOF in the owned helper.
+  @try { [state->stdout_pipe.fileHandleForWriting closeFile]; } @catch (NSException*) {}
+  @try { [state->stderr_pipe.fileHandleForWriting closeFile]; } @catch (NSException*) {}
+  @try { [state->stdin_pipe.fileHandleForReading closeFile]; } @catch (NSException*) {}
   impl_->task_owner->task = std::move(state);
   error.clear();
   return true;
@@ -654,6 +858,7 @@ void CompanionProcess::terminate(Completion completion) {
   }
   state->termination_completions.push_back(std::move(completion));
   if (state->termination_requested) return;
+  if (!state->pairing_session.empty()) close_pairing_channel(impl_->task_owner, state);
   state->termination_requested = true;
   NSTask* task = state->task;
   if (task == nil || !task.running) return;
@@ -666,6 +871,18 @@ void CompanionProcess::terminate(Completion completion) {
       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (task.running && task.processIdentifier == pid) ::kill(pid, SIGKILL);
       });
+}
+
+void CompanionProcess::set_pairing_callback(PairingCallback callback) {
+  impl_->task_owner->pairing_callback = std::move(callback);
+}
+
+bool CompanionProcess::respond_to_pairing(std::string_view session,
+                                          std::uint64_t generation, bool allow) {
+  const auto state = impl_->task_owner->task;
+  if (!state || !state->task.running || !state->pairing || state->pairing_failed ||
+      state->pairing->session != session || state->pairing->generation != generation) return false;
+  return write_pairing_decision(impl_->task_owner, state, allow);
 }
 
 void CompanionProcess::list_pairings(PairingsCallback completion) {

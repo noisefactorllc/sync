@@ -26,6 +26,7 @@ using noisefactor::sync::companion::CompanionProcessOptions;
 using noisefactor::sync::companion::parse_pairings_json;
 using noisefactor::sync::companion::parse_health_json;
 using noisefactor::sync::companion::HealthSnapshot;
+using noisefactor::sync::companion::ParentPairingRequest;
 
 class TemporaryFixture {
  public:
@@ -128,6 +129,149 @@ bool wait_until(const std::function<bool()>& predicate,
     }
   }
   return predicate();
+}
+
+// These children exercise only the real NSTask/pipes and parent callback.
+// They never open a native approval window, issue a credential, or access audio.
+std::uint64_t parent_request_deadline(std::chrono::milliseconds remaining) {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      (std::chrono::steady_clock::now() + remaining).time_since_epoch()).count());
+}
+
+std::string parent_request_script(unsigned generation, std::uint64_t deadline) {
+  return "printf '{\"type\":\"pairingRequest\",\"session\":\"%s\",\"generation\":\"" +
+      std::to_string(generation) + "\",\"deadlineMs\":" + std::to_string(deadline) +
+      ",\"header\":\"Sync IPC fixture\",\"message\":\"Process mechanics only\"}\\n' "
+      "\"$SYNC_PARENT_PAIRING_SESSION\"\n";
+}
+
+std::string parent_cancel_script(unsigned generation) {
+  return "printf '{\"type\":\"pairingCancel\",\"session\":\"%s\",\"generation\":\"" +
+      std::to_string(generation) + "\"}\\n' \"$SYNC_PARENT_PAIRING_SESSION\"\n";
+}
+
+SYNC_TEST(companion_pairing_short_request_arrives_before_pipe_eof) {
+  TemporaryFixture fixture;
+  fixture.write_helper(parent_request_script(1, parent_request_deadline(std::chrono::seconds(5))) +
+      "IFS= read -r response\n"
+      "printf '%s\\n' \"$response\" > " + fixture.arguments_path() + "\n");
+  std::optional<ParentPairingRequest> request;
+  bool exited = false;
+  CompanionProcess process({.helper_path = fixture.helper_path(), .framework_path = "/tmp/Syphon.framework"});
+  process.set_pairing_callback([&](auto value) { if (value) request = std::move(value); });
+  std::string error;
+  SYNC_REQUIRE(process.start([](std::string_view) {}, [&](int) { exited = true; }, error));
+  // The child writes far less than 4096 bytes and keeps stdout open while it
+  // waits for stdin. Foundation's former readDataOfLength: implementation hung
+  // here waiting to fill 4096; the callback must arrive without EOF or padding.
+  SYNC_REQUIRE(wait_until([&] { return request.has_value(); }, std::chrono::milliseconds(750)));
+  SYNC_REQUIRE(process.owned_pid().has_value());
+  SYNC_REQUIRE(!exited);
+  SYNC_REQUIRE(request->message == "Process mechanics only");
+  SYNC_REQUIRE(process.respond_to_pairing(request->session, request->generation, false));
+  SYNC_REQUIRE(wait_until([&] { return exited; }));
+  std::ifstream response_file(fixture.arguments_path());
+  std::string response;
+  std::getline(response_file, response);
+  NSData* bytes = [NSData dataWithBytes:response.data() length:response.size()];
+  NSDictionary* record = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+  SYNC_REQUIRE([record[@"decision"] isEqual:@"deny"]);
+  SYNC_REQUIRE([record[@"session"] isEqualToString:@(request->session.c_str())]);
+  SYNC_REQUIRE([record[@"generation"] isEqual:@"1"]);
+}
+
+SYNC_TEST(companion_pairing_cancel_and_stale_decisions_cannot_answer_new_request) {
+  TemporaryFixture fixture;
+  const auto deadline = parent_request_deadline(std::chrono::seconds(5));
+  fixture.write_helper(parent_request_script(1, deadline) + "sleep 0.2\n" +
+      parent_cancel_script(1) + parent_request_script(2, deadline) +
+      "IFS= read -r response\n"
+      "printf '%s\\n' \"$response\" > " + fixture.arguments_path() + "\n");
+  std::vector<ParentPairingRequest> requests;
+  unsigned dismissals = 0;
+  bool exited = false;
+  CompanionProcess process({.helper_path = fixture.helper_path(), .framework_path = "/tmp/Syphon.framework"});
+  process.set_pairing_callback([&](auto request) {
+    if (request) requests.push_back(std::move(*request)); else ++dismissals;
+  });
+  std::string error;
+  SYNC_REQUIRE(process.start([](std::string_view) {}, [&](int) { exited = true; }, error));
+  SYNC_REQUIRE(wait_until([&] { return requests.size() == 2; }));
+  SYNC_REQUIRE(dismissals == 1);
+  SYNC_REQUIRE(!process.respond_to_pairing(requests[0].session, requests[0].generation, true));
+  SYNC_REQUIRE(!process.respond_to_pairing("old-helper-instance", requests[1].generation, true));
+  SYNC_REQUIRE(!std::filesystem::exists(fixture.arguments_path()));
+  SYNC_REQUIRE(process.respond_to_pairing(requests[1].session, requests[1].generation, false));
+  SYNC_REQUIRE(wait_until([&] { return exited; }));
+}
+
+SYNC_TEST(companion_pairing_expiry_dismisses_without_sending_synthetic_denial) {
+  TemporaryFixture fixture;
+  fixture.write_helper(parent_request_script(1, parent_request_deadline(std::chrono::milliseconds(700))) +
+      "if IFS= read -r response; then\n"
+      "  printf '%s\\n' \"$response\" > " + fixture.arguments_path() + "\n"
+      "fi\n");
+  std::optional<ParentPairingRequest> request;
+  unsigned dismissals = 0;
+  bool exited = false;
+  CompanionProcess process({.helper_path = fixture.helper_path(), .framework_path = "/tmp/Syphon.framework"});
+  process.set_pairing_callback([&](auto value) { if (value) request = std::move(value); else ++dismissals; });
+  std::string error;
+  SYNC_REQUIRE(process.start([](std::string_view) {}, [&](int) { exited = true; }, error));
+  SYNC_REQUIRE(wait_until([&] { return request.has_value(); }, std::chrono::milliseconds(500)));
+  SYNC_REQUIRE(wait_until([&] { return dismissals > 0; }, std::chrono::milliseconds(1000)));
+  SYNC_REQUIRE(!process.respond_to_pairing(request->session, request->generation, true));
+  SYNC_REQUIRE(!std::filesystem::exists(fixture.arguments_path()));
+  SYNC_REQUIRE(!exited);
+  bool stopped = false;
+  process.terminate([&] { stopped = true; });
+  SYNC_REQUIRE(wait_until([&] { return stopped; }));
+}
+
+SYNC_TEST(companion_pairing_helper_stdout_eof_closes_decision_pipe) {
+  TemporaryFixture fixture;
+  fixture.write_helper(parent_request_script(1, parent_request_deadline(std::chrono::seconds(5))) +
+      "sleep 0.2\n"
+      "exec 1>&-\n"
+      "if IFS= read -r response; then\n"
+      "  printf 'unexpected response' > " + fixture.arguments_path() + "\n"
+      "else\n"
+      "  printf 'eof' > " + fixture.arguments_path() + "\n"
+      "fi\n");
+  std::optional<ParentPairingRequest> request;
+  unsigned dismissals = 0;
+  bool exited = false;
+  CompanionProcess process({.helper_path = fixture.helper_path(), .framework_path = "/tmp/Syphon.framework"});
+  process.set_pairing_callback([&](auto value) { if (value) request = std::move(value); else ++dismissals; });
+  std::string error;
+  SYNC_REQUIRE(process.start([](std::string_view) {}, [&](int) { exited = true; }, error));
+  SYNC_REQUIRE(wait_until([&] { return request.has_value(); }));
+  SYNC_REQUIRE(wait_until([&] { return exited; }));
+  SYNC_REQUIRE(dismissals > 0);
+  SYNC_REQUIRE(!process.respond_to_pairing(request->session, request->generation, true));
+  std::ifstream marker(fixture.arguments_path());
+  std::string text;
+  std::getline(marker, text);
+  SYNC_REQUIRE(text == "eof");
+}
+
+SYNC_TEST(companion_pairing_unexpected_helper_exit_dismisses_pending_request) {
+  TemporaryFixture fixture;
+  fixture.write_helper(parent_request_script(1, parent_request_deadline(std::chrono::seconds(5))) +
+      "sleep 0.2\nexit 17\n");
+  std::optional<ParentPairingRequest> request;
+  unsigned dismissals = 0;
+  std::optional<int> exit_status;
+  CompanionProcess process({.helper_path = fixture.helper_path(), .framework_path = "/tmp/Syphon.framework"});
+  process.set_pairing_callback([&](auto value) { if (value) request = std::move(value); else ++dismissals; });
+  std::string error;
+  SYNC_REQUIRE(process.start([](std::string_view) {}, [&](int status) { exit_status = status; }, error));
+  SYNC_REQUIRE(wait_until([&] { return request.has_value(); }));
+  SYNC_REQUIRE(wait_until([&] { return exit_status.has_value(); }));
+  SYNC_REQUIRE(*exit_status == 17);
+  SYNC_REQUIRE(dismissals > 0);
+  SYNC_REQUIRE(!process.owned_pid().has_value());
+  SYNC_REQUIRE(!process.respond_to_pairing(request->session, request->generation, true));
 }
 
 SYNC_TEST(companion_process_uses_exact_bundle_paths_and_drains_stderr) {

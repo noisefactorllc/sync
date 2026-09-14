@@ -919,6 +919,12 @@ test("native audio transport preserves 1, 2, 8, and 32 ordered float32 channels"
         id: sourceId,
       });
     }
+    const status = await bridge.listAudioSources();
+    assert.equal(status.find(source => source.id === "audio_active")?.name, "0");
+    assert.equal(status.find(source => source.id === "audio_wrong_thread_closes")?.name,
+                 "0", "explicit close destroys every capture on its opening thread");
+    assert.equal(status.find(source => source.id === "audio_wrong_thread_reads")?.name,
+                 "0", "reads stay on the capture's opening thread");
   } finally {
     bridge.close();
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
@@ -955,11 +961,15 @@ test("native audio close during a slow open releases the connection-owned captur
     const deadline = Date.now() + TIMEOUT_MS;
     let active;
     let completed;
+    let wrongThreadCloses;
     do {
       observer.client.sendJson({ type: "listAudioSources" });
       const listed = await observer.client.nextJson("audio cleanup status");
       assert.equal(listed.type, "audioSources");
       active = listed.sources.find((source) => source.id === "audio_active")?.name;
+      wrongThreadCloses = listed.sources.find(
+        source => source.id === "audio_wrong_thread_closes",
+      )?.name;
       completed = listed.sources.find(
         (source) => source.id === "audio_slow_completed",
       )?.name;
@@ -969,10 +979,145 @@ test("native audio close during a slow open releases the connection-owned captur
     } while ((active !== "0" || completed !== "1") && Date.now() < deadline);
     assert.equal(completed, "1", "the pending driver open completed exactly once");
     assert.equal(active, "0", "its capture was destroyed after the owner disconnected");
+    assert.equal(wrongThreadCloses, "0", "disconnect cleanup stays on the opening thread");
   } finally {
     opening?.client.destroy();
     observer?.client.destroy();
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("native audio reads stay below 66 ms while an independent source opens", async () => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  const controls = [];
+  try {
+    // Non-audio connections must not make two independent captures share a
+    // blocked worker simply because their connection slots happen to collide.
+    for (let i = 0; i < 6; i++) {
+      const control = await authenticateControl(
+        daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+      );
+      controls.push(control.client);
+      assert.equal((await control.client.nextJson("independent audio welcome")).type, "welcome");
+    }
+    controls[0].sendJson({ type: "openAudioSource", sourceId: "audio_1" });
+    assert.equal((await controls[0].nextJson("active audio source")).type, "audioSourceOpened");
+    controls[1].sendJson({ type: "openAudioSource", sourceId: "audio_2" });
+    assert.equal((await controls[1].nextJson("short-lived audio source")).type, "audioSourceOpened");
+    controls[4].sendJson({ type: "openAudioSource", sourceId: "audio_slow" });
+    const deadline = Date.now() + TIMEOUT_MS;
+    let status;
+    do {
+      controls[5].sendJson({ type: "listAudioSources" });
+      status = (await controls[5].nextJson("independent slow open status")).sources;
+    } while (status.find(source => source.id === "audio_slow_started")?.name !== "1" && Date.now() < deadline);
+    assert.equal(status.find(source => source.id === "audio_slow_started")?.name, "1");
+    assert.equal(status.find(source => source.id === "audio_slow_completed")?.name, "0");
+    const started = performance.now();
+    // Releasing another connection's worker must not join the blocked opener
+    // or delay the event loop before it can answer the active capture read.
+    controls[1].send(0x8, Buffer.from([0x03, 0xe8]));
+    assert.equal((await controls[1].nextFrame("short-lived capture close")).opcode, 0x8);
+    await controls[1].waitClosed();
+    controls[0].sendJson({ type: "readAudioSource", sourceId: "audio_1" });
+    assert.equal((await controls[0].nextFrame("independent capture read")).opcode, 0x2);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed <= 66, `active capture read took ${elapsed.toFixed(1)} ms during another source's open`);
+    assert.equal((await controls[4].nextJson("slow source eventually opens")).type, "audioSourceOpened");
+  } finally {
+    for (const control of controls) control.destroy();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("native audio shutdown drains active and pending captures on their owning threads", {
+  skip: !GRACEFUL_SHUTDOWN_IS_OBSERVABLE,
+}, async () => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  const controls = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const control = await authenticateControl(
+        daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+      );
+      controls.push(control.client);
+      assert.equal((await control.client.nextJson("audio shutdown welcome")).type, "welcome");
+    }
+    controls[0].sendJson({ type: "openAudioSource", sourceId: "audio_8" });
+    assert.equal((await controls[0].nextJson("active capture opened")).type, "audioSourceOpened");
+    controls[1].sendJson({ type: "openAudioSource", sourceId: "audio_slow" });
+    const deadline = Date.now() + TIMEOUT_MS;
+    let started;
+    do {
+      controls[2].sendJson({ type: "listAudioSources" });
+      const status = await controls[2].nextJson("pending capture status");
+      started = status.sources.find(source => source.id === "audio_slow_started")?.name;
+    } while (started !== "1" && Date.now() < deadline);
+    assert.equal(started, "1", "shutdown interrupts an open already inside the driver");
+    // The fixture exits nonzero unless all captures are gone and every read
+    // and destructor ran on its opening thread, including the pending open.
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  } finally {
+    for (const control of controls) control.destroy();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});
+
+test("native audio retains bounded connection slots until blocked cleanup completes", async () => {
+  const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), "sync-audio-gate-"));
+  const gate = path.join(directory, "release");
+  const daemon = await spawnDaemon({
+    executable: AUDIO_TEST_SERVER, arguments: [],
+    env: { ...process.env, SYNC_AUDIO_TEST_GATE: gate },
+  });
+  let observer;
+  let excess;
+  try {
+    observer = await authenticateControl(
+      daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+    );
+    assert.equal((await observer.client.nextJson("audio capacity observer welcome")).type, "welcome");
+    // The server permits 144 connections. Reserve one responsive control and
+    // disconnect the other 143 while their device opens cannot finish.
+    for (let i = 0; i < 143; i++) {
+      const opening = await authenticateControl(
+        daemon.ready, "http://127.0.0.1:8000", "audio-test-token",
+      );
+      try {
+        assert.equal((await opening.client.nextJson("blocked capture welcome")).type, "welcome");
+        opening.client.sendJson({ type: "openAudioSource", sourceId: "audio_blocked" });
+        opening.client.sendJson({ type: "listAudioSources" });
+        assert.equal((await opening.client.nextJson("overlapping request")).code, "audio_busy");
+        const close = await opening.client.nextFrame("blocked capture close");
+        opening.client.send(0x8, close.payload);
+        await opening.client.waitClosed();
+      } finally { opening.client.destroy(); }
+    }
+    // This response stays on the event loop even with all audio workers blocked.
+    observer.client.sendJson({ type: "getStats", senderId: "missing" });
+    assert.equal((await observer.client.nextJson("control remains responsive")).code, "sender_not_found");
+    await assert.rejects(async () => {
+      excess = await upgrade({ port: daemon.ready.port, route: "/control", origin: "http://127.0.0.1:8000" });
+    }, "disconnected pending audio owners still occupy the bounded slots");
+    await writeFile(gate, "release");
+    const deadline = Date.now() + TIMEOUT_MS;
+    let status;
+    do {
+      observer.client.sendJson({ type: "listAudioSources" });
+      status = (await observer.client.nextJson("draining audio owners")).sources;
+    } while ((status.find(source => source.id === "audio_blocked_completed")?.name !== "143" ||
+              status.find(source => source.id === "audio_active")?.name !== "0") && Date.now() < deadline);
+    assert.equal(status.find(source => source.id === "audio_blocked_completed")?.name, "143");
+    assert.equal(status.find(source => source.id === "audio_active")?.name, "0");
+    assert.equal(status.find(source => source.id === "audio_wrong_thread_closes")?.name, "0");
+    excess = await authenticateControl(daemon.ready, "http://127.0.0.1:8000", "audio-test-token");
+    assert.equal((await excess.client.nextJson("recovered connection slot")).type, "welcome");
+  } finally {
+    await writeFile(gate, "release");
+    observer?.client.destroy();
+    excess?.client.destroy();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+    await rm(directory, { recursive: true });
   }
 });
 
@@ -1117,6 +1262,22 @@ test("browser SDK pairs, authenticates, rotates, revokes, and reports native den
     clients.clear();
     await stop();
 
+    daemon = await spawnPairingDaemon(storePath, "approve");
+    assert.equal((await bridge(first.token).connect()).type, "welcome");
+    // Persisted audio consent must survive a daemon restart without another prompt.
+    await assert.rejects(bridge(first.token).listAudioSources(),
+      error => error.daemonCode === 'audio_unavailable');
+    for (const client of clients) client.close();
+    clients.clear();
+    await stop();
+
+    // Make this temporary single-record fixture a genuine version-1 video grant.
+    // Authentication must preserve video access without silently expanding consent.
+    const legacyStore = await readFile(storePath);
+    assert.equal(legacyStore.readUInt32LE(12), 1);
+    legacyStore.writeUInt32LE(1, 8);
+    legacyStore.writeUInt16LE(0, 18);
+    await writeFile(storePath, legacyStore);
     daemon = await spawnPairingDaemon(storePath, "approve");
     assert.equal((await bridge(first.token).connect()).type, "welcome");
     await assert.rejects(bridge(first.token).listAudioSources(),

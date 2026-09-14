@@ -59,6 +59,33 @@ FetchContent_Declare(rtaudio
   URL_HASH SHA256=8f6119875e28e3a7a6c5bc8ba8aa2d2644a8d6166bd1ff7ee07ca6f0d29b88cf
 )
 FetchContent_MakeAvailable(rtaudio)
+if(APPLE)
+  # RtAudio 6.0.1 checks the output listener flag while closing an input stream,
+  # leaving its disconnect callback registered after the capture is destroyed.
+  # Compile a corrected copy without modifying a shared FetchContent source tree.
+  file(READ "${rtaudio_SOURCE_DIR}/RtAudio.cpp" SYNC_RTAUDIO_SOURCE)
+  set(SYNC_RTAUDIO_INPUT_LISTENER_OLD [=[if ( handle->disconnectListenerAdded[0] ) {
+        property.mSelector = kAudioDevicePropertyDeviceIsAlive;
+        if (AudioObjectRemovePropertyListener( handle->id[1],]=])
+  string(REPLACE "disconnectListenerAdded[0]" "disconnectListenerAdded[1]"
+      SYNC_RTAUDIO_INPUT_LISTENER_NEW "${SYNC_RTAUDIO_INPUT_LISTENER_OLD}")
+  string(FIND "${SYNC_RTAUDIO_SOURCE}" "${SYNC_RTAUDIO_INPUT_LISTENER_OLD}" SYNC_RTAUDIO_INPUT_LISTENER_OFFSET)
+  if(SYNC_RTAUDIO_INPUT_LISTENER_OFFSET EQUAL -1)
+    message(FATAL_ERROR "Pinned RtAudio input-listener patch context changed; review the dependency fix")
+  endif()
+  string(REPLACE "${SYNC_RTAUDIO_INPUT_LISTENER_OLD}" "${SYNC_RTAUDIO_INPUT_LISTENER_NEW}"
+      SYNC_RTAUDIO_SOURCE "${SYNC_RTAUDIO_SOURCE}")
+  set(SYNC_RTAUDIO_PATCHED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/patched-rtaudio/RtAudio.cpp")
+  file(CONFIGURE OUTPUT "${SYNC_RTAUDIO_PATCHED_SOURCE}" CONTENT "${SYNC_RTAUDIO_SOURCE}" @ONLY)
+  get_target_property(SYNC_RTAUDIO_TARGET_SOURCES rtaudio SOURCES)
+  list(FIND SYNC_RTAUDIO_TARGET_SOURCES "RtAudio.cpp" SYNC_RTAUDIO_SOURCE_INDEX)
+  if(SYNC_RTAUDIO_SOURCE_INDEX EQUAL -1)
+    message(FATAL_ERROR "Pinned RtAudio source target changed; review the dependency fix")
+  endif()
+  list(REMOVE_AT SYNC_RTAUDIO_TARGET_SOURCES ${SYNC_RTAUDIO_SOURCE_INDEX})
+  list(APPEND SYNC_RTAUDIO_TARGET_SOURCES "${SYNC_RTAUDIO_PATCHED_SOURCE}")
+  set_property(TARGET rtaudio PROPERTY SOURCES "${SYNC_RTAUDIO_TARGET_SOURCES}")
+endif()
 # Keep our warnings-as-errors gate without applying it to pinned upstream code.
 if(MSVC)
   target_compile_options(rtaudio PRIVATE /WX-)

@@ -50,6 +50,14 @@ struct CompanionProcessOptions {
   double termination_timeout_seconds = 2.0;
 };
 
+struct ParentPairingRequest {
+  std::string session;
+  std::uint64_t generation = 0;
+  std::uint64_t deadline_ms = 0;
+  std::string header;
+  std::string message;
+};
+
 class CompanionProcess {
  public:
   using StderrCallback = std::function<void(std::string_view)>;
@@ -60,6 +68,8 @@ class CompanionProcess {
       std::function<void(std::vector<std::string>, std::string)>;
   using RevokeCallback = std::function<void(bool, std::string)>;
   using Completion = std::function<void()>;
+  // Main-thread notification; nullopt dismisses the current approval window.
+  using PairingCallback = std::function<void(std::optional<ParentPairingRequest>)>;
 
   explicit CompanionProcess(CompanionProcessOptions options);
   ~CompanionProcess();
@@ -75,6 +85,9 @@ class CompanionProcess {
   void terminate(Completion completion);
   void list_pairings(PairingsCallback completion);
   void revoke_pairing(std::string origin, RevokeCallback completion);
+  void set_pairing_callback(PairingCallback callback);
+  bool respond_to_pairing(std::string_view session, std::uint64_t generation,
+                          bool allow);
 
  private:
   struct Impl;

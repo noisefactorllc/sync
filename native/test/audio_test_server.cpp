@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <thread>
 
@@ -16,8 +18,12 @@ namespace sync_audio = noisefactor::sync::audio;
 namespace {
 class TestCapture final : public sync_audio::Capture {
 public:
-  TestCapture(unsigned channels, std::atomic<unsigned> &active)
-      : channels_(channels), active_(active), buffer_(48000, channels),
+  TestCapture(unsigned channels, std::atomic<unsigned> &active,
+              std::atomic<unsigned> &wrong_thread_reads,
+              std::atomic<unsigned> &wrong_thread_closes)
+      : channels_(channels), active_(active),
+        wrong_thread_reads_(wrong_thread_reads), wrong_thread_closes_(wrong_thread_closes),
+        owner_thread_(std::this_thread::get_id()), buffer_(48000, channels),
         producer_([this](std::stop_token stop) {
           std::vector<float> samples(240 * channels_);
           for (unsigned frame = 0; frame < 240; ++frame)
@@ -28,11 +34,22 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
           }
         }) { ++active_; }
-  ~TestCapture() override { producer_.request_stop(); producer_.join(); --active_; }
-  sync_audio::Packet read() override { return buffer_.read(); }
+  ~TestCapture() override {
+    if (std::this_thread::get_id() != owner_thread_) ++wrong_thread_closes_;
+    producer_.request_stop();
+    producer_.join();
+    --active_;
+  }
+  sync_audio::Packet read() override {
+    if (std::this_thread::get_id() != owner_thread_) ++wrong_thread_reads_;
+    return buffer_.read();
+  }
 private:
   unsigned channels_;
   std::atomic<unsigned> &active_;
+  std::atomic<unsigned> &wrong_thread_reads_;
+  std::atomic<unsigned> &wrong_thread_closes_;
+  std::thread::id owner_thread_;
   sync_audio::CaptureBuffer buffer_;
   std::jthread producer_;
 };
@@ -45,21 +62,48 @@ public:
             {"audio_2", "2 channel fixture", 2, 48000},
             {"audio_1", "1 channel fixture", 1, 48000},
             {"audio_active", std::to_string(active_.load()), 1, 48000},
-            {"audio_slow_completed", std::to_string(slow_completed_.load()), 1, 48000}};
+            {"audio_wrong_thread_reads", std::to_string(wrong_thread_reads_.load()), 1, 48000},
+            {"audio_wrong_thread_closes", std::to_string(wrong_thread_closes_.load()), 1, 48000},
+            {"audio_slow_started", std::to_string(slow_started_.load()), 1, 48000},
+            {"audio_slow_completed", std::to_string(slow_completed_.load()), 1, 48000},
+            {"audio_blocked_completed", std::to_string(blocked_completed_.load()), 1, 48000}};
   }
   std::unique_ptr<sync_audio::Capture> open(const std::string &id) override {
-    if (id == "audio_slow") std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (id == "audio_slow") {
+      ++slow_started_;
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (id == "audio_blocked") {
+      const auto *gate = std::getenv("SYNC_AUDIO_TEST_GATE");
+      if (!gate) throw std::runtime_error("Missing test gate");
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!std::filesystem::exists(gate)) {
+        if (std::chrono::steady_clock::now() >= deadline)
+          throw std::runtime_error("Audio test gate timed out");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    }
     for (const unsigned count : {32u, 8u, 2u, 1u})
-      if (id == "audio_" + std::to_string(count) || id == "audio_slow") {
-        auto capture = std::make_unique<TestCapture>(count, active_);
+      if (id == "audio_" + std::to_string(count) || id == "audio_slow" || id == "audio_blocked") {
+        auto capture = std::make_unique<TestCapture>(count, active_,
+                                                     wrong_thread_reads_, wrong_thread_closes_);
         if (id == "audio_slow") ++slow_completed_;
+        if (id == "audio_blocked") ++blocked_completed_;
         return capture;
       }
     throw std::runtime_error("Missing test source");
   }
+  bool shutdown_ok() const {
+    return active_ == 0 && wrong_thread_reads_ == 0 && wrong_thread_closes_ == 0 &&
+           slow_started_ == slow_completed_;
+  }
 private:
   std::atomic<unsigned> active_{0};
+  std::atomic<unsigned> wrong_thread_reads_{0};
+  std::atomic<unsigned> wrong_thread_closes_{0};
+  std::atomic<unsigned> slow_started_{0};
   std::atomic<unsigned> slow_completed_{0};
+  std::atomic<unsigned> blocked_completed_{0};
 };
 }
 
@@ -77,5 +121,6 @@ int main() {
   options.audio_backend = &backend;
   options.providers[0] = {"audio", noisefactor::sync::ProviderDirection::Receive, true, true};
   options.provider_count = 1;
-  return noisefactor::sync::run_server(options);
+  const auto result = noisefactor::sync::run_server(options);
+  return result != 0 ? result : (backend.shutdown_ok() ? 0 : 2);
 }

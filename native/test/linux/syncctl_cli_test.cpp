@@ -66,7 +66,7 @@ SYNC_TEST(syncctl_pair_prompt_is_terminal_safe_and_affirmative_only) {
   SYNC_REQUIRE(output.str() ==
                "Origin: https://visuals.example\n"
                "Name: Noisedeck\\x1b\\n\\\"\\\\\n"
-               "Allow this browser to pair? [y/N] ");
+               "Allow this browser to publish video and capture audio inputs through Sync? [y/N] ");
 
   for (const std::string value : {"y\n", "Y\n"}) {
     std::istringstream input(value);

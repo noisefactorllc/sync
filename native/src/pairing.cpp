@@ -358,7 +358,9 @@ PairingIssueResult
 StorePairingAuthority::issue(const NormalizedOrigin &origin,
                              PairingCommitGate &gate) noexcept {
   std::lock_guard lock(store_mutex_);
-  return store_.issue(origin, gate);
+  // The server submits issuance only after the native prompt explicitly
+  // approves publishing video and capturing audio for this origin.
+  return store_.issue(origin, gate, true);
 }
 PairingAuthenticationResult
 StorePairingAuthority::authenticate(const NormalizedOrigin &origin,

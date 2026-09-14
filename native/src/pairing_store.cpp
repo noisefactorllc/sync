@@ -32,7 +32,8 @@ namespace noisefactor::sync {
 namespace {
 
 constexpr std::array<unsigned char, 8> kMagic = {'N', 'F', 'S', 'Y', 'N', 'C', 'P', 'R'};
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
+constexpr std::uint16_t kAudioApproved = 1;
 constexpr std::size_t kHeaderBytes = 16;
 constexpr std::size_t kDigestBytes = 32;
 constexpr std::size_t kMaximumSerializedBytes =
@@ -368,7 +369,7 @@ PairingStoreError PairingStore::reload() noexcept {
     return PairingStoreError::Corrupt;
   }
   const std::uint32_t version = read_u32(bytes.data() + 8);
-  if (version != kVersion) return PairingStoreError::UnknownVersion;
+  if (version != 1 && version != kVersion) return PairingStoreError::UnknownVersion;
   const std::uint32_t count = read_u32(bytes.data() + 12);
   if (count > kMaximumPairingOrigins) return PairingStoreError::Corrupt;
 
@@ -378,9 +379,11 @@ PairingStoreError PairingStore::reload() noexcept {
   for (std::size_t index = 0; index < count; ++index) {
     if (offset > size || size - offset < 4) return PairingStoreError::Corrupt;
     const std::uint16_t origin_length = read_u16(bytes.data() + offset);
-    const std::uint16_t reserved = read_u16(bytes.data() + offset + 2);
+    // Version 1 reserved these bytes as zero and conveyed video consent only.
+    const std::uint16_t grants = read_u16(bytes.data() + offset + 2);
     offset += 4;
-    if (reserved != 0 || origin_length == 0 || origin_length > kMaximumOriginBytes ||
+    if ((version == 1 ? grants != 0 : grants > kAudioApproved) ||
+        origin_length == 0 || origin_length > kMaximumOriginBytes ||
         offset > size || size - offset < static_cast<std::size_t>(origin_length) + kDigestBytes) {
       return PairingStoreError::Corrupt;
     }
@@ -396,6 +399,7 @@ PairingStoreError PairingStore::reload() noexcept {
       }
     }
     parsed[index].origin = normalized.origin;
+    parsed[index].audio_approved = version == kVersion && (grants & kAudioApproved) != 0;
     offset += origin_length;
     std::memcpy(parsed[index].digest.data(), bytes.data() + offset, kDigestBytes);
     offset += kDigestBytes;
@@ -420,7 +424,7 @@ PairingStore::PersistResult PairingStore::persist(
   for (std::size_t index = 0; index < count; ++index) {
     const auto origin = records[index].origin.view();
     write_u16(bytes.data() + length, static_cast<std::uint16_t>(origin.size()));
-    write_u16(bytes.data() + length + 2, 0);
+    write_u16(bytes.data() + length + 2, records[index].audio_approved ? kAudioApproved : 0);
     length += 4;
     std::memcpy(bytes.data() + length, origin.data(), origin.size());
     length += origin.size();
@@ -479,13 +483,15 @@ PairingStore::PersistResult PairingStore::persist(
   return {.error = commit.error, .commit = commit.commit};
 }
 
-PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin) noexcept {
+PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin,
+                                      bool audio_approved) noexcept {
   PairingCommitGate gate;
-  return issue(origin, gate);
+  return issue(origin, gate, audio_approved);
 }
 
 PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin,
-                                       PairingCommitGate& gate) noexcept {
+                                       PairingCommitGate& gate,
+                                       bool audio_approved) noexcept {
   PairingIssueResult result{};
   if (origin.empty()) {
     result.error = PairingStoreError::Corrupt;
@@ -536,6 +542,7 @@ PairingIssueResult PairingStore::issue(const NormalizedOrigin& origin,
   ScopedCleanse candidate_cleanser(candidate.data(), sizeof(candidate));
   candidate[slot].origin = origin;
   candidate[slot].digest = digest;
+  candidate[slot].audio_approved = audio_approved;
   const std::size_t candidate_count = slot == record_count_ ? record_count_ + 1 : record_count_;
   const PersistResult persistence = persist(candidate, candidate_count, &gate);
   result.error = persistence.error;
@@ -576,15 +583,18 @@ PairingAuthenticationResult PairingStore::authenticate(
   std::array<unsigned char, kDigestBytes> expected{};
   ScopedCleanse expected_cleanser(expected.data(), expected.size());
   bool found = false;
+  bool audio_approved = false;
   for (std::size_t index = 0; index < record_count_; ++index) {
     if (same_origin(records_[index].origin, origin)) {
       expected = records_[index].digest;
+      audio_approved = records_[index].audio_approved;
       found = true;
       break;
     }
   }
   result.authenticated = CRYPTO_memcmp(presented.data(), expected.data(), expected.size()) == 0;
   if (!found) result.authenticated = false;
+  result.audio_approved = result.authenticated && audio_approved;
   return result;
 }
 

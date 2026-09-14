@@ -11,11 +11,16 @@
 
 namespace noisefactor::sync::platform::pairing_prompt_testing {
 
+// Private inherited-pipe protocol used only by the app-owned helper.
+inline constexpr char kParentPairingSessionEnvironment[] = "SYNC_PARENT_PAIRING_SESSION";
+inline constexpr std::size_t kMaximumParentPairingFrameBytes = 4096;
+
 inline constexpr std::size_t kMaximumPromptHeaderBytes = 64;
 inline constexpr std::size_t kMaximumPromptMessageBytes = 768;
 inline constexpr std::size_t kMaximumPromptButtonBytes = 16;
 
 struct Presentation {
+  std::uint64_t generation = 0;
   [[nodiscard]] std::string_view header() const noexcept {
     return {header_bytes.data(), header_length};
   }

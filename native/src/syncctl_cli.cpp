@@ -359,7 +359,7 @@ auto render_pair_prompt(std::string_view json, std::ostream& output,
   if (!PromptParser(json).parse(parsed)) return false;
   output << "Origin: " << escape_terminal_text(parsed.origin) << '\n'
          << "Name: " << escape_terminal_text(parsed.name) << '\n'
-         << "Allow this browser to pair? [y/N] ";
+         << "Allow this browser to publish video and capture audio inputs through Sync? [y/N] ";
   if (!output) return false;
   prompt = std::move(parsed);
   return true;

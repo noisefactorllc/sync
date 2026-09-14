@@ -489,6 +489,7 @@ SYNC_TEST(pairing_store_mints_lowercase_256_bit_tokens_and_persists_hashes_only)
   const auto auth = store.authenticate(deck, issued.token.view());
   SYNC_REQUIRE(auth.error == PairingStoreError::None);
   SYNC_REQUIRE(auth.authenticated);
+  SYNC_REQUIRE(!auth.audio_approved);
   SYNC_REQUIRE(!store.authenticate(deck, std::string(64, '0')).authenticated);
   SYNC_REQUIRE(store.authenticate(deck, "short").error == PairingStoreError::InvalidToken);
 }
@@ -507,6 +508,81 @@ SYNC_TEST(pairing_store_replaces_duplicate_origin_and_rotation_invalidates_old_t
   SYNC_REQUIRE(store.authenticate(deck, second.token.view()).authenticated);
   std::array<NormalizedOrigin, 64> listed{};
   SYNC_REQUIRE(store.list(listed).count == 1);
+}
+
+SYNC_TEST(pairing_store_audio_consent_survives_reopen_and_is_bound_to_the_credential) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto store = open_store(path);
+  const auto deck = origin("https://deck.example");
+  const auto issued = store.issue(deck, true);
+  SYNC_REQUIRE(issued.commit == PairingCommitState::CommittedDurable);
+  auto reopened = open_store(path);
+  const auto authenticated = reopened.authenticate(deck, issued.token.view());
+  SYNC_REQUIRE(authenticated.authenticated);
+  SYNC_REQUIRE(authenticated.audio_approved);
+  SYNC_REQUIRE(!reopened.authenticate(origin("https://other.example"), issued.token.view()).audio_approved);
+  SYNC_REQUIRE(!reopened.authenticate(deck, std::string(64, '0')).audio_approved);
+
+  const auto rotated = reopened.issue(deck);
+  SYNC_REQUIRE(rotated.commit == PairingCommitState::CommittedDurable);
+  const auto old = store.authenticate(deck, issued.token.view());
+  SYNC_REQUIRE(!old.authenticated);
+  SYNC_REQUIRE(!old.audio_approved);
+  const auto replacement = store.authenticate(deck, rotated.token.view());
+  SYNC_REQUIRE(replacement.authenticated);
+  SYNC_REQUIRE(!replacement.audio_approved);
+  const auto approved = reopened.issue(deck, true);
+  SYNC_REQUIRE(reopened.revoke(deck).revoked);
+  const auto revoked = store.authenticate(deck, approved.token.view());
+  SYNC_REQUIRE(!revoked.authenticated);
+  SYNC_REQUIRE(!revoked.audio_approved);
+}
+
+SYNC_TEST(pairing_store_legacy_video_grant_stays_video_only_through_format_migration) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto store = open_store(path);
+  const auto deck = origin("https://deck.example");
+  const auto issued = store.issue(deck);
+  // Version 1 has the same record shape, with this flags field reserved as zero.
+  auto legacy = read_bytes(path);
+  legacy[8] = 1;
+  legacy[18] = 0;
+  legacy[19] = 0;
+  write_bytes(path, legacy);
+  auto reopened = open_store(path);
+  const auto before = reopened.authenticate(deck, issued.token.view());
+  SYNC_REQUIRE(before.authenticated);
+  SYNC_REQUIRE(!before.audio_approved);
+  SYNC_REQUIRE(read_bytes(path) == legacy);
+  SYNC_REQUIRE(reopened.issue(origin("https://other.example"), true).error == PairingStoreError::None);
+  SYNC_REQUIRE(read_bytes(path)[8] == 2);
+  const auto after = store.authenticate(deck, issued.token.view());
+  SYNC_REQUIRE(after.authenticated);
+  SYNC_REQUIRE(!after.audio_approved);
+  const auto approved = reopened.issue(deck, true);
+  SYNC_REQUIRE(!store.authenticate(deck, issued.token.view()).authenticated);
+  SYNC_REQUIRE(store.authenticate(deck, approved.token.view()).audio_approved);
+}
+
+SYNC_TEST(pairing_store_rejects_unknown_grants_and_legacy_reserved_bits_without_cached_approval) {
+  TempDirectory temporary;
+  const auto path = temporary.path() / "state" / "pairings.bin";
+  auto store = open_store(path);
+  const auto deck = origin("https://deck.example");
+  const auto issued = store.issue(deck, true);
+  const auto valid = read_bytes(path);
+  for (const unsigned char version : {1, 2}) {
+    auto invalid = valid;
+    invalid[8] = version;
+    invalid[18] = version == 1 ? 1 : 2;
+    write_bytes(path, invalid);
+    const auto authentication = store.authenticate(deck, issued.token.view());
+    SYNC_REQUIRE(authentication.error == PairingStoreError::Corrupt);
+    SYNC_REQUIRE(!authentication.authenticated);
+    SYNC_REQUIRE(!authentication.audio_approved);
+  }
 }
 
 SYNC_TEST(pairing_store_enforces_64_origin_bound_without_replacing_existing_records) {
@@ -533,7 +609,7 @@ SYNC_TEST(pairing_store_strictly_rejects_unknown_versions_truncation_trailing_an
   const auto valid = read_bytes(path);
 
   auto unknown = valid;
-  unknown[8] = 2;
+  unknown[8] = 3;
   write_bytes(path, unknown);
   PairingStore check_unknown;
   SYNC_REQUIRE(check_unknown.open({.path = path.string()}) == PairingStoreError::UnknownVersion);
@@ -796,7 +872,7 @@ SYNC_TEST(pairing_store_canceled_rotation_preserves_bytes_and_old_token) {
   auto rotating = open_store(path, PairingStoreFailPoint::None, &hook);
   PairingCommitGate gate;
   noisefactor::sync::PairingIssueResult issued;
-  std::thread issue([&] { issued = rotating.issue(deck, gate); });
+  std::thread issue([&] { issued = rotating.issue(deck, gate, true); });
   SYNC_REQUIRE(hook.wait_until_entered());
   SYNC_REQUIRE(gate.cancel());
   hook.release();
@@ -807,6 +883,7 @@ SYNC_TEST(pairing_store_canceled_rotation_preserves_bytes_and_old_token) {
   SYNC_REQUIRE(issued.token.view().empty());
   SYNC_REQUIRE(read_bytes(path) == before);
   SYNC_REQUIRE(rotating.authenticate(deck, old_token).authenticated);
+  SYNC_REQUIRE(!rotating.authenticate(deck, old_token).audio_approved);
 }
 
 SYNC_TEST(pairing_store_reloads_external_changes_before_auth_list_issue_and_revoke) {

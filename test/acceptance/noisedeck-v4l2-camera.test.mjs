@@ -64,9 +64,9 @@ test('pairing decision evidence accepts the real inline syncctl prompt', () => {
   const browserDenied = { ok: false, code: 'SYNC_PAIRING_DENIED' }
   const browserApproved = { ok: true, status: 'ready' }
   assert.equal(pairingDecisionSucceeded({ code: 1,
-    stdout: 'Allow this browser to pair? [y/N] denied\n' }, browserDenied, false), true)
+    stdout: 'Allow this browser to publish video and capture audio inputs through Sync? [y/N] denied\n' }, browserDenied, false), true)
   assert.equal(pairingDecisionSucceeded({ code: 0,
-    stdout: 'Allow this browser to pair? [y/N] paired\n' }, browserApproved, true), true)
+    stdout: 'Allow this browser to publish video and capture audio inputs through Sync? [y/N] paired\n' }, browserApproved, true), true)
   assert.equal(pairingDecisionSucceeded({ code: 1,
     stdout: '' }, { ok: false, code: 'SYNC_TIMEOUT' }, false), false)
 })

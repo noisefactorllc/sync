@@ -327,6 +327,10 @@ SYNC_TEST(store_pairing_authority_lists_and_revokes_its_live_store) {
   const auto second = authority.issue(second_origin, second_gate);
   SYNC_REQUIRE(first.error == noisefactor::sync::PairingStoreError::None);
   SYNC_REQUIRE(second.error == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(authority.authenticate(first_origin, first.token.view()).audio_approved);
+  noisefactor::sync::PairingStore reopened;
+  SYNC_REQUIRE(reopened.open({.path = temporary.path()}) == noisefactor::sync::PairingStoreError::None);
+  SYNC_REQUIRE(reopened.authenticate(second_origin, second.token.view()).audio_approved);
 
   std::array<noisefactor::sync::NormalizedOrigin,
              noisefactor::sync::kMaximumPairingOrigins>
@@ -342,6 +346,7 @@ SYNC_TEST(store_pairing_authority_lists_and_revokes_its_live_store) {
   SYNC_REQUIRE(revoked.revoked);
   SYNC_REQUIRE(!authority.authenticate(first_origin, first.token.view())
                     .authenticated);
+  SYNC_REQUIRE(!authority.authenticate(first_origin, first.token.view()).audio_approved);
   SYNC_REQUIRE(authority.authenticate(second_origin, second.token.view())
                    .authenticated);
 }

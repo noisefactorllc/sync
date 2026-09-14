@@ -57,7 +57,9 @@ std::uint64_t monotonic_milliseconds() noexcept {
 } // namespace
 
 @interface SyncAppDelegate
-    : NSObject <NSApplicationDelegate, NSMenuDelegate, OSSystemExtensionRequestDelegate>
+    : NSObject <NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, OSSystemExtensionRequestDelegate>
+- (void)updatePairingRequest:(std::optional<companion::ParentPairingRequest>)request;
+- (void)dismissPairingAlert;
 @end
 
 @implementation SyncAppDelegate {
@@ -66,6 +68,8 @@ std::uint64_t monotonic_milliseconds() noexcept {
   NSTimer* _pollTimer;
   std::unique_ptr<companion::CompanionModel> _model;
   std::unique_ptr<companion::CompanionProcess> _process;
+  NSAlert* _pairingAlert;
+  std::optional<companion::ParentPairingRequest> _pairingRequest;
   NSMenu* _pairingsMenu;
   NSDate* _pairingsFetchedAt;
   std::vector<std::string> _pairings;
@@ -92,6 +96,11 @@ std::uint64_t monotonic_milliseconds() noexcept {
           .helper_path = helper.UTF8String,
           .framework_path = framework.UTF8String,
       });
+  __weak SyncAppDelegate* weakSelf = self;
+  _process->set_pairing_callback([weakSelf](std::optional<companion::ParentPairingRequest> request) {
+    SyncAppDelegate* self = weakSelf;
+    if (self != nil) [self updatePairingRequest:std::move(request)];
+  });
 
   _statusItem = [NSStatusBar.systemStatusBar
       statusItemWithLength:NSSquareStatusItemLength];
@@ -117,6 +126,88 @@ std::uint64_t monotonic_milliseconds() noexcept {
   [self refreshPairings];
   [self showPreviewNoticeIfNeeded];
   [self requestCameraExtension];
+}
+
+- (void)dismissPairingAlert {
+  NSAlert* alert = _pairingAlert;
+  _pairingAlert = nil;
+  _pairingRequest.reset();
+  if (alert == nil) return;
+  for (NSButton* button in alert.buttons) { button.target = nil; button.action = nil; }
+  alert.window.delegate = nil;
+  [alert.window orderOut:nil];
+  [alert.window close];
+}
+
+- (void)updatePairingRequest:(std::optional<companion::ParentPairingRequest>)request {
+  [self dismissPairingAlert];
+  if (!request.has_value()) return;
+  if (_quitting) {
+    (void)_process->respond_to_pairing(request->session, request->generation, false);
+    return;
+  }
+  _pairingRequest = std::move(request);
+  NSAlert* alert = [[NSAlert alloc] init];
+  alert.alertStyle = NSAlertStyleWarning;
+  alert.messageText = ns_string(_pairingRequest->header);
+  alert.informativeText = ns_string(_pairingRequest->message);
+  [alert addButtonWithTitle:@"Deny"];
+  [alert addButtonWithTitle:@"Allow"];
+  [alert layout];
+  // Modeless app-owned NSAlert: helper IO, app health/recovery timers, and the
+  // menu remain responsive while the human decides. Only these button actions
+  // can submit a decision for the current owned-helper generation.
+  NSButton* deny = alert.buttons[0];
+  NSButton* allow = alert.buttons[1];
+  deny.target = self;
+  deny.action = @selector(denyPairing:);
+  deny.keyEquivalent = @"\r";
+  allow.target = self;
+  allow.action = @selector(allowPairing:);
+  allow.keyEquivalent = @"";
+  alert.window.title = @"Sync";
+  alert.window.styleMask |= NSWindowStyleMaskClosable;
+  alert.window.releasedWhenClosed = NO;
+  alert.window.delegate = self;
+  alert.window.level = NSFloatingWindowLevel;
+  _pairingAlert = alert;
+  [NSApp activateIgnoringOtherApps:YES];
+  [alert.window makeKeyAndOrderFront:nil];
+}
+
+- (void)denyPairing:(id)sender {
+  if (!_pairingRequest || _pairingAlert == nil || sender != _pairingAlert.buttons[0]) return;
+  const auto request = *_pairingRequest;
+  (void)_process->respond_to_pairing(request.session, request.generation, false);
+  [self dismissPairingAlert];
+}
+
+- (void)allowPairing:(id)sender {
+  if (!_pairingRequest || _pairingAlert == nil || sender != _pairingAlert.buttons[1]) return;
+  const auto request = *_pairingRequest;
+  (void)_process->respond_to_pairing(request.session, request.generation, true);
+  [self dismissPairingAlert];
+}
+
+- (BOOL)windowShouldClose:(NSWindow*)window {
+  if (_pairingAlert != nil && window == _pairingAlert.window) {
+    [self denyPairing:_pairingAlert.buttons[0]];
+    return NO; // The decision callback performs the single owned close.
+  }
+  return YES;
+}
+
+- (void)windowWillClose:(NSNotification*)notification {
+  if (_pairingAlert == nil || notification.object != _pairingAlert.window) return;
+  // Also fail closed for an AppKit-initiated close that did not use the title
+  // bar's windowShouldClose path (for example an alert cancellation action).
+  const auto request = _pairingRequest;
+  NSAlert* alert = _pairingAlert;
+  _pairingAlert = nil;
+  _pairingRequest.reset();
+  alert.window.delegate = nil;
+  for (NSButton* button in alert.buttons) { button.target = nil; button.action = nil; }
+  if (request) (void)_process->respond_to_pairing(request->session, request->generation, false);
 }
 
 // The camera lives in a system extension inside this bundle. macOS only
@@ -629,6 +720,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
   (void)sender;
   _quitting = YES;
+  [self dismissPairingAlert];
   _model->cancel_recovery();
   [_pollTimer invalidate];
   if (!_process->owned_pid().has_value()) return NSTerminateNow;
