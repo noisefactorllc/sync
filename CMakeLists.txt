@@ -1036,7 +1036,10 @@ elseif(WIN32)
     native/src/platform/windows/camera_source/section_owner.cpp
     native/src/platform/windows/camera_source/SyncCamera.def
   )
-  set_target_properties(sync_camera_source PROPERTIES OUTPUT_NAME SyncCamera)
+  # Registration and probes load this fixed filename in every configuration.
+  # RtAudio sets a default debug postfix; it must not rename our COM server.
+  set_target_properties(sync_camera_source PROPERTIES
+    OUTPUT_NAME SyncCamera DEBUG_POSTFIX "")
   target_compile_features(sync_camera_source PRIVATE cxx_std_20)
   target_include_directories(sync_camera_source PRIVATE native/include)
   target_link_libraries(sync_camera_source PRIVATE

@@ -6,6 +6,12 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(_WIN32)
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace sync_audio = noisefactor::sync::audio;
 namespace {
 class TestCapture final : public sync_audio::Capture {
@@ -58,6 +64,11 @@ private:
 }
 
 int main() {
+#if defined(_WIN32)
+  // Match syncd's platform-independent readiness and diagnostic byte format.
+  ::_setmode(::_fileno(stdout), _O_BINARY);
+  ::_setmode(::_fileno(stderr), _O_BINARY);
+#endif
   TestBackend backend;
   noisefactor::sync::ServerOptions options;
   options.allowed_origin = "http://127.0.0.1:8000";
