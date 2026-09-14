@@ -29,11 +29,19 @@ Sync is under active development. This source tree currently includes:
   bounded helper supervision; and
 - native, browser, protocol, security-boundary, and real-loopback tests.
 
-The SDK 0.3.0 source candidate and native companion source include audio input
-for 1–32 channels per source. Native interfaces feed browser audio controls over
-the same authenticated loopback service used for video. The public SDK and
-audio-capable companion releases are still pending, and current evidence is not
-a general hardware compatibility claim. See the
+The SDK 0.3.0 and native companion source at
+[`1972af1ce3f0d14054f3693e250c668aff536884`](https://github.com/noisefactorllc/sync/commit/1972af1ce3f0d14054f3693e250c668aff536884)
+include audio input for 1–32 channels per source. Native interfaces feed browser
+audio controls over the same authenticated loopback service used for video.
+That exact source passed the
+[cross-platform CI matrix](https://github.com/noisefactorllc/sync/actions/runs/34803984585)
+and the separate
+[Windows camera end-to-end workflow](https://github.com/noisefactorllc/sync/actions/runs/34803984593).
+The retained Windows audio inventory was empty, so those results do not qualify
+WASAPI capture. [Native preview 0.2.68](https://sync.noisedeck.app/#download)
+and [SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
+are published from that source. Current evidence is not a general hardware
+compatibility claim. See the
 [audio research, design, and qualification matrix](docs/audio-input.md).
 
 Both companions are previews and are not ready for general use.
@@ -368,8 +376,8 @@ and bounded PCM reads. The dependency-free source modules live in
 [`browser/`](browser/).
 
 The [Sync SDK 0.3.0 release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
-will include an installable tarball, browser modules, and SHA-256 checksums.
-After that release is published, install the tarball in your application:
+includes an installable tarball, browser modules, and SHA-256 checksums.
+Install the tarball in your application:
 
 ```bash
 npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.3.0/noisefactor-sync-0.3.0.tgz

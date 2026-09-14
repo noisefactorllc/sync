@@ -6,14 +6,17 @@ direct RGBA bytes, Canvas 2D, WebGL2, WebGPU, and bounded audio-source reads.
 The audio research, protocol, limitations, and qualification record live in
 [Audio input](audio-input.md).
 
-The SDK package source is `@noisefactor/sync` 0.3.0. Its public release assets
-are being prepared at the URLs below and are not available until the
-`sdk-v0.3.0` release is published.
+The published SDK package is `@noisefactor/sync` 0.3.0. Exact source
+[`1972af1ce3f0d14054f3693e250c668aff536884`](https://github.com/noisefactorllc/sync/commit/1972af1ce3f0d14054f3693e250c668aff536884)
+passed the
+[cross-platform CI matrix](https://github.com/noisefactorllc/sync/actions/runs/34803984585).
+Its [public release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
+was published from that source on September 14, 2026.
 The SDK and native companion have separate versions.
 
 ## Install the SDK
 
-After SDK 0.3.0 is published, install its release tarball in your application:
+Install the SDK 0.3.0 release tarball in your application:
 
 ```bash
 npm install https://github.com/noisefactorllc/sync/releases/download/sdk-v0.3.0/noisefactor-sync-0.3.0.tgz
@@ -27,7 +30,7 @@ For direct browser imports, download the [modules ZIP](https://github.com/noisef
 Extract `modules/` into your application's static assets.
 Import `index.js` from that directory.
 Keep the complete directory because its files use relative imports.
-The [release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0) includes SHA-256 checksums for both downloads once published.
+The [release page](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0) includes SHA-256 checksums for both downloads.
 
 ## Build the SDK locally
 
@@ -62,9 +65,10 @@ Its files use relative imports between the client, protocol, diagnostics, and qu
 
 The SDK does not install or update the native Sync companion.
 Check the [download page](https://sync.noisedeck.app/#download) for available installers.
-For audio, check the connected companion's capabilities instead of comparing
-its product version with the SDK version. A compatible companion advertises a
-selected and available `audio` provider whose direction is `receive`.
+Native preview 0.2.68 includes the audio extension, but clients must still check
+the connected companion's capabilities instead of relying on its product or
+protocol version. A compatible runtime advertises a selected and available
+`audio` provider whose direction is `receive`.
 
 For source testing, build and run the daemon from the same source checkout.
 Follow the [native build instructions](../README.md#building-the-native-daemon).
@@ -105,6 +109,13 @@ The pairing client does not store the token.
 It does not put the token in a URL or a WebSocket subprotocol.
 The application owns any token persistence.
 Create a new client with the approved token.
+
+Each successful `pair()` rotates the single stored token for that origin.
+Treat the returned token as the origin's latest credential and propagate it to
+every audio and video integration before either opens a future control
+connection. Already authenticated sessions remain open; rotation affects later
+authentication attempts. [Pairing-store replacement](../native/src/pairing_store.cpp),
+[control authentication](../native/src/server.cpp).
 
 `probe()` and `connect()` are passive operations.
 They return or throw a permission result instead of starting pairing.
