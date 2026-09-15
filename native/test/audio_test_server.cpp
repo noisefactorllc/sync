@@ -74,7 +74,16 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (id == "audio_blocked") {
+// MSVC deprecates getenv for _dupenv_s, which other Windows toolchains lack;
+// see default_pairing_store_path in pairing_store.cpp.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
       const auto *gate = std::getenv("SYNC_AUDIO_TEST_GATE");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
       if (!gate) throw std::runtime_error("Missing test gate");
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
       while (!std::filesystem::exists(gate)) {
