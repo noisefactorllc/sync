@@ -573,7 +573,7 @@ SYNC_TEST(pairing_store_rejects_unknown_grants_and_legacy_reserved_bits_without_
   const auto deck = origin("https://deck.example");
   const auto issued = store.issue(deck, true);
   const auto valid = read_bytes(path);
-  for (const unsigned char version : {1, 2}) {
+  for (const std::uint8_t version : {std::uint8_t{1}, std::uint8_t{2}}) {
     auto invalid = valid;
     invalid[8] = version;
     invalid[18] = version == 1 ? 1 : 2;
