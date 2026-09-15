@@ -205,7 +205,15 @@ jobs:
         run: |
           & "build/$env:BUILD_TYPE/sync_camera_capability_probe.exe" |
             Tee-Object -FilePath camera-capability.txt
-          "verdict=$LASTEXITCODE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $verdict = $LASTEXITCODE
+          # A probe that dies abnormally can print nothing, and Tee-Object then
+          # never creates the file. Record the exit code either way: an NTSTATUS
+          # such as 0xC0000005 names the crash that the output cannot.
+          if (-not (Test-Path camera-capability.txt)) {
+            "probe produced no output" | Out-File -FilePath camera-capability.txt
+          }
+          ('probe_exit=0x{0:X8}' -f $verdict) | Tee-Object -FilePath camera-capability.txt -Append
+          "verdict=$verdict" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Get-Content camera-capability.txt | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           exit 0
 

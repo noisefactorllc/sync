@@ -54,6 +54,10 @@ void report_interface(IMFMediaSource* source, const char* name) {
 }  // namespace
 
 int main() {
+  // CI reads this through a pipe, where the CRT would otherwise buffer every
+  // line until main returns: a probe that died inside the media source then
+  // printed nothing at all. Unbuffered, the last line names the step reached.
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   const unsigned long build = build_number();
   std::printf("build_number=%lu\n", build);
   std::printf("build_22000_or_later=%d\n", build >= 22000 ? 1 : 0);
