@@ -7,8 +7,12 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: &non_code_paths
+      - '**/*.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    paths-ignore: *non_code_paths
 
 concurrency:
   group: sync-ci-${{ github.ref }}

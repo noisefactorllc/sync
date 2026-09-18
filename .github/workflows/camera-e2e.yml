@@ -65,6 +65,9 @@ name: Camera end-to-end
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       audio_source_id:
