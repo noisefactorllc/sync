@@ -58,15 +58,19 @@ diagnosed. Remove it when the fix ships.
   per second at 1080p, with repeats. Native consumers receive all 60.** On
   2026-09-09 a native AVFoundation reader on an Apple Silicon Mac received
   every frame of a 60 fps sender for 10 minutes: 60 per second, no repeats,
-  no second below 50. That sender ran at 1024 × 1024. The 1080p repeat of
-  the test is pending. Chrome as the consumer of the same camera receives
-  about 55 distinct frames per second, with about one second in ten below
-  50, and its capture service is where the repeats appear. That path is
-  under investigation. Earlier reports of a slowdown over hours came from
-  the test harness, not from Sync. Its memory inspector suspended the
-  sending browser, its second test client competed with the sender for the
-  loopback, and its launch shell ran the daemon at a lower priority than
-  the browsers. The harness no longer does any of these.
+  no second below 50 at 1024 × 1024. On 2026-09-18, the 1080p paired soak was
+  completed (see the [1080p60 native AVFoundation versus Chromium report](https://sync.noisedeck.app/performance/research-2026-09-18-1080p60-native-avfoundation/)):
+  the native AVFoundation consumer received 23,664 frames with 0 duplicate
+  frames, 0 drops, and median relay latency of 3.22 ms, proving that the
+  CoreMediaIO system extension and daemon relay deliver lossless 1080p60.
+  Under identical conditions, Chromium delivered 6,277 repeated frames (20.9%)
+  and dropped 332 frames in its internal capture queue. The repeats and capture
+  ceiling originate in Chromium's video capture service and uncompressed socket
+  backpressure, not in the CoreMediaIO system extension. Earlier reports of a
+  slowdown over hours came from the test harness, not from Sync. Its memory
+  inspector suspended the sending browser, its second test client competed with
+  the sender for the loopback, and its launch shell ran the daemon at a lower
+  priority than the browsers. The harness no longer does any of these.
 - **Short delivery stalls from browser senders remain under investigation.**
   If Chrome rendering and delivery both settle at 30 FPS on battery power,
   connect the computer to power and check Settings > Performance > Energy
