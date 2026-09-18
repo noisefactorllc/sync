@@ -131,7 +131,12 @@ diagnosed. Remove it when the fix ships.
   averaged 53.978 on web. These sequential runs do not isolate the change's
   effect. A repeated candidate measurement failed its diagnostic deadline
   and has no accepted FPS. The prepared report retains both failed attempts. Publication is pending.
-  This candidate has not shipped. Sustained 1080p60 remains unresolved.
+  The [controlled sender stage separation report](https://sync.noisedeck.app/performance/research-2026-09-18-sender-stage-separation/)
+  isolated GPU readback fence wait (11.7 ms quiet / 12.4 ms load), PBO buffer
+  readback with row flipping (3.3 ms), staging payload copy (0.6 ms), and
+  WebSocket transmission (0.8 ms), proving that the 20.7 ms stamp-to-send
+  latency reflects single-frame GPU pipeline depth and memory copies rather
+  than socket pressure.
   The macOS camera fitter reduces conversion passes for all alpha modes
   on Apple Silicon. Two row ranges each use one pass per pixel.
   The fitter reuses its completion signals between frames.
