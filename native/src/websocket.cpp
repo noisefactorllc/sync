@@ -6,6 +6,8 @@
 #include <array>
 #include <cassert>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
