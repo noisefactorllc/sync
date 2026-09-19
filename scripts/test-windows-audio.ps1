@@ -55,7 +55,7 @@ for ($attempt = 1; $attempt -le 10; $attempt++) {
         break
       }
     } catch {
-      Write-Warning "Attempt $attempt: failed to parse inventory output: $_"
+      Write-Warning "Attempt ${attempt}: failed to parse inventory output: $_"
     }
   }
   Write-Output "Waiting for WASAPI audio endpoints to register (attempt $attempt/10)..."
