@@ -7,6 +7,7 @@
   and executes a live 2-second capture qualification verifying format negotiation,
   packet continuity, and zero dropped frames.
 #>
+[CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)]
   [string]$BuildDir,
@@ -39,7 +40,7 @@ $privacyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
 if (-not (Test-Path $privacyPath)) {
   New-Item -Path $privacyPath -Force | Out-Null
 }
-Set-ItemProperty -Path $privacyPath -Name "LetAppsAccessMicrophone" -Value 1 -Type DWord -Force
+New-ItemProperty -Path $privacyPath -Name "LetAppsAccessMicrophone" -Value 1 -PropertyType DWord -Force | Out-Null
 
 # 3. Inventory WASAPI audio devices.
 $inventoryPath = Join-Path $ArtifactDir "inventory.json"
@@ -55,7 +56,7 @@ if ($inventory.sources.Count -eq 0) {
 
 # 4. Qualify real capture from the first enumerated source.
 $source = $inventory.sources[0]
-Write-Host "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
+Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
 
 $capturePath = Join-Path $ArtifactDir "capture.json"
 & $probe --source-id $source.id | Tee-Object -FilePath $capturePath
@@ -67,4 +68,4 @@ $capture = Get-Content $capturePath -Raw | ConvertFrom-Json
 if (-not $capture.qualified) {
   throw "WASAPI audio source $($source.id) failed qualification: $($capture | ConvertTo-Json -Compress)"
 }
-Write-Host "WASAPI audio source $($source.id) successfully qualified"
+Write-Output "WASAPI audio source $($source.id) successfully qualified"
