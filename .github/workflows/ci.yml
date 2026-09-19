@@ -6,13 +6,23 @@ name: CI
 # the exact commit it is asked to ship.
 on:
   push:
-    branches: [main]
-    paths-ignore: &non_code_paths
-      - '**/*.md'
+    paths-ignore:
+      - '*.md'
       - 'docs/**'
+      - 'examples/README.md'
+      - 'browser/README.md'
+      - 'doc/**'
+      - '.superpowers/**'
+      - '.claude/**'
+      - '.codex/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE*'
+      - '.github/copilot-instructions.md'
+      - '.github/CODEOWNERS'
+      - '.github/dependabot.yml'
+    branches: [main]
   pull_request:
     branches: [main]
-    paths-ignore: *non_code_paths
 
 concurrency:
   group: sync-ci-${{ github.ref }}
@@ -22,7 +32,37 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      product: ${{ steps.paths.outputs.product }}
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        id: paths
+        with:
+          script: |
+            // Pushes use the trigger filter. Keep PR checks present so required
+            // checks finish even when all changed files are inert.
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('product', 'true');
+              return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.issue.number, per_page: 100
+            });
+            const inert = path => /^[^/]+\.md$|^(?:docs|doc|\.superpowers|\.claude|\.codex)\/|^\.github\/(?:ISSUE_TEMPLATE\/|PULL_REQUEST_TEMPLATE[^/]*$|CODEOWNERS$|copilot-instructions\.md$|dependabot\.yml$)/.test(path) || path === 'examples/README.md' || path === 'browser/README.md';
+            // The endpoint caps at 3000 files: uncertainty must run the checks.
+            const product = files.length >= 3000 || files.some(file =>
+              !inert(file.filename) || (file.previous_filename && !inert(file.previous_filename)));
+            core.setOutput('product', String(product));
+
   native:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: macOS ${{ matrix.name }}
     runs-on: macos-latest
     timeout-minutes: 40
@@ -81,6 +121,8 @@ jobs:
         run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
 
   linux:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: Ubuntu 24.04 x86_64 ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -176,6 +218,8 @@ jobs:
           if-no-files-found: error
 
   linux-arm64:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: Ubuntu 24.04 ARM64
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
@@ -205,6 +249,8 @@ jobs:
           SYNC_DAEMON_PATH=build/syncd npm run test:integration:soak
 
   windows:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: Windows ${{ matrix.name }}
     runs-on: windows-latest
     timeout-minutes: 60
@@ -392,6 +438,8 @@ jobs:
           if-no-files-found: ignore
 
   windows-package:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: Windows package
     runs-on: windows-latest
     timeout-minutes: 60
@@ -468,6 +516,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
 
   scripts:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     name: Packaging scripts
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -25,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   request:
@@ -32,12 +33,30 @@ jobs:
     # Only a green CI run on main may propose a release.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Verify the upstream product checks ran
+        id: product-checks
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            if (context.eventName !== 'workflow_run') {
+              core.setOutput('release', 'true');
+              return;
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: context.payload.workflow_run.id, filter: 'latest', per_page: 100
+            });
+            const productJobs = jobs.filter(job => job.name !== 'Classify changed paths');
+            const ran = productJobs.length > 0 && productJobs.every(job => job.conclusion === 'success');
+            core.setOutput('release', String(ran));
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: steps.product-checks.outputs.release == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 2
@@ -45,6 +64,7 @@ jobs:
 
       - name: Decide whether this commit changes the shipped product
         id: scope
+        if: steps.product-checks.outputs.release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +84,7 @@ jobs:
           fi
 
       - name: Generate a Scaffold-scoped dispatch token
-        if: steps.scope.outputs.release == 'true'
+        if: steps.product-checks.outputs.release == 'true' && steps.scope.outputs.release == 'true'
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -74,7 +94,7 @@ jobs:
           repositories: scaffold
 
       - name: Dispatch the release harness for this exact commit
-        if: steps.scope.outputs.release == 'true'
+        if: steps.product-checks.outputs.release == 'true' && steps.scope.outputs.release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
