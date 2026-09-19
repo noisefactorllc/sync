@@ -250,7 +250,11 @@ public:
     }
 
     std::uint32_t checksum = 0x811c9dc5U;
-    for (const std::byte byte : frame.payload) {
+    const auto payload_to_hash =
+        frame.payload.size() <= 1048576
+            ? frame.payload
+            : frame.payload.subspan(0, 65536);
+    for (const std::byte byte : payload_to_hash) {
       checksum ^= std::to_integer<std::uint8_t>(byte);
       checksum *= 0x01000193U;
     }

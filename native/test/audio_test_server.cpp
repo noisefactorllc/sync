@@ -23,15 +23,17 @@ public:
               std::atomic<unsigned> &wrong_thread_closes)
       : channels_(channels), active_(active),
         wrong_thread_reads_(wrong_thread_reads), wrong_thread_closes_(wrong_thread_closes),
-        owner_thread_(std::this_thread::get_id()), buffer_(48000, channels),
+        owner_thread_(std::this_thread::get_id()), buffer_(48000, channels, 16384),
         producer_([this](std::stop_token stop) {
           std::vector<float> samples(240 * channels_);
           for (unsigned frame = 0; frame < 240; ++frame)
             for (unsigned channel = 0; channel < channels_; ++channel)
               samples[frame * channels_ + channel] = static_cast<float>(channel + 1) / 32;
+          auto next_time = std::chrono::steady_clock::now();
           while (!stop.stop_requested()) {
+            next_time += std::chrono::milliseconds(5);
+            std::this_thread::sleep_until(next_time);
             buffer_.push(samples);
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
           }
         }) { ++active_; }
   ~TestCapture() override {
@@ -74,8 +76,6 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (id == "audio_blocked") {
-// MSVC deprecates getenv for _dupenv_s, which other Windows toolchains lack;
-// see default_pairing_store_path in pairing_store.cpp.
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -116,7 +116,7 @@ private:
 };
 }
 
-int main() {
+int main(int argc, char** argv) {
 #if defined(_WIN32)
   // Match syncd's platform-independent readiness and diagnostic byte format.
   ::_setmode(::_fileno(stdout), _O_BINARY);
@@ -127,9 +127,22 @@ int main() {
   options.allowed_origin = "http://127.0.0.1:8000";
   options.test_token = "audio-test-token";
   options.test_receiver = true;
+  for (int i = 1; i < argc; ++i) {
+    std::string_view arg(argv[i]);
+    if (arg == "--port" && i + 1 < argc) {
+      options.port = static_cast<std::uint16_t>(std::stoi(argv[++i]));
+    } else if (arg == "--test-origin" && i + 1 < argc) {
+      options.allowed_origin = argv[++i];
+    } else if (arg == "--test-token" && i + 1 < argc) {
+      options.test_token = argv[++i];
+    } else if (arg == "--test-receiver") {
+      options.test_receiver = true;
+    }
+  }
   options.audio_backend = &backend;
-  options.providers[0] = {"audio", noisefactor::sync::ProviderDirection::Receive, true, true};
-  options.provider_count = 1;
+  options.providers[0] = {"test", noisefactor::sync::ProviderDirection::Send, true, true};
+  options.providers[1] = {"audio", noisefactor::sync::ProviderDirection::Receive, true, true};
+  options.provider_count = 2;
   const auto result = noisefactor::sync::run_server(options);
   return result != 0 ? result : (backend.shutdown_ok() ? 0 : 2);
 }

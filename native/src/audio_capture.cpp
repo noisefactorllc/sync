@@ -4,6 +4,9 @@
 #include <bit>
 #include <cmath>
 #include <stdexcept>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 namespace noisefactor::sync::audio {
 namespace {
@@ -30,6 +33,16 @@ void CaptureBuffer::push(std::span<const float> samples) noexcept {
   const auto start = next_frame_.fetch_add(frames, std::memory_order_relaxed);
   std::unique_lock lock(mutex_, std::try_to_lock);
   if (!lock.owns_lock()) {
+    for (int retry = 0; retry < 100; ++retry) {
+#if defined(__aarch64__) || defined(__arm64__)
+      asm volatile("isb" ::: "memory");
+#elif defined(__x86_64__) || defined(_M_X64)
+      _mm_pause();
+#endif
+      if (lock.try_lock()) break;
+    }
+  }
+  if (!lock.owns_lock()) {
     dropped_frames_.fetch_add(frames, std::memory_order_relaxed);
     return;
   }
@@ -45,28 +58,54 @@ void CaptureBuffer::push(std::span<const float> samples) noexcept {
   head_ = (head_ + discard) % capacity_;
   first_frame_ += discard + skip;
   size_ -= discard;
-  for (std::size_t frame = 0; frame < keep; ++frame) {
-    const auto target = ((head_ + size_ + frame) % capacity_) * channels_;
-    for (unsigned channel = 0; channel < channels_; ++channel) {
-      const auto value = samples[(skip + frame) * channels_ + channel];
-      samples_[target + channel] = std::isfinite(value) ? value : 0.0f;
+
+  const auto write_pos = (head_ + size_) % capacity_;
+  const auto first_chunk = std::min(keep, capacity_ - write_pos);
+  const auto *src = samples.data() + skip * channels_;
+  auto *dst = samples_.data() + write_pos * channels_;
+  for (std::size_t i = 0; i < first_chunk * channels_; ++i) {
+    dst[i] = std::isfinite(src[i]) ? src[i] : 0.0f;
+  }
+  if (keep > first_chunk) {
+    const auto second_chunk = keep - first_chunk;
+    const auto *src2 = src + first_chunk * channels_;
+    auto *dst2 = samples_.data();
+    for (std::size_t i = 0; i < second_chunk * channels_; ++i) {
+      dst2[i] = std::isfinite(src2[i]) ? src2[i] : 0.0f;
     }
   }
   size_ += keep;
 }
 
 Packet CaptureBuffer::read() {
-  std::lock_guard lock(mutex_);
-  Packet packet{sample_rate_, channels_, first_frame_,
-                dropped_frames_.load(std::memory_order_relaxed), {}};
-  const auto frames = std::min<std::size_t>(size_, kMaximumPacketFrames);
+  Packet packet{sample_rate_, channels_, 0, 0, {}};
+  packet.samples.resize(kMaximumPacketFrames * channels_);
+  std::size_t frames = 0;
+  std::size_t head_copy = 0;
+  {
+    std::lock_guard lock(mutex_);
+    frames = std::min<std::size_t>(size_, kMaximumPacketFrames);
+    packet.first_frame = first_frame_;
+    packet.dropped_frames = dropped_frames_.load(std::memory_order_relaxed);
+    if (frames > 0) {
+      head_copy = head_;
+      head_ = (head_ + frames) % capacity_;
+      size_ -= frames;
+      first_frame_ += frames;
+    }
+  }
+  if (frames > 0) {
+    const auto first_chunk = std::min(frames, capacity_ - head_copy);
+    std::memcpy(packet.samples.data(),
+                samples_.data() + head_copy * channels_,
+                first_chunk * channels_ * sizeof(float));
+    if (frames > first_chunk) {
+      std::memcpy(packet.samples.data() + first_chunk * channels_,
+                  samples_.data(),
+                  (frames - first_chunk) * channels_ * sizeof(float));
+    }
+  }
   packet.samples.resize(frames * channels_);
-  for (std::size_t frame = 0; frame < frames; ++frame)
-    std::copy_n(samples_.data() + ((head_ + frame) % capacity_) * channels_,
-                channels_, packet.samples.data() + frame * channels_);
-  head_ = (head_ + frames) % capacity_;
-  size_ -= frames;
-  first_frame_ += frames;
   return packet;
 }
 
@@ -84,8 +123,12 @@ std::vector<std::byte> encode_packet(const Packet &packet) {
   put(bytes, 12, packet.samples.size() / packet.channels, 4);
   put(bytes, 16, packet.first_frame, 8);
   put(bytes, 24, packet.dropped_frames, 8);
-  for (std::size_t i = 0; i < packet.samples.size(); ++i)
-    put(bytes, 32 + i * 4, std::bit_cast<std::uint32_t>(packet.samples[i]), 4);
+  if constexpr (std::endian::native == std::endian::little) {
+    std::memcpy(bytes.data() + 32, packet.samples.data(), packet.samples.size() * sizeof(float));
+  } else {
+    for (std::size_t i = 0; i < packet.samples.size(); ++i)
+      put(bytes, 32 + i * 4, std::bit_cast<std::uint32_t>(packet.samples[i]), 4);
+  }
   return bytes;
 }
 } // namespace noisefactor::sync::audio

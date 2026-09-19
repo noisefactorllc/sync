@@ -11,6 +11,10 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 namespace noisefactor::sync::websocket {
 namespace {
 
@@ -649,6 +653,23 @@ DecodeError ClientFrameDecoder::feed_impl(std::span<const std::byte> bytes,
           mask_[phase], mask_[(phase + 1) & 3U], mask_[(phase + 2) & 3U],
           mask_[(phase + 3) & 3U]};
       std::size_t index = 0;
+#if defined(__ARM_NEON)
+      const uint8_t m0 = std::to_integer<uint8_t>(mask[0]);
+      const uint8_t m1 = std::to_integer<uint8_t>(mask[1]);
+      const uint8_t m2 = std::to_integer<uint8_t>(mask[2]);
+      const uint8_t m3 = std::to_integer<uint8_t>(mask[3]);
+      const uint8x16_t vmask = {m0, m1, m2, m3, m0, m1, m2, m3, m0, m1, m2, m3, m0, m1, m2, m3};
+      for (; index + 64 <= count; index += 64) {
+        const uint8x16_t s0 = vld1q_u8(reinterpret_cast<const uint8_t*>(source + index));
+        const uint8x16_t s1 = vld1q_u8(reinterpret_cast<const uint8_t*>(source + index + 16));
+        const uint8x16_t s2 = vld1q_u8(reinterpret_cast<const uint8_t*>(source + index + 32));
+        const uint8x16_t s3 = vld1q_u8(reinterpret_cast<const uint8_t*>(source + index + 48));
+        vst1q_u8(reinterpret_cast<uint8_t*>(target + index), veorq_u8(s0, vmask));
+        vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 16), veorq_u8(s1, vmask));
+        vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 32), veorq_u8(s2, vmask));
+        vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 48), veorq_u8(s3, vmask));
+      }
+#endif
       for (; index + 4 <= count; index += 4) {
         target[index] = source[index] ^ mask[0];
         target[index + 1] = source[index + 1] ^ mask[1];
