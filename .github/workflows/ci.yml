@@ -373,12 +373,23 @@ jobs:
           npm run test:integration
           if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
 
-      - name: Enumerate real WASAPI inputs without capture
+      - name: Install virtual audio cable
+        if: matrix.name == 'Release'
+        uses: AlekseyMartynov/action-vbcable-win@6ec0facd8780f0f463d7dc2fcfd630e06eb1fc0b # v1.0.0
+
+      - name: Qualify real WASAPI audio capture
         if: matrix.name == 'Release'
         shell: pwsh
         run: |
-          & "build/$env:BUILD_TYPE/sync_audio_native_probe.exe" --list
-          if ($LASTEXITCODE -ne 0) { throw "WASAPI inventory failed" }
+          scripts/test-windows-audio.ps1 "build/$env:BUILD_TYPE" audio-qualification/wasapi
+
+      - name: Upload audio qualification evidence
+        if: always() && matrix.name == 'Release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-windows-audio-qualification
+          path: audio-qualification/
+          if-no-files-found: ignore
 
   windows-package:
     name: Windows package
