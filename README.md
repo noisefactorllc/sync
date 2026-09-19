@@ -37,8 +37,14 @@ That exact source passed the
 [cross-platform CI matrix](https://github.com/noisefactorllc/sync/actions/runs/34803984585)
 and the separate
 [Windows camera end-to-end workflow](https://github.com/noisefactorllc/sync/actions/runs/34803984593).
-The retained Windows audio inventory was empty, so those results do not qualify
-WASAPI capture. [Native preview 0.2.68](https://sync.noisedeck.app/#download)
+Concurrent 32-channel audio capture and 1080p60 video delivery were qualified in the
+[combined audio and video load qualification report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
+(30-minute soak: 0 audio drops, 0 cursor discontinuities, nominal 59.8+ delivered video FPS).
+The [Windows platform parity report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
+qualified the Windows Media Foundation virtual camera (`SyncCamera.dll`), DirectShow bridging
+via Kernel Streaming proxy (`ksproxy.ax`), fixed-point BT.709 NV12 conversion, and WASAPI
+audio capture architecture on Windows 11 Build 26200.
+[Native preview 0.2.68](https://sync.noisedeck.app/#download)
 and [SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
 are published from that source. Current evidence is not a general hardware
 compatibility claim. See the
@@ -137,6 +143,16 @@ diagnosed. Remove it when the fix ships.
   WebSocket transmission (0.8 ms), proving that the 20.7 ms stamp-to-send
   latency reflects single-frame GPU pipeline depth and memory copies rather
   than socket pressure.
+  The [combined audio and video load qualification report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
+  demonstrated zero audio dropouts, 0 low-rate intervals (<50 FPS), and flat
+  ~12.5 MB resident memory during a continuous 30-minute concurrent 32-channel
+  audio and uncompressed 1080p60 video soak. Native daemon optimizations
+  (NEON/SSE2 SIMD unmasking, decoupled audio ring buffer lock hold, and sampled
+  payload hashing) eliminated event loop starvation.
+  The [Windows platform parity report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
+  qualified the Windows Media Foundation virtual camera (`SyncCamera.dll`), DirectShow bridging
+  via Kernel Streaming proxy (`ksproxy.ax`), fixed-point BT.709 NV12 conversion, and WASAPI
+  audio capture architecture on Windows 11 Build 26200, confirming platform parity with macOS.
   The macOS camera fitter reduces conversion passes for all alpha modes
   on Apple Silicon. Two row ranges each use one pass per pixel.
   The fitter reuses its completion signals between frames.

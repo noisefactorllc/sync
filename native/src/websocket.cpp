@@ -15,6 +15,8 @@
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
+#elif defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
 #endif
 
 namespace noisefactor::sync::websocket {
@@ -670,6 +672,20 @@ DecodeError ClientFrameDecoder::feed_impl(std::span<const std::byte> bytes,
         vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 16), veorq_u8(s1, vmask));
         vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 32), veorq_u8(s2, vmask));
         vst1q_u8(reinterpret_cast<uint8_t*>(target + index + 48), veorq_u8(s3, vmask));
+      }
+#elif defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
+      uint32_t mask32;
+      std::memcpy(&mask32, mask.data(), 4);
+      const __m128i vmask = _mm_set1_epi32(static_cast<int>(mask32));
+      for (; index + 64 <= count; index += 64) {
+        const __m128i s0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + index));
+        const __m128i s1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + index + 16));
+        const __m128i s2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + index + 32));
+        const __m128i s3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + index + 48));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(target + index), _mm_xor_si128(s0, vmask));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(target + index + 16), _mm_xor_si128(s1, vmask));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(target + index + 32), _mm_xor_si128(s2, vmask));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(target + index + 48), _mm_xor_si128(s3, vmask));
       }
 #endif
       for (; index + 4 <= count; index += 4) {

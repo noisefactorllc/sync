@@ -437,8 +437,17 @@ public preview:
    bound control. [Channel identity assertions](../test/browser/client.test.js).
 3. **Exercise installed consent, recovery, and combined load.** Verify fresh
    audio pairing, token rotation, reconnect, daemon restart, source disappearance,
-   and cleanup. Run sustained native audio with native video and record
-   discontinuities, ring drops, CPU, memory, latency, and video delivery.
+   and cleanup.
+   Combined audio and video load was qualified on 2026-09-18 in
+   [research-2026-09-18-combined-audio-video](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/).
+   A continuous 30-minute soak under concurrent 32-channel float32 audio capture
+   (48 kHz, 1,536,000 samples/s) and uncompressed 1080p60 video delivery (497.7 MB/s)
+   demonstrated zero audio drops, zero cursor discontinuities, nominal 59.8+ delivered
+   video FPS, and flat ~12.5 MB resident memory. Native daemon event loop optimizations
+   (NEON/SSE2 SIMD unmasking, decoupled lock hold in `CaptureBuffer`, and sampled frame hashing)
+   eliminated event loop starvation.
+   Windows WASAPI architecture and virtual camera parity were qualified in
+   [research-2026-09-18-windows-platform-parity](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/).
    [Server authentication](../native/src/server.cpp),
    [JACK baseline](reviews/evidence/2026-09-13/audio-jack.json),
    [video verification approach](reviews/2026-09-10-interoperability.md).
