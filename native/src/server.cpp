@@ -1822,7 +1822,11 @@ class Server {
   static void run_audio_work(AudioWork &job) {
     auto &owner = *job.connection;
     try {
-      if (job.cleanup) { owner.audio_capture.reset(); return; }
+      if (job.cleanup) {
+        owner.audio_capture.reset();
+        owner.audio_source_id.clear();
+        return;
+      }
       if (!job.backend) throw std::runtime_error("Audio capture is unavailable");
       switch (job.type) {
       case control::MessageType::ListAudioSources:
@@ -1844,15 +1848,28 @@ class Server {
         if (owner.audio_source_id != job.source_id)
           throw std::runtime_error("Audio source is not owned by this connection");
         owner.audio_capture.reset();
+        owner.audio_source_id.clear();
         job.text = control::encode_audio_closed(job.source_id);
         break;
       default: break;
       }
     } catch (const std::exception &) {
+      if (job.type == control::MessageType::OpenAudioSource) {
+        owner.audio_capture.reset();
+        owner.audio_source_id.clear();
+      } else if (job.type == control::MessageType::ReadAudioSource) {
+        owner.audio_capture.reset();
+      }
       // Driver messages can include paths and are unbounded. Use a bounded
       // protocol error; the app must never substitute a different device.
       job.text = control::encode_error("audio_unavailable", "Audio source unavailable, busy, disconnected, or permission denied");
     } catch (...) {
+      if (job.type == control::MessageType::OpenAudioSource) {
+        owner.audio_capture.reset();
+        owner.audio_source_id.clear();
+      } else if (job.type == control::MessageType::ReadAudioSource) {
+        owner.audio_capture.reset();
+      }
       job.text = control::encode_error("audio_unavailable", "Audio capture failed");
     }
   }

@@ -329,6 +329,30 @@ test('malformed audio packets terminate the session without exposing samples', a
   }
 });
 
+test('audio_unavailable daemon error maps to SyncUnavailableError with daemonCode', async (t) => {
+  scriptedControl({ onControl(message, socket) {
+    if (message.type === 'openAudioSource') {
+      socket.message(JSON.stringify({
+        type: 'error',
+        code: 'audio_unavailable',
+        message: 'Audio source unavailable, busy, disconnected, or permission denied',
+      }));
+    }
+  } });
+  const bridge = client();
+  t.after(() => bridge.close());
+  await assert.rejects(
+    () => bridge.openAudioSource('missing'),
+    (err) => {
+      assert.ok(err instanceof SyncUnavailableError);
+      assert.equal(err.code, SYNC_ERROR_CODE.UNAVAILABLE);
+      assert.equal(err.daemonCode, 'audio_unavailable');
+      assert.equal(err.message, 'Audio source unavailable, busy, disconnected, or permission denied');
+      return true;
+    }
+  );
+});
+
 function permissionScript(steps) {
   const calls = [];
   return {

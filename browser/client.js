@@ -316,7 +316,7 @@ function daemonError(value) {
   if (value.code === 'bad_request' || value.code === 'out_of_order') {
     return new SyncProtocolError(value.message, options);
   }
-  if (value.code === 'internal_error') {
+  if (value.code === 'internal_error' || value.code === 'audio_unavailable') {
     return new SyncUnavailableError(value.message, options);
   }
   return new SyncLifecycleError(value.message, options);

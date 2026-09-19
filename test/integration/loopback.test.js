@@ -12,6 +12,7 @@ import {
   SyncAuthenticationError,
   SyncBridgeClient,
   SyncPairingDeniedError,
+  SyncUnavailableError,
 } from "../../browser/client.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -1122,6 +1123,136 @@ test("native audio retains bounded connection slots until blocked cleanup comple
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
     await rm(directory, { recursive: true });
   }
+});
+
+test("native audio capture failure releases capture immediately and allows session re-open", async (t) => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: "audio-test-token",
+    fetch: healthFetchForOrigin("http://127.0.0.1:8000"),
+    WebSocket: webSocketForOrigin("http://127.0.0.1:8000"),
+    timeoutMs: TIMEOUT_MS,
+  });
+  t.after(async () => {
+    bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  });
+
+  const opened = await bridge.openAudioSource("audio_fail_after_2");
+  assert.equal(opened.type, "audioSourceOpened");
+  assert.equal(opened.id, "audio_fail_after_2");
+
+  const firstPacket = await bridge.readAudioSource("audio_fail_after_2");
+  assert.equal(firstPacket.channelCount, 2);
+
+  await assert.rejects(
+    () => bridge.readAudioSource("audio_fail_after_2"),
+    (err) => err instanceof SyncUnavailableError && err.daemonCode === "audio_unavailable"
+  );
+
+  const statusAfterFailure = await bridge.listAudioSources();
+  assert.equal(
+    statusAfterFailure.find((s) => s.id === "audio_active")?.name,
+    "0",
+    "dead capture is immediately destroyed on worker thread"
+  );
+
+  const closed = await bridge.closeAudioSource("audio_fail_after_2");
+  assert.equal(closed.type, "audioSourceClosed");
+
+  const reopened = await bridge.openAudioSource("audio_1");
+  assert.equal(reopened.type, "audioSourceOpened");
+  assert.equal(reopened.id, "audio_1");
+  const packetAfterReopen = await bridge.readAudioSource("audio_1");
+  assert.equal(packetAfterReopen.channelCount, 1);
+  await bridge.closeAudioSource("audio_1");
+});
+
+test("native audio device contention and permission denial return audio_unavailable with clean slot state", async (t) => {
+  const daemon = await spawnDaemon({ executable: AUDIO_TEST_SERVER, arguments: [] });
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: "audio-test-token",
+    fetch: healthFetchForOrigin("http://127.0.0.1:8000"),
+    WebSocket: webSocketForOrigin("http://127.0.0.1:8000"),
+    timeoutMs: TIMEOUT_MS,
+  });
+  t.after(async () => {
+    bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  });
+
+  await assert.rejects(
+    () => bridge.openAudioSource("audio_busy"),
+    (err) => err instanceof SyncUnavailableError && err.daemonCode === "audio_unavailable"
+  );
+
+  await assert.rejects(
+    () => bridge.openAudioSource("audio_permission_denied"),
+    (err) => err instanceof SyncUnavailableError && err.daemonCode === "audio_unavailable"
+  );
+
+  const opened = await bridge.openAudioSource("audio_2");
+  assert.equal(opened.type, "audioSourceOpened");
+  const packet = await bridge.readAudioSource("audio_2");
+  assert.equal(packet.channelCount, 2);
+  await bridge.closeAudioSource("audio_2");
+});
+
+test("native audio device hot unplug and replug recovers streaming session", async (t) => {
+  const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), "sync-audio-hotplug-"));
+  const gateFile = path.join(directory, "hotplug_device");
+  await writeFile(gateFile, "connected");
+
+  const daemon = await spawnDaemon({
+    executable: AUDIO_TEST_SERVER,
+    arguments: [],
+    env: { ...process.env, SYNC_AUDIO_HOTPLUG_GATE: gateFile },
+  });
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: "audio-test-token",
+    fetch: healthFetchForOrigin("http://127.0.0.1:8000"),
+    WebSocket: webSocketForOrigin("http://127.0.0.1:8000"),
+    timeoutMs: TIMEOUT_MS,
+  });
+  t.after(async () => {
+    bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  let sources = await bridge.listAudioSources();
+  assert.ok(sources.some((s) => s.id === "audio_hotplug"), "hotplug device listed when connected");
+
+  await bridge.openAudioSource("audio_hotplug");
+  const packetBefore = await bridge.readAudioSource("audio_hotplug");
+  assert.equal(packetBefore.channelCount, 2);
+
+  await rm(gateFile);
+
+  await assert.rejects(
+    () => bridge.readAudioSource("audio_hotplug"),
+    (err) => err instanceof SyncUnavailableError && err.daemonCode === "audio_unavailable"
+  );
+
+  const statusAfterUnplug = await bridge.listAudioSources();
+  assert.equal(statusAfterUnplug.find((s) => s.id === "audio_active")?.name, "0");
+  assert.ok(!statusAfterUnplug.some((s) => s.id === "audio_hotplug"), "unplugged device removed from inventory");
+
+  await bridge.closeAudioSource("audio_hotplug");
+
+  await writeFile(gateFile, "connected");
+
+  sources = await bridge.listAudioSources();
+  assert.ok(sources.some((s) => s.id === "audio_hotplug"), "replugged device returns to inventory");
+
+  const reopened = await bridge.openAudioSource("audio_hotplug");
+  assert.equal(reopened.id, "audio_hotplug");
+  const packetAfter = await bridge.readAudioSource("audio_hotplug");
+  assert.equal(packetAfter.channelCount, 2);
+  await bridge.closeAudioSource("audio_hotplug");
 });
 
 test("independent packaged app pairs, sends pixels, reads statistics, and isolates its token", async (t) => {
