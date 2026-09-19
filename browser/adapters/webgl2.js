@@ -7,6 +7,7 @@ export class WebGL2ExportQueue extends ExportQueue {
     this._gl = gl;
     this._slotCount = validateSlots(slots);
     this._slots = [];
+    this._tempRow = null;
   }
 
   get available() {
@@ -19,8 +20,10 @@ export class WebGL2ExportQueue extends ExportQueue {
       this._gl.deleteBuffer(slot.buffer);
       slot.sync = null;
       slot.pending = null;
+      slot.data = null;
     }
     this._slots = [];
+    this._tempRow = null;
   }
 
   configure(descriptor) {
@@ -33,13 +36,13 @@ export class WebGL2ExportQueue extends ExportQueue {
     if (gl.isContextLost()) throw new Error('the WebGL2 context is lost');
     const previous = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
     try {
+      this._tempRow = new Uint8Array(next.width * 4);
       for (let i = 0; i < this._slotCount; i += 1) {
         const size = next.width * next.height * 4;
-        const raw = new Uint8Array(size);
-        const output = new Uint8Array(size);
+        const data = new Uint8Array(size);
         const buffer = gl.createBuffer();
         if (!buffer) throw new Error('WebGL2 cannot create a readback buffer');
-        this._slots.push({buffer, sync:null, pending:null, raw, output});
+        this._slots.push({buffer, sync:null, pending:null, data});
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
         gl.bufferData(gl.PIXEL_PACK_BUFFER, next.width * next.height * 4, gl.STREAM_READ);
         if (typeof gl.getError === 'function' && gl.getError() !== gl.NO_ERROR) throw new Error('WebGL2 cannot allocate a readback buffer');
@@ -107,19 +110,26 @@ export class WebGL2ExportQueue extends ExportQueue {
       slot.sync = null;
       if (status !== gl.ALREADY_SIGNALED && status !== gl.CONDITION_SATISFIED) throw new Error('WebGL2 readback fence failed');
       const {width, height} = pending.descriptor;
-      const raw = slot.raw;
+      const data = slot.data;
       const previous = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
       try {
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
-        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, raw);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data);
         if (typeof gl.getError === 'function' && gl.getError() !== gl.NO_ERROR) throw new Error('WebGL2 buffer read failed');
       } finally { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, previous); }
-      const output = slot.output;
       const stride = width * 4;
-      for (let row = 0; row < height; row += 1) output.set(raw.subarray((height - row - 1) * stride, (height - row) * stride), row * stride);
+      const half = Math.floor(height / 2);
+      const tempRow = this._tempRow;
+      for (let row = 0; row < half; row += 1) {
+        const top = row * stride;
+        const bot = (height - 1 - row) * stride;
+        tempRow.set(data.subarray(top, top + stride));
+        data.copyWithin(top, bot, bot + stride);
+        data.set(tempRow, bot);
+      }
       if (!this._closed && pending.generation === this._generation) {
         this._busy = true;
-        try { pending.onFrame(frameFrom(pending.descriptor, output), pending.timestamp, pending.sequence); }
+        try { pending.onFrame(frameFrom(pending.descriptor, data), pending.timestamp, pending.sequence); }
         finally { this._busy = false; }
       }
     }
