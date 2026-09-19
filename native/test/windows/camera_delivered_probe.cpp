@@ -21,6 +21,7 @@
 // native/test/camera/delivered_marker_test.cpp with no camera at all.
 
 #include <windows.h>
+#include <timeapi.h>
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -58,6 +59,20 @@ constexpr std::size_t kCanvasBytes = kStride * kCanvas.height;
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
 }
+
+struct ScopedTimerResolution {
+  explicit ScopedTimerResolution(UINT ms) : ms_(ms) {
+    if (::timeBeginPeriod(ms_) != TIMERR_NOERROR) {
+      ms_ = 0;
+    }
+  }
+  ~ScopedTimerResolution() {
+    if (ms_ != 0) {
+      ::timeEndPeriod(ms_);
+    }
+  }
+  UINT ms_ = 0;
+};
 
 // A base canvas plus the marker for `seq`. The base is a slow colour ramp by
 // second so a human eyeballing the camera sees motion; the marker carries the
@@ -145,6 +160,7 @@ int main(int argc, char** argv) {
   const std::uint32_t target = argc > 3 ? static_cast<std::uint32_t>(std::strtol(argv[3], nullptr, 10)) : 60;
   if (seconds <= 0) { std::fprintf(stderr, "seconds must be positive\n"); return 2; }
 
+  ScopedTimerResolution timer_res(1);
   ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   ::MFStartup(MF_VERSION, MFSTARTUP_LITE);
 
@@ -214,8 +230,14 @@ int main(int argc, char** argv) {
 
   const std::uint64_t start = now_ms();
   const std::uint64_t run_ms = static_cast<std::uint64_t>(seconds) * 1000;
+  std::optional<std::uint64_t> last_observed;
   while (now_ms() - start < run_ms) {
-    acc.observe(now_ms(), read_decoded(reader, subtype));
+    const auto seq = read_decoded(reader, subtype);
+    acc.observe(now_ms(), seq);
+    if (!seq.has_value() || seq == last_observed) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    last_observed = seq;
   }
   stop.store(true, std::memory_order_relaxed);
   producer.join();

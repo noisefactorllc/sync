@@ -1175,7 +1175,7 @@ elseif(WIN32)
   target_compile_features(sync_camera_delivered_probe PRIVATE cxx_std_20)
   target_include_directories(sync_camera_delivered_probe PRIVATE native/include)
   target_link_libraries(sync_camera_delivered_probe PRIVATE
-    sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32)
+    sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32 winmm)
 
   # The waiting card. Drawn through WIC and Direct2D onto a plain memory
   # bitmap: no window, no device, so it renders the same inside the frame

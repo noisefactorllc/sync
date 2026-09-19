@@ -112,6 +112,7 @@ class SyncCameraStream final : public IMFMediaStream2,
   std::vector<std::byte> idle_card_;
   std::vector<std::byte> converted_;
   std::uint64_t last_ring_sequence_ = 0;
+  bool converted_dirty_ = true;
 };
 
 // The media source the frame server activates. One device, one stream, live.

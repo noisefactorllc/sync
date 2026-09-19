@@ -233,6 +233,7 @@ void SyncCameraStream::ComposeFrame() {
         if (reader.read(bgra_, kCanvasStride, presentation)) {
           last_ring_sequence_ = sequence;
           policy_.client_frame_arrived(now_ns);
+          converted_dirty_ = true;
           return;
         }
       }
@@ -243,7 +244,11 @@ void SyncCameraStream::ComposeFrame() {
   // expires, which is what stops a jittery 30 fps sender from flickering, then
   // fall back to the waiting card.
   if (policy_.tick(now_ns) == CameraRelayPolicy::Action::EmitBlack) {
-    std::memcpy(bgra_.data(), idle_card_.data(), kCanvasBytes);
+    if (last_ring_sequence_ != 0) {
+      std::memcpy(bgra_.data(), idle_card_.data(), kCanvasBytes);
+      last_ring_sequence_ = 0;
+      converted_dirty_ = true;
+    }
   }
 }
 
@@ -256,15 +261,21 @@ auto SyncCameraStream::WrapAsSample(std::uint64_t presentation_time, IMFSample**
   const bool nv12 = ::IsEqualGUID(subtype, MFVideoFormat_NV12);
   const std::size_t bytes =
       nv12 ? nv12_size_bytes(kCanvas.width, kCanvas.height, kCanvas.width) : kCanvasBytes;
-  if (converted_.size() < bytes) converted_.resize(bytes);
+  if (converted_.size() < bytes) {
+    converted_.resize(bytes);
+    converted_dirty_ = true;
+  }
 
-  if (nv12) {
-    if (!bgra_to_nv12(bgra_, kCanvasStride, kCanvas.width, kCanvas.height, converted_,
-                      kCanvas.width)) {
-      return E_UNEXPECTED;
+  if (converted_dirty_) {
+    if (nv12) {
+      if (!bgra_to_nv12(bgra_, kCanvasStride, kCanvas.width, kCanvas.height, converted_,
+                        kCanvas.width)) {
+        return E_UNEXPECTED;
+      }
+    } else {
+      std::memcpy(converted_.data(), bgra_.data(), kCanvasBytes);
     }
-  } else {
-    std::memcpy(converted_.data(), bgra_.data(), kCanvasBytes);
+    converted_dirty_ = false;
   }
 
   ComPtr<IMFMediaBuffer> buffer;
@@ -348,6 +359,7 @@ auto SyncCameraStream::StartLocked() -> HRESULT {
   // the frame every consumer sees before a sender connects.
   (void)draw_camera_idle_card(idle_card_, kCanvasStride, kCanvas);
   std::memcpy(bgra_.data(), idle_card_.data(), kCanvasBytes);
+  converted_dirty_ = true;
   started_ = true;
   policy_.source_started();
   return events_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr);
