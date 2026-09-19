@@ -23,17 +23,12 @@ if (-not (Test-Path $probe)) {
   throw "sync_audio_native_probe.exe not found in $BuildDir"
 }
 
-# 1. Ensure Windows audio services are running.
-$services = @('Audiosrv', 'AudioEndpointBuilder')
-foreach ($name in $services) {
-  $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-  if ($svc) {
-    if ($svc.Status -ne 'Running') {
-      Set-Service -Name $name -StartupType Automatic
-      Start-Service -Name $name
-    }
-  }
-}
+# 1. Ensure Windows audio services are running and refreshed to detect newly installed hardware.
+Write-Output "Refreshing Windows Audio services to discover endpoints..."
+Restart-Service AudioEndpointBuilder -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Start-Service Audiosrv -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
 
 # 2. Allow microphone access via AppPrivacy policy.
 $privacyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
@@ -42,15 +37,32 @@ if (-not (Test-Path $privacyPath)) {
 }
 New-ItemProperty -Path $privacyPath -Name "LetAppsAccessMicrophone" -Value 1 -PropertyType DWord -Force | Out-Null
 
-# 3. Inventory WASAPI audio devices.
+# 3. Inventory WASAPI audio devices with retry for endpoint initialization.
 $inventoryPath = Join-Path $ArtifactDir "inventory.json"
-& $probe --list | Tee-Object -FilePath $inventoryPath
-if ($LASTEXITCODE -ne 0) {
-  throw "WASAPI audio device inventory failed with exit code $LASTEXITCODE"
+$inventory = $null
+for ($attempt = 1; $attempt -le 10; $attempt++) {
+  $rawList = & $probe --list
+  if ($LASTEXITCODE -eq 0 -and $rawList) {
+    try {
+      $parsed = $rawList | ConvertFrom-Json
+      if ($parsed.sources -and $parsed.sources.Count -gt 0) {
+        $inventory = $parsed
+        $rawList | Out-File -FilePath $inventoryPath -Encoding utf8
+        Write-Output "Enumerated $($inventory.sources.Count) WASAPI audio source(s):"
+        foreach ($src in $inventory.sources) {
+          Write-Output "  - $($src.name) ($($src.id), $($src.channelCount) ch @ $($src.sampleRate) Hz)"
+        }
+        break
+      }
+    } catch {
+      Write-Warning "Attempt $attempt: failed to parse inventory output: $_"
+    }
+  }
+  Write-Output "Waiting for WASAPI audio endpoints to register (attempt $attempt/10)..."
+  Start-Sleep -Seconds 2
 }
 
-$inventory = Get-Content $inventoryPath -Raw | ConvertFrom-Json
-if ($inventory.sources.Count -eq 0) {
+if (-not $inventory -or -not $inventory.sources -or $inventory.sources.Count -eq 0) {
   throw "WASAPI audio inventory returned 0 sources; virtual audio loopback driver is required"
 }
 
@@ -59,12 +71,19 @@ $source = $inventory.sources[0]
 Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
 
 $capturePath = Join-Path $ArtifactDir "capture.json"
-& $probe --source-id $source.id 2>&1 | Tee-Object -FilePath $capturePath
-if ($LASTEXITCODE -ne 0) {
+$captureOutput = & $probe --source-id $source.id
+$exitCode = $LASTEXITCODE
+
+if ($captureOutput) {
+  $captureOutput | Out-File -FilePath $capturePath -Encoding utf8
+}
+
+if ($exitCode -ne 0) {
+  Write-Error "sync_audio_native_probe failed with exit code $exitCode"
   if (Test-Path $capturePath) {
     Get-Content $capturePath | ForEach-Object { Write-Output "PROBE: $_" }
   }
-  throw "WASAPI audio capture qualification failed with exit code $LASTEXITCODE"
+  throw "WASAPI audio capture qualification failed with exit code $exitCode"
 }
 
 $capture = Get-Content $capturePath -Raw | ConvertFrom-Json
