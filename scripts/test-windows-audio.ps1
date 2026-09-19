@@ -59,8 +59,11 @@ $source = $inventory.sources[0]
 Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
 
 $capturePath = Join-Path $ArtifactDir "capture.json"
-& $probe --source-id $source.id | Tee-Object -FilePath $capturePath
+& $probe --source-id $source.id 2>&1 | Tee-Object -FilePath $capturePath
 if ($LASTEXITCODE -ne 0) {
+  if (Test-Path $capturePath) {
+    Get-Content $capturePath | ForEach-Object { Write-Output "PROBE: $_" }
+  }
   throw "WASAPI audio capture qualification failed with exit code $LASTEXITCODE"
 }
 

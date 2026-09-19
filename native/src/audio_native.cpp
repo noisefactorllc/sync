@@ -61,8 +61,10 @@ public:
 #if defined(__APPLE__)
     if (!request_audio_permission()) throw std::runtime_error("Audio permission denied");
 #endif
-    driver_->setErrorCallback([this](RtAudioErrorType error, const std::string &) {
-      if (error > RTAUDIO_WARNING) failed_.store(true, std::memory_order_relaxed);
+    driver_->setErrorCallback([this](RtAudioErrorType error, const std::string &message) {
+      if (error > RTAUDIO_WARNING) {
+        record_failure("driver error (" + std::to_string(static_cast<int>(error)) + "): " + message);
+      }
     });
     RtAudio::StreamParameters input{device.device_id, channels_, 0};
     unsigned frames = 256;
@@ -70,10 +72,22 @@ public:
         device.source.sample_rate, &frames,
         [](void *, void *input, unsigned count, double, RtAudioStreamStatus status, void *context) {
           auto &capture = *static_cast<NativeCapture *>(context);
-          if (!input || (status & RTAUDIO_INPUT_OVERFLOW)) {
-            // Never report a silently discontinuous stream as healthy CV.
-            capture.failed_.store(true, std::memory_order_relaxed);
+          if (!input) {
+            capture.record_failure("null input buffer");
             return 2;
+          }
+          if (status & RTAUDIO_INPUT_OVERFLOW) {
+            // RtAudio WASAPI maps AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY to RTAUDIO_INPUT_OVERFLOW.
+            // On stream start or initialization, initial discontinuity is standard across Windows WASAPI.
+            if (capture.first_buffer_.exchange(false, std::memory_order_relaxed)) {
+              // Ignore initial startup discontinuity
+            } else {
+              // Never report a silently discontinuous stream as healthy CV.
+              capture.record_failure("input buffer overflow (status " + std::to_string(status) + ")");
+              return 2;
+            }
+          } else {
+            capture.first_buffer_.store(false, std::memory_order_relaxed);
           }
           capture.buffer_.push({static_cast<const float *>(input),
                                 static_cast<std::size_t>(count) * capture.channels_});
@@ -84,14 +98,30 @@ public:
   }
   ~NativeCapture() override { if (driver_->isStreamOpen()) driver_->closeStream(); }
   Packet read() override {
-    if (failed_.load(std::memory_order_relaxed) || !driver_->isStreamRunning())
-      throw std::runtime_error("Native audio capture stopped");
+    if (failed_.load(std::memory_order_relaxed)) {
+      std::lock_guard lock(failure_mutex_);
+      throw std::runtime_error("Native audio capture stopped: " +
+                               (failure_reason_.empty() ? "unspecified failure" : failure_reason_));
+    }
+    if (!driver_->isStreamRunning())
+      throw std::runtime_error("Native audio capture stopped: stream not running");
     return buffer_.read();
   }
 private:
+  void record_failure(std::string message) {
+    std::lock_guard lock(failure_mutex_);
+    if (failure_reason_.empty()) {
+      failure_reason_ = std::move(message);
+    }
+    failed_.store(true, std::memory_order_relaxed);
+  }
+
   CaptureBuffer buffer_;
   unsigned channels_;
   std::atomic<bool> failed_{false};
+  std::atomic<bool> first_buffer_{true};
+  std::mutex failure_mutex_;
+  std::string failure_reason_;
   std::unique_ptr<RtAudio> driver_;
 };
 
