@@ -157,7 +157,7 @@ SYNC_TEST(write_with_writes_directly_into_destination_slot) {
   const FrameRingReader reader(mapping);
 
   std::uint8_t fill_byte = 0x33;
-  const auto direct_writer = [](void* ctx, std::span<std::byte> dest, std::size_t stride) noexcept -> bool {
+  const auto direct_writer = [](void* ctx, std::span<std::byte> dest, std::size_t /*stride*/) noexcept -> bool {
     auto val = *static_cast<std::uint8_t*>(ctx);
     std::fill(dest.begin(), dest.end(), static_cast<std::byte>(val));
     return true;
