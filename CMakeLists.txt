@@ -843,7 +843,7 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_cmio_camera_sink
-    PUBLIC sync_protocol
+    PUBLIC sync_protocol sync_camera_frame_ring
     PRIVATE ${COREMEDIAIO_FRAMEWORK} ${COREMEDIA_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
       ${CORE_FOUNDATION_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${IOSURFACE_FRAMEWORK}
   )

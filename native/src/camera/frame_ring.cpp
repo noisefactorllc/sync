@@ -61,26 +61,47 @@ auto FrameRingWriter::has_demand(std::uint64_t now_us) const noexcept -> bool {
   return (now_us - last) <= kFrameRingDemandTimeoutUs;
 }
 
+auto FrameRingWriter::write_with(DirectWriter writer, void* context,
+                                 std::uint64_t presentation_time_us) noexcept -> bool {
+  if (header_ == nullptr || writer == nullptr) return false;
+  const std::size_t stride = static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
+  const std::uint64_t next = header_->newest.load(std::memory_order_acquire) + 1;
+  const auto index = static_cast<std::uint32_t>(next % kFrameRingSlots);
+  FrameRingSlot& slot = header_->slot[index];
+
+  slot.sequence.store(next * 2 - 1, std::memory_order_release);
+  std::span<std::byte> destination(payload_ + static_cast<std::size_t>(index) * kFrameRingSlotBytes,
+                                   kFrameRingSlotBytes);
+  if (!writer(context, destination, stride)) {
+    slot.sequence.store((next - 1) * 2, std::memory_order_release);
+    return false;
+  }
+  slot.presentation_time_us = presentation_time_us;
+  slot.width = kCanvas.width;
+  slot.height = kCanvas.height;
+  slot.row_stride = static_cast<std::uint32_t>(stride);
+  slot.sequence.store(next * 2, std::memory_order_release);
+  header_->newest.store(next, std::memory_order_release);
+  return true;
+}
+
 auto FrameRingWriter::write(std::span<const std::byte> bgra, std::size_t row_stride,
                             std::uint64_t presentation_time_us) noexcept -> bool {
   if (header_ == nullptr) return false;
   if (row_stride != static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel) return false;
   if (bgra.size() < kFrameRingSlotBytes) return false;
 
-  const std::uint64_t next = header_->newest.load(std::memory_order_acquire) + 1;
-  const auto index = static_cast<std::uint32_t>(next % kFrameRingSlots);
-  FrameRingSlot& slot = header_->slot[index];
+  struct CopyContext {
+    std::span<const std::byte> source;
+  } context{bgra};
 
-  slot.sequence.store(next * 2 - 1, std::memory_order_release);
-  std::memcpy(payload_ + static_cast<std::size_t>(index) * kFrameRingSlotBytes, bgra.data(),
-              kFrameRingSlotBytes);
-  slot.presentation_time_us = presentation_time_us;
-  slot.width = kCanvas.width;
-  slot.height = kCanvas.height;
-  slot.row_stride = static_cast<std::uint32_t>(row_stride);
-  slot.sequence.store(next * 2, std::memory_order_release);
-  header_->newest.store(next, std::memory_order_release);
-  return true;
+  const auto copy = [](void* ctx, std::span<std::byte> dest, std::size_t /*stride*/) noexcept -> bool {
+    const auto& c = *static_cast<const CopyContext*>(ctx);
+    std::memcpy(dest.data(), c.source.data(), kFrameRingSlotBytes);
+    return true;
+  };
+
+  return write_with(copy, &context, presentation_time_us);
 }
 
 FrameRingReader::FrameRingReader(std::span<const std::byte> mapping) noexcept {

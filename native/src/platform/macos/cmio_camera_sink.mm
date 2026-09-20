@@ -1,4 +1,5 @@
 #include <sync/platform/cmio_camera_sink.hpp>
+#include <sync/camera/frame_ring.hpp>
 #include "cmio_frame_submission.hpp"
 
 #import <CoreFoundation/CoreFoundation.h>
@@ -7,7 +8,10 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 
+#include <fcntl.h>
 #include <mach/mach_time.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <cstring>
 #include <string>
@@ -79,11 +83,18 @@ void queue_altered(CMIOStreamID, void*, void*) noexcept {}
 }  // namespace
 
 struct CmioCameraSink::Impl {
+  int ring_fd = -1;
+  void* ring_view = nullptr;
+  std::size_t ring_bytes = 0;
+  std::unique_ptr<FrameRingWriter> ring_writer;
+
   explicit Impl(Options options) : depth(options.queue_depth == 0 ? 1 : options.queue_depth) {
+    init_ring(options.shm_path, options.enable_shm);
     discover(std::string(options.device_uid));
   }
 
   ~Impl() {
+    close_ring();
     if (started) CMIODeviceStopStream(device, stream);
     if (queue != nullptr) {
       // The queue does not own its elements. Each was enqueued at +1 for the
@@ -96,6 +107,47 @@ struct CmioCameraSink::Impl {
     }
     if (format != nullptr) CFRelease(format);
     if (pool != nullptr) CVPixelBufferPoolRelease(pool);
+  }
+
+  void init_ring(std::string_view path, bool enable) noexcept {
+    if (!enable || path.empty()) return;
+    ring_bytes = frame_ring_bytes();
+    std::string path_str(path);
+    ring_fd = ::open(path_str.c_str(), O_RDWR | O_CREAT, 0666);
+    if (ring_fd < 0) return;
+    if (::ftruncate(ring_fd, static_cast<off_t>(ring_bytes)) != 0) {
+      ::close(ring_fd);
+      ring_fd = -1;
+      return;
+    }
+    ring_view = ::mmap(nullptr, ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd, 0);
+    if (ring_view == MAP_FAILED) {
+      ring_view = nullptr;
+      ::close(ring_fd);
+      ring_fd = -1;
+      return;
+    }
+    ring_writer = std::make_unique<FrameRingWriter>(
+        std::span<std::byte>(static_cast<std::byte*>(ring_view), ring_bytes));
+    if (!ring_writer->valid()) {
+      ring_writer.reset();
+      ::munmap(ring_view, ring_bytes);
+      ring_view = nullptr;
+      ::close(ring_fd);
+      ring_fd = -1;
+    }
+  }
+
+  void close_ring() noexcept {
+    if (ring_writer) ring_writer.reset();
+    if (ring_view != nullptr && ring_view != MAP_FAILED) {
+      ::munmap(ring_view, ring_bytes);
+      ring_view = nullptr;
+    }
+    if (ring_fd >= 0) {
+      ::close(ring_fd);
+      ring_fd = -1;
+    }
   }
 
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::DeviceNotFound;
@@ -255,8 +307,11 @@ auto CmioCameraSink::unavailable_status() const noexcept -> std::int32_t {
 }
 
 auto CmioCameraSink::has_capacity() const noexcept -> bool {
-  return available() &&
+  const bool cmio_cap = available() &&
          static_cast<std::size_t>(CMSimpleQueueGetCount(impl_->queue)) < impl_->depth;
+  const bool shm_demand = (impl_->ring_writer != nullptr && impl_->ring_writer->valid() &&
+                           impl_->ring_writer->has_demand(camera_clock_us()));
+  return cmio_cap || shm_demand;
 }
 
 auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {
@@ -266,6 +321,11 @@ auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSink
     return CameraSinkSubmit::Failed;
   }
   if (!available()) return CameraSinkSubmit::Failed;
+
+  if (impl_->ring_writer != nullptr && impl_->ring_writer->valid()) {
+    (void)impl_->ring_writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us);
+  }
+
   // Copy the small borrowed view, not its pixels; the callback remains const
   // with respect to the caller's frame without casting away constness.
   CameraSinkFrame source = frame;
@@ -285,16 +345,53 @@ auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSink
 
 auto CmioCameraSink::submit_written(CameraFrameWriter writer, void* context,
                                     std::uint64_t presentation_time_us) noexcept -> CameraSinkWrite {
-  // Preserve the existing camera clock: samples are stamped at submission.
-  (void)presentation_time_us;
   if (!available()) return CameraSinkWrite::Failed;
-  switch (detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
-                                    writer, context)) {
-    case CameraSinkSubmit::Accepted: return CameraSinkWrite::Accepted;
-    case CameraSinkSubmit::Backpressured: return CameraSinkWrite::Backpressured;
-    case CameraSinkSubmit::Failed: return CameraSinkWrite::Failed;
+
+  CameraSinkWrite cmio_result = CameraSinkWrite::Failed;
+  if (static_cast<std::size_t>(CMSimpleQueueGetCount(impl_->queue)) < impl_->depth) {
+    struct DualContext {
+      CameraFrameWriter writer;
+      void* context;
+      FrameRingWriter* ring_writer;
+      std::uint64_t presentation_time_us;
+    } dual{writer, context, impl_->ring_writer.get(), presentation_time_us};
+
+    const auto dual_writer = [](void* opaque, std::span<std::byte> dest, std::size_t stride) noexcept -> bool {
+      auto& d = *static_cast<DualContext*>(opaque);
+      if (!d.writer(d.context, dest, stride)) return false;
+      if (d.ring_writer != nullptr && d.ring_writer->valid()) {
+        (void)d.ring_writer->write(dest, stride, d.presentation_time_us);
+      }
+      return true;
+    };
+
+    switch (detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
+                                      dual_writer, &dual)) {
+      case CameraSinkSubmit::Accepted:
+        cmio_result = CameraSinkWrite::Accepted;
+        break;
+      case CameraSinkSubmit::Backpressured:
+        cmio_result = CameraSinkWrite::Backpressured;
+        break;
+      case CameraSinkSubmit::Failed:
+        cmio_result = CameraSinkWrite::Failed;
+        break;
+    }
   }
-  return CameraSinkWrite::Failed;
+
+  if (cmio_result == CameraSinkWrite::Accepted) {
+    return CameraSinkWrite::Accepted;
+  }
+
+  // If CMIO queue is full or backpressured, but SHM consumer has demand, write directly to ring slot
+  if (impl_->ring_writer != nullptr && impl_->ring_writer->valid() &&
+      impl_->ring_writer->has_demand(camera_clock_us())) {
+    if (impl_->ring_writer->write_with(writer, context, presentation_time_us)) {
+      return CameraSinkWrite::Accepted;
+    }
+  }
+
+  return cmio_result;
 }
 
 }  // namespace noisefactor::sync::camera

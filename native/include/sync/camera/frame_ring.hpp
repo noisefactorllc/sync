@@ -85,11 +85,19 @@ class FrameRingWriter {
   // invalid or the payload does not match the canvas.
   [[nodiscard]] auto write(std::span<const std::byte> bgra, std::size_t row_stride,
                            std::uint64_t presentation_time_us) noexcept -> bool;
+  // Invokes writer directly with the mapped destination slot for zero-copy publication.
+  using DirectWriter = bool (*)(void* context, std::span<std::byte> destination,
+                                std::size_t stride) noexcept;
+  [[nodiscard]] auto write_with(DirectWriter writer, void* context,
+                                std::uint64_t presentation_time_us) noexcept -> bool;
 
  private:
   FrameRingHeader* header_ = nullptr;
   std::byte* payload_ = nullptr;
 };
+
+// POSIX shared memory / memory mapped file path.
+[[nodiscard]] inline auto posix_shm_path() -> std::string { return "/tmp/SyncCamera.frames"; }
 
 // How long after the media source's last request for a frame the sender keeps
 // treating the camera as watched. Generous next to a 60 fps request cadence,

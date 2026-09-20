@@ -151,4 +151,40 @@ SYNC_TEST(a_writer_adopts_a_ring_another_writer_already_stamped) {
   SYNC_REQUIRE(reader.newest_sequence() == 1);
 }
 
+SYNC_TEST(write_with_writes_directly_into_destination_slot) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+
+  std::uint8_t fill_byte = 0x33;
+  const auto direct_writer = [](void* ctx, std::span<std::byte> dest, std::size_t stride) noexcept -> bool {
+    auto val = *static_cast<std::uint8_t*>(ctx);
+    std::fill(dest.begin(), dest.end(), static_cast<std::byte>(val));
+    return true;
+  };
+
+  SYNC_REQUIRE(writer.write_with(direct_writer, &fill_byte, 4242));
+  SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+  std::vector<std::byte> out(kFrameRingSlotBytes);
+  std::uint64_t presentation = 0;
+  SYNC_REQUIRE(reader.read(out, kStride, presentation));
+  SYNC_REQUIRE(presentation == 4242);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x33);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(out[out.size() - 1]) == 0x33);
+}
+
+SYNC_TEST(write_with_reverts_sequence_if_writer_fails) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+
+  const auto failing_writer = [](void*, std::span<std::byte>, std::size_t) noexcept -> bool {
+    return false;
+  };
+
+  SYNC_REQUIRE(!writer.write_with(failing_writer, nullptr, 999));
+  SYNC_REQUIRE(reader.newest_sequence() == 0);
+}
+
 }  // namespace

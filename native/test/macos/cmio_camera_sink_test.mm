@@ -8,8 +8,10 @@
 
 #include <sync/platform/camera_identity.hpp>
 #include <sync/platform/cmio_camera_sink.hpp>
+#include <sync/camera/frame_ring.hpp>
 #include "../../src/platform/macos/cmio_frame_submission.hpp"
 #import <Foundation/Foundation.h>
+#include <sys/stat.h>
 
 // A nonexistent UID keeps discovery tests isolated even on a machine with the
 // real camera installed. Discovery must fail quietly, the reason must be the
@@ -254,4 +256,18 @@ SYNC_TEST(cmio_submission_cancelled_writer_returns_the_real_pixel_buffer_to_its_
       nullptr, resources.pool, (__bridge CFDictionaryRef)threshold, &recycled);
   if (recycled) CVPixelBufferRelease(recycled);
   SYNC_REQUIRE(status == kCVReturnSuccess);
+}
+
+SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file) {
+  const std::string test_path = "/tmp/SyncCamera.test." + std::to_string(::getpid()) + ".frames";
+  ::unlink(test_path.c_str());
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = test_path,
+                         .enable_shm = true});
+    struct stat st{};
+    SYNC_REQUIRE(::stat(test_path.c_str(), &st) == 0);
+    SYNC_REQUIRE(static_cast<std::size_t>(st.st_size) == noisefactor::sync::camera::frame_ring_bytes());
+  }
+  ::unlink(test_path.c_str());
 }

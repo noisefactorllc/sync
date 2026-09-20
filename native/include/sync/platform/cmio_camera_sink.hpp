@@ -26,6 +26,8 @@ class CmioCameraSink final : public CameraSink {
     std::string_view device_uid = kDeviceUid;
     // Frames allowed in flight before submit() reports Backpressured.
     std::size_t queue_depth = 3;
+    std::string_view shm_path = "/tmp/SyncCamera.frames";
+    bool enable_shm = true;
   };
 
   CmioCameraSink();
