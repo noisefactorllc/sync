@@ -25,6 +25,14 @@ const app = path.join(packageDirectory, "Sync.app");
 const contents = path.join(app, "Contents");
 const info = path.join(contents, "Info.plist");
 
+test("the package icon is the flat four-terminal Sync overpass", () => {
+  const icon = readFileSync(path.join(sourceDirectory, "packaging/Sync.svg"), "utf8");
+  assert.match(icon, /data-sync-mark="overpass"/);
+  assert.match(icon, /id="sync-overpass-cut"/);
+  assert.equal((icon.match(/class="sync-terminal"/g) || []).length, 4);
+  assert.doesNotMatch(icon, /linearGradient|filter id=|feGaussianBlur/);
+});
+
 function plist(key) {
   return execFileSync("/usr/bin/plutil", ["-extract", key, "raw", "-o", "-", info], {
     encoding: "utf8",
