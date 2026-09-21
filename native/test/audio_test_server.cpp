@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
@@ -16,26 +18,59 @@
 
 namespace sync_audio = noisefactor::sync::audio;
 namespace {
+enum class WaveformPattern {
+  LinearRamp,
+  OrthogonalTones,
+  SteppedPulse,
+};
+
 class TestCapture final : public sync_audio::Capture {
 public:
   TestCapture(unsigned channels, std::atomic<unsigned> &active,
               std::atomic<unsigned> &wrong_thread_reads,
               std::atomic<unsigned> &wrong_thread_closes,
               unsigned max_reads = 0,
-              std::string gate_path = "")
+              std::string gate_path = "",
+              WaveformPattern pattern = WaveformPattern::LinearRamp)
       : channels_(channels), active_(active),
         wrong_thread_reads_(wrong_thread_reads), wrong_thread_closes_(wrong_thread_closes),
-        max_reads_(max_reads), gate_path_(std::move(gate_path)),
+        max_reads_(max_reads), gate_path_(std::move(gate_path)), pattern_(pattern),
         owner_thread_(std::this_thread::get_id()), buffer_(48000, channels, 16384),
         producer_([this](std::stop_token stop) {
           std::vector<float> samples(240 * channels_);
-          for (unsigned frame = 0; frame < 240; ++frame)
-            for (unsigned channel = 0; channel < channels_; ++channel)
-              samples[frame * channels_ + channel] = static_cast<float>(channel + 1) / 32;
+          auto fill_samples = [this, &samples](std::uint64_t frame_offset) {
+            if (pattern_ == WaveformPattern::LinearRamp) {
+              for (unsigned frame = 0; frame < 240; ++frame)
+                for (unsigned channel = 0; channel < channels_; ++channel)
+                  samples[frame * channels_ + channel] = static_cast<float>(channel + 1) / 32;
+            } else if (pattern_ == WaveformPattern::OrthogonalTones) {
+              constexpr double kPi = 3.14159265358979323846;
+              for (unsigned frame = 0; frame < 240; ++frame) {
+                const double t = static_cast<double>(frame_offset + frame) / 48000.0;
+                for (unsigned channel = 0; channel < channels_; ++channel) {
+                  const double freq = 100.0 * (channel + 1);
+                  samples[frame * channels_ + channel] = static_cast<float>(std::sin(2.0 * kPi * freq * t));
+                }
+              }
+            } else if (pattern_ == WaveformPattern::SteppedPulse) {
+              for (unsigned frame = 0; frame < 240; ++frame) {
+                const unsigned active_ch = static_cast<unsigned>(((frame_offset + frame) / 4800) % channels_);
+                for (unsigned channel = 0; channel < channels_; ++channel) {
+                  samples[frame * channels_ + channel] = (channel == active_ch) ? 1.0f : 0.0f;
+                }
+              }
+            }
+          };
+          std::uint64_t total_frames = 0;
+          fill_samples(total_frames);
+          buffer_.push(samples);
+          total_frames += 240;
           auto next_time = std::chrono::steady_clock::now();
           while (!stop.stop_requested()) {
             next_time += std::chrono::milliseconds(5);
             std::this_thread::sleep_until(next_time);
+            fill_samples(total_frames);
+            total_frames += 240;
             buffer_.push(samples);
           }
         }) { ++active_; }
@@ -63,6 +98,7 @@ private:
   unsigned max_reads_ = 0;
   unsigned read_count_ = 0;
   std::string gate_path_;
+  WaveformPattern pattern_{WaveformPattern::LinearRamp};
   std::thread::id owner_thread_;
   sync_audio::CaptureBuffer buffer_;
   std::jthread producer_;
@@ -73,6 +109,8 @@ public:
   std::vector<sync_audio::Source> sources() override {
     std::vector<sync_audio::Source> list = {
       {"audio_32", "32 channel fixture", 32, 48000},
+      {"audio_32_tones", "32 channel orthogonal tone fixture", 32, 48000},
+      {"audio_32_pulse", "32 channel stepped pulse fixture", 32, 48000},
       {"audio_8", "8 channel fixture", 8, 48000},
       {"audio_2", "2 channel fixture", 2, 48000},
       {"audio_1", "1 channel fixture", 1, 48000},
@@ -145,6 +183,14 @@ public:
           throw std::runtime_error("Audio test gate timed out");
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
+    }
+    if (id == "audio_32_tones") {
+      return std::make_unique<TestCapture>(32, active_, wrong_thread_reads_, wrong_thread_closes_,
+                                           0, "", WaveformPattern::OrthogonalTones);
+    }
+    if (id == "audio_32_pulse") {
+      return std::make_unique<TestCapture>(32, active_, wrong_thread_reads_, wrong_thread_closes_,
+                                           0, "", WaveformPattern::SteppedPulse);
     }
     for (const unsigned count : {32u, 8u, 2u, 1u})
       if (id == "audio_" + std::to_string(count) || id == "audio_slow" || id == "audio_blocked") {

@@ -1200,6 +1200,71 @@ test("native audio device contention and permission denial return audio_unavaila
   await bridge.closeAudioSource("audio_2");
 });
 
+test("native audio 32-channel source delivers discrete unmixed channels with zero crosstalk", async (t) => {
+  const daemon = await spawnDaemon({
+    executable: AUDIO_TEST_SERVER,
+    arguments: [],
+  });
+  const bridge = new SyncBridgeClient({
+    endpoint: `http://127.0.0.1:${daemon.ready.port}`,
+    token: "audio-test-token",
+    fetch: healthFetchForOrigin("http://127.0.0.1:8000"),
+    WebSocket: webSocketForOrigin("http://127.0.0.1:8000"),
+    timeoutMs: TIMEOUT_MS,
+  });
+  t.after(async () => {
+    bridge.close();
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  });
+
+  const opened = await bridge.openAudioSource("audio_32");
+  assert.equal(opened.type, "audioSourceOpened");
+  let packet;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    packet = await bridge.readAudioSource("audio_32");
+    if (packet.frameCount > 0) break;
+    await new Promise(r => setTimeout(r, 10));
+  }
+  assert.equal(packet.channelCount, 32);
+  assert.equal(packet.sampleRate, 48000);
+  assert.equal(packet.planes.length, 32);
+  assert.equal(packet.droppedFrames, 0n);
+
+  for (let c = 0; c < 32; c++) {
+    const expected = (c + 1) / 32;
+    const plane = packet.planes[c];
+    assert(plane.length > 0);
+    for (let i = 0; i < plane.length; i++) {
+      assert.strictEqual(Math.abs(plane[i] - expected) < 1e-6, true, `channel ${c + 1} sample ${i} (${plane[i]}) should match ${expected}`);
+    }
+  }
+  await bridge.closeAudioSource("audio_32");
+
+  const pulseOpened = await bridge.openAudioSource("audio_32_pulse");
+  assert.equal(pulseOpened.type, "audioSourceOpened");
+  let pulsePacket;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    pulsePacket = await bridge.readAudioSource("audio_32_pulse");
+    if (pulsePacket.frameCount > 0) break;
+    await new Promise(r => setTimeout(r, 10));
+  }
+  assert.equal(pulsePacket.channelCount, 32);
+  assert.equal(pulsePacket.planes.length, 32);
+  let activeChannels = 0;
+  for (let c = 0; c < 32; c++) {
+    const plane = pulsePacket.planes[c];
+    const maxVal = Math.max(...plane);
+    if (maxVal > 0.5) activeChannels++;
+    else {
+      for (let i = 0; i < plane.length; i++) {
+        assert.strictEqual(plane[i], 0, `inactive channel ${c + 1} must be zero`);
+      }
+    }
+  }
+  assert.strictEqual(activeChannels, 1, "exactly one channel must be active in pulse fixture");
+  await bridge.closeAudioSource("audio_32_pulse");
+});
+
 test("native audio device hot unplug and replug recovers streaming session", async (t) => {
   const directory = await mkdtemp(path.join(await realpath(os.tmpdir()), "sync-audio-hotplug-"));
   const gateFile = path.join(directory, "hotplug_device");
