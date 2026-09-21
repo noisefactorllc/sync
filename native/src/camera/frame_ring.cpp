@@ -1,5 +1,9 @@
 #include <sync/camera/frame_ring.hpp>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <cstring>
 
 namespace noisefactor::sync::camera {
@@ -20,7 +24,6 @@ constexpr int kTornReadRetries = 4;
 auto section_name() -> std::wstring { return L"Global\\SyncCamera.frames"; }
 
 #if defined(_WIN32)
-#include <windows.h>
 auto windows_shm_default_path() -> std::wstring {
   wchar_t temp[MAX_PATH];
   const DWORD len = ::GetTempPathW(MAX_PATH, temp);
