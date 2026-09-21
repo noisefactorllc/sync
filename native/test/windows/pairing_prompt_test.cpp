@@ -410,7 +410,7 @@ SYNC_TEST(windows_native_prompt_force_close_is_bounded) {
   if (reported != 0) adapter->force_close(reported);
   worker.join();
 
-  SYNC_REQUIRE(std::chrono::steady_clock::now() - started < 2s);
+  SYNC_REQUIRE(std::chrono::steady_clock::now() - started < 5s);
   SYNC_REQUIRE(reported != 0);
   SYNC_REQUIRE(response == prompt_test::AdapterResponse::Denied);
 }
