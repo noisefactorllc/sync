@@ -260,7 +260,7 @@ SYNC_TEST(cmio_submission_cancelled_writer_returns_the_real_pixel_buffer_to_its_
   SYNC_REQUIRE(status == kCVReturnSuccess);
 }
 
-SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file) {
+SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file_with_owner_private_permissions) {
   const std::string test_path = "/tmp/SyncCamera.test." + std::to_string(::getpid()) + ".frames";
   ::unlink(test_path.c_str());
   {
@@ -269,7 +269,161 @@ SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file) {
                          .enable_shm = true});
     struct stat st{};
     SYNC_REQUIRE(::stat(test_path.c_str(), &st) == 0);
+    SYNC_REQUIRE(S_ISREG(st.st_mode));
+    SYNC_REQUIRE((st.st_mode & 0777) == 0600);
+    SYNC_REQUIRE(st.st_uid == ::geteuid());
     SYNC_REQUIRE(static_cast<std::size_t>(st.st_size) == noisefactor::sync::camera::frame_ring_bytes());
   }
+  struct stat st_after{};
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st_after) != 0);
+}
+
+SYNC_TEST(cmio_camera_sink_rejects_symlink_shm_path) {
+  const std::string target_path = "/tmp/SyncCamera.target." + std::to_string(::getpid()) + ".frames";
+  const std::string link_path = "/tmp/SyncCamera.link." + std::to_string(::getpid()) + ".frames";
+  ::unlink(link_path.c_str());
+  ::unlink(target_path.c_str());
+
+  int fd = ::open(target_path.c_str(), O_RDWR | O_CREAT, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  const char canary[] = "CANARY_DATA_DO_NOT_OVERWRITE";
+  SYNC_REQUIRE(::write(fd, canary, sizeof(canary)) == sizeof(canary));
+  ::close(fd);
+
+  SYNC_REQUIRE(::symlink(target_path.c_str(), link_path.c_str()) == 0);
+
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = link_path,
+                         .enable_shm = true});
+  }
+
+  // Target must NOT have been truncated or modified through the symlink
+  struct stat st{};
+  SYNC_REQUIRE(::stat(target_path.c_str(), &st) == 0);
+  SYNC_REQUIRE(st.st_size == sizeof(canary));
+
+  ::unlink(link_path.c_str());
+  ::unlink(target_path.c_str());
+}
+
+SYNC_TEST(cmio_camera_sink_rejects_non_regular_file_shm_path) {
+  const std::string dir_path = "/tmp/SyncCamera.dir." + std::to_string(::getpid()) + ".frames";
+  ::rmdir(dir_path.c_str());
+  SYNC_REQUIRE(::mkdir(dir_path.c_str(), 0700) == 0);
+
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = dir_path,
+                         .enable_shm = true});
+  }
+
+  struct stat st{};
+  SYNC_REQUIRE(::stat(dir_path.c_str(), &st) == 0);
+  SYNC_REQUIRE(S_ISDIR(st.st_mode));
+
+  ::rmdir(dir_path.c_str());
+}
+
+SYNC_TEST(cmio_camera_sink_tightens_preexisting_loose_permissions) {
+  const std::string test_path = "/tmp/SyncCamera.loose." + std::to_string(::getpid()) + ".frames";
   ::unlink(test_path.c_str());
+  int fd = ::open(test_path.c_str(), O_RDWR | O_CREAT, 0666);
+  SYNC_REQUIRE(fd >= 0);
+  SYNC_REQUIRE(::fchmod(fd, 0666) == 0);
+  ::close(fd);
+
+  struct stat st_before{};
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st_before) == 0);
+  SYNC_REQUIRE((st_before.st_mode & 0777) == 0666);
+
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = test_path,
+                         .enable_shm = true});
+    struct stat st_during{};
+    SYNC_REQUIRE(::stat(test_path.c_str(), &st_during) == 0);
+    SYNC_REQUIRE((st_during.st_mode & 0777) == 0600);
+  }
+
+  struct stat st_after{};
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st_after) != 0);
+}
+
+SYNC_TEST(cmio_camera_sink_scrubs_pixels_and_cleans_up_on_close) {
+  const std::string test_path = "/tmp/SyncCamera.scrub." + std::to_string(::getpid()) + ".frames";
+  ::unlink(test_path.c_str());
+
+  int fd_keep = -1;
+  void* view_keep = nullptr;
+  const std::size_t ring_bytes = noisefactor::sync::camera::frame_ring_bytes();
+
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = test_path,
+                         .enable_shm = true});
+
+    fd_keep = ::open(test_path.c_str(), O_RDWR | O_NOFOLLOW);
+    SYNC_REQUIRE(fd_keep >= 0);
+    view_keep = ::mmap(nullptr, ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd_keep, 0);
+    SYNC_REQUIRE(view_keep != MAP_FAILED);
+
+    auto* header = reinterpret_cast<noisefactor::sync::camera::FrameRingHeader*>(view_keep);
+    SYNC_REQUIRE(header->magic == noisefactor::sync::camera::kFrameRingMagic);
+    auto* payload = static_cast<std::byte*>(view_keep) + sizeof(noisefactor::sync::camera::FrameRingHeader);
+    std::memset(payload, 0xEE, 4096);
+    SYNC_REQUIRE(static_cast<unsigned char>(payload[0]) == 0xEE);
+  }
+
+  struct stat st{};
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st) != 0);
+
+  auto* payload = static_cast<const std::byte*>(view_keep) + sizeof(noisefactor::sync::camera::FrameRingHeader);
+  bool all_zero = true;
+  for (std::size_t i = 0; i < 4096; ++i) {
+    if (payload[i] != std::byte{0}) {
+      all_zero = false;
+      break;
+    }
+  }
+  SYNC_REQUIRE(all_zero);
+
+  auto* header = reinterpret_cast<const noisefactor::sync::camera::FrameRingHeader*>(view_keep);
+  SYNC_REQUIRE(header->magic == 0);
+
+  ::munmap(view_keep, ring_bytes);
+  ::close(fd_keep);
+}
+
+SYNC_TEST(frame_ring_writer_gates_publication_on_consumer_demand) {
+  const std::size_t bytes = noisefactor::sync::camera::frame_ring_bytes();
+  std::vector<std::byte> storage(bytes, std::byte{0});
+
+  noisefactor::sync::camera::FrameRingWriter writer(storage);
+  SYNC_REQUIRE(writer.valid());
+
+  noisefactor::sync::camera::FrameRingReader reader(storage);
+  SYNC_REQUIRE(reader.valid());
+
+  const auto now_us = noisefactor::sync::camera::camera_clock_us();
+  SYNC_REQUIRE(!writer.has_demand(now_us));
+
+  std::vector<std::byte> frame_data(noisefactor::sync::camera::kFrameRingSlotBytes, std::byte{0x42});
+  const std::size_t row_stride = static_cast<std::size_t>(noisefactor::sync::camera::kCanvas.width) * 4;
+
+  if (writer.has_demand(now_us)) {
+    (void)writer.write(frame_data, row_stride, now_us);
+  }
+  SYNC_REQUIRE(reader.newest_sequence() == 0);
+
+  reader.record_demand(now_us);
+  SYNC_REQUIRE(writer.has_demand(now_us));
+
+  if (writer.has_demand(now_us)) {
+    SYNC_REQUIRE(writer.write(frame_data, row_stride, now_us));
+  }
+  SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+  const auto future_us = now_us + noisefactor::sync::camera::kFrameRingDemandTimeoutUs + 500'000;
+  SYNC_REQUIRE(!writer.has_demand(future_us));
 }

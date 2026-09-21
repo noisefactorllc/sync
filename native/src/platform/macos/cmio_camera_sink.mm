@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -86,6 +87,7 @@ struct CmioCameraSink::Impl {
   int ring_fd = -1;
   void* ring_view = nullptr;
   std::size_t ring_bytes = 0;
+  std::string ring_path;
   std::unique_ptr<FrameRingWriter> ring_writer;
 
   explicit Impl(Options options) : depth(options.queue_depth == 0 ? 1 : options.queue_depth) {
@@ -112,21 +114,51 @@ struct CmioCameraSink::Impl {
   void init_ring(std::string_view path, bool enable) noexcept {
     if (!enable || path.empty()) return;
     ring_bytes = frame_ring_bytes();
-    std::string path_str(path);
-    ring_fd = ::open(path_str.c_str(), O_RDWR | O_CREAT, 0666);
-    if (ring_fd < 0) return;
+    ring_path = std::string(path);
+
+    // Mode 0600 (S_IRUSR | S_IWUSR) creates an owner-private file.
+    // O_NOFOLLOW prevents following symlinks. O_CLOEXEC prevents fd leaks.
+    ring_fd = ::open(ring_path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (ring_fd < 0) {
+      ring_path.clear();
+      return;
+    }
+
+    // Existing-object validation: verify file is a regular file owned by the current process user.
+    struct stat st{};
+    if (::fstat(ring_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != ::geteuid()) {
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+      return;
+    }
+
+    // Ensure permissions are strictly owner-private 0600 even if the pre-existing file had looser mode.
+    if ((st.st_mode & 0777) != 0600) {
+      if (::fchmod(ring_fd, 0600) != 0) {
+        ::close(ring_fd);
+        ring_fd = -1;
+        ring_path.clear();
+        return;
+      }
+    }
+
     if (::ftruncate(ring_fd, static_cast<off_t>(ring_bytes)) != 0) {
       ::close(ring_fd);
       ring_fd = -1;
+      ring_path.clear();
       return;
     }
+
     ring_view = ::mmap(nullptr, ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd, 0);
     if (ring_view == MAP_FAILED) {
       ring_view = nullptr;
       ::close(ring_fd);
       ring_fd = -1;
+      ring_path.clear();
       return;
     }
+
     ring_writer = std::make_unique<FrameRingWriter>(
         std::span<std::byte>(static_cast<std::byte*>(ring_view), ring_bytes));
     if (!ring_writer->valid()) {
@@ -135,18 +167,27 @@ struct CmioCameraSink::Impl {
       ring_view = nullptr;
       ::close(ring_fd);
       ring_fd = -1;
+      ring_path.clear();
     }
   }
 
   void close_ring() noexcept {
     if (ring_writer) ring_writer.reset();
     if (ring_view != nullptr && ring_view != MAP_FAILED) {
+      // Scrub retained pixels before unmapping so sensitive camera frames
+      // do not linger in shared memory or disk cache.
+      std::memset(ring_view, 0, ring_bytes);
+      ::msync(ring_view, ring_bytes, MS_SYNC);
       ::munmap(ring_view, ring_bytes);
       ring_view = nullptr;
     }
     if (ring_fd >= 0) {
       ::close(ring_fd);
       ring_fd = -1;
+    }
+    if (!ring_path.empty()) {
+      ::unlink(ring_path.c_str());
+      ring_path.clear();
     }
   }
 
@@ -322,7 +363,8 @@ auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSink
   }
   if (!available()) return CameraSinkSubmit::Failed;
 
-  if (impl_->ring_writer != nullptr && impl_->ring_writer->valid()) {
+  if (impl_->ring_writer != nullptr && impl_->ring_writer->valid() &&
+      impl_->ring_writer->has_demand(camera_clock_us())) {
     (void)impl_->ring_writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us);
   }
 
@@ -359,7 +401,8 @@ auto CmioCameraSink::submit_written(CameraFrameWriter writer, void* context,
     const auto dual_writer = [](void* opaque, std::span<std::byte> dest, std::size_t stride) noexcept -> bool {
       auto& d = *static_cast<DualContext*>(opaque);
       if (!d.writer(d.context, dest, stride)) return false;
-      if (d.ring_writer != nullptr && d.ring_writer->valid()) {
+      if (d.ring_writer != nullptr && d.ring_writer->valid() &&
+          d.ring_writer->has_demand(camera_clock_us())) {
         (void)d.ring_writer->write(dest, stride, d.presentation_time_us);
       }
       return true;
