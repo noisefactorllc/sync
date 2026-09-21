@@ -1104,11 +1104,11 @@ test("native audio retains bounded connection slots until blocked cleanup comple
       excess = await upgrade({ port: daemon.ready.port, route: "/control", origin: "http://127.0.0.1:8000" });
     }, "disconnected pending audio owners still occupy the bounded slots");
     await writeFile(gate, "release");
-    const deadline = Date.now() + TIMEOUT_MS;
+    const deadline = Date.now() + 10_000;
     let status;
     do {
       observer.client.sendJson({ type: "listAudioSources" });
-      status = (await observer.client.nextJson("draining audio owners")).sources;
+      status = (await observer.client.nextJson("draining audio owners", 10_000)).sources;
     } while ((status.find(source => source.id === "audio_blocked_completed")?.name !== "143" ||
               status.find(source => source.id === "audio_active")?.name !== "0") && Date.now() < deadline);
     assert.equal(status.find(source => source.id === "audio_blocked_completed")?.name, "143");
