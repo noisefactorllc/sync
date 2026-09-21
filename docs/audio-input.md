@@ -438,16 +438,22 @@ public preview:
 3. **Exercise installed consent, recovery, and combined load.** Verify fresh
    audio pairing, token rotation, reconnect, daemon restart, source disappearance,
    and cleanup.
-   Combined audio and video load was qualified on 2026-09-18 in
-   [research-2026-09-18-combined-audio-video](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/).
-   A continuous 30-minute soak under concurrent 32-channel float32 audio capture
-   (48 kHz, 1,536,000 samples/s) and uncompressed 1080p60 video delivery (497.7 MB/s)
-   demonstrated zero audio drops, zero cursor discontinuities, nominal 59.8+ delivered
-   video FPS, and flat ~12.5 MB resident memory. Native daemon event loop optimizations
-   (NEON/SSE2 SIMD unmasking, decoupled lock hold in `CaptureBuffer`, and sampled frame hashing)
-   eliminated event loop starvation.
-   Windows WASAPI architecture and virtual camera parity were qualified in
-   [research-2026-09-18-windows-platform-parity](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/).
+   The [18 September combined-load diagnostic](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
+   used synthetic audio and a test video publisher. Its 107,999 video sends
+   over 1,800 seconds are not receiver delivery; 107,998 were accepted, and
+   no final-pixel ledger was retained. Zero reported audio ring drops and
+   cursor discontinuities do not prove sample integrity or physical capture.
+   Requalify after the capture-ring ownership correction: `read()` must copy
+   samples before releasing slots to the producer. Keep all 32 channels active
+   while observing distinct source identities in Noisedeck B final pixels at
+   1920x1080 and 60 FPS. Require at least 99% delivery against every scheduled
+   source slot, channel identity/order and sample-value checks, zero audio ring drops,
+   underruns and cursor gaps, and retained jitter/latency tails. An authoritative
+   jitter epsilon remains unresolved; do not infer one from an average FPS.
+   The [revised next research plan](https://sync.noisedeck.app/performance/research-2026-09-21-next-research-plan-review/)
+   specifies the observation window, evidence and remaining platform actions.
+   The Windows WASAPI result uses a two-channel virtual cable for two seconds;
+   it does not qualify 32 physical inputs or combined audio/video.
    [Server authentication](../native/src/server.cpp),
    [JACK baseline](reviews/evidence/2026-09-13/audio-jack.json),
    [video verification approach](reviews/2026-09-10-interoperability.md).

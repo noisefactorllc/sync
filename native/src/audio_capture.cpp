@@ -83,28 +83,26 @@ Packet CaptureBuffer::read() {
   Packet packet{sample_rate_, channels_, 0, 0, {}};
   packet.samples.resize(kMaximumPacketFrames * channels_);
   std::size_t frames = 0;
-  std::size_t head_copy = 0;
   {
     std::lock_guard lock(mutex_);
     frames = std::min<std::size_t>(size_, kMaximumPacketFrames);
     packet.first_frame = first_frame_;
     packet.dropped_frames = dropped_frames_.load(std::memory_order_relaxed);
     if (frames > 0) {
-      head_copy = head_;
+      // Keep ownership until the copy completes: push() can reuse consumed
+      // slots immediately, or discard unread slots when the ring is full.
+      const auto first_chunk = std::min(frames, capacity_ - head_);
+      std::memcpy(packet.samples.data(),
+                  samples_.data() + head_ * channels_,
+                  first_chunk * channels_ * sizeof(float));
+      if (frames > first_chunk) {
+        std::memcpy(packet.samples.data() + first_chunk * channels_,
+                    samples_.data(),
+                    (frames - first_chunk) * channels_ * sizeof(float));
+      }
       head_ = (head_ + frames) % capacity_;
       size_ -= frames;
       first_frame_ += frames;
-    }
-  }
-  if (frames > 0) {
-    const auto first_chunk = std::min(frames, capacity_ - head_copy);
-    std::memcpy(packet.samples.data(),
-                samples_.data() + head_copy * channels_,
-                first_chunk * channels_ * sizeof(float));
-    if (frames > first_chunk) {
-      std::memcpy(packet.samples.data() + first_chunk * channels_,
-                  samples_.data(),
-                  (frames - first_chunk) * channels_ * sizeof(float));
     }
   }
   packet.samples.resize(frames * channels_);

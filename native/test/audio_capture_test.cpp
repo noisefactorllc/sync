@@ -2,6 +2,7 @@
 #include <sync/audio_capture.hpp>
 #include <array>
 #include <limits>
+#include <thread>
 
 namespace audio = noisefactor::sync::audio;
 
@@ -25,6 +26,56 @@ SYNC_TEST(audio_capture_keeps_all_32_channels_and_frame_order) {
   SYNC_REQUIRE(second.samples.front() == 15360);
   SYNC_REQUIRE(second.samples.back() == 20479);
   SYNC_REQUIRE(input.read().samples.empty());
+}
+
+SYNC_TEST(audio_capture_preserves_sample_identity_during_concurrent_ring_reuse) {
+  constexpr std::size_t channels = 32;
+  constexpr std::size_t frames_per_push = 64;
+  constexpr std::size_t pushes = 4096;
+  audio::CaptureBuffer input(48000, channels, frames_per_push);
+  std::atomic<bool> start{false};
+  std::atomic<bool> done{false};
+  std::thread producer([&] {
+    std::array<float, frames_per_push * channels> samples{};
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    for (std::size_t batch = 0; batch < pushes; ++batch) {
+      for (std::size_t i = 0; i < samples.size(); ++i)
+        samples[i] = static_cast<float>(batch * samples.size() + i);
+      input.push(samples);
+      std::this_thread::yield();
+    }
+    done.store(true, std::memory_order_release);
+  });
+  start.store(true, std::memory_order_release);
+  std::size_t received = 0;
+  std::uint64_t previous_end = 0;
+  std::uint64_t dropped = 0;
+  bool finished = false;
+  bool ordered = true;
+  bool intact = true;
+  do {
+    // Read after acquiring completion too, so the final buffered frames drain.
+    finished = done.load(std::memory_order_acquire);
+    const auto packet = input.read();
+    dropped = packet.dropped_frames;
+    if (packet.samples.empty()) {
+      std::this_thread::yield();
+      continue;
+    }
+    ordered = ordered && packet.first_frame >= previous_end;
+    for (std::size_t i = 0; i < packet.samples.size(); ++i)
+      if (packet.samples[i] != static_cast<float>(packet.first_frame * channels + i))
+        intact = false;
+    const auto frames = packet.samples.size() / channels;
+    received += frames;
+    previous_end = packet.first_frame + frames;
+  } while (!finished);
+  producer.join();
+  SYNC_REQUIRE(ordered);
+  SYNC_REQUIRE(intact);
+  SYNC_REQUIRE(received > 0);
+  // Deliberate contention may drop frames, but must never corrupt a packet.
+  SYNC_REQUIRE(received + dropped == pushes * frames_per_push);
 }
 
 SYNC_TEST(audio_capture_discards_oldest_frames_at_its_fixed_capacity) {

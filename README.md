@@ -37,13 +37,14 @@ That exact source passed the
 [cross-platform CI matrix](https://github.com/noisefactorllc/sync/actions/runs/34803984585)
 and the separate
 [Windows camera end-to-end workflow](https://github.com/noisefactorllc/sync/actions/runs/34803984593).
-Concurrent 32-channel audio capture and 1080p60 video delivery were qualified in the
-[combined audio and video load qualification report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
-(30-minute soak: 0 audio drops, 0 cursor discontinuities, nominal 59.8+ delivered video FPS).
-The [Windows platform parity report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
-qualified the Windows Media Foundation virtual camera (`SyncCamera.dll`), DirectShow bridging
-via Kernel Streaming proxy (`ksproxy.ax`), fixed-point BT.709 NV12 conversion, and WASAPI
-audio capture architecture on Windows 11 Build 26200.
+The [combined audio and video diagnostic report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
+records a 30-minute synthetic 32-channel audio test with concurrent 1080p video
+submission. Its video rate counts sender submissions, not distinct camera or
+Noisedeck B pixels. It reports zero audio cursor gaps and ring drops, but does
+not validate sample values. Physical 32-channel capture and sustained combined
+1080p60 delivery remain unqualified. The
+[Windows platform report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
+provides architecture and test evidence, not combined-load platform parity.
 [Native preview 0.2.68](https://sync.noisedeck.app/#download)
 and [SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
 are published from that source. Current evidence is not a general hardware
@@ -60,23 +61,17 @@ These issues stop Sync from working today. Each entry includes a workaround
 where one exists. Keep this list current. Add an entry when a report is
 diagnosed. Remove it when the fix ships.
 
-- **Browser consumers of the Sync camera receive about 55 distinct frames
-  per second at 1080p, with repeats. Native consumers receive all 60.** On
-  2026-09-09 a native AVFoundation reader on an Apple Silicon Mac received
-  every frame of a 60 fps sender for 10 minutes: 60 per second, no repeats,
-  no second below 50 at 1024 × 1024. On 2026-09-18, the 1080p paired soak was
-  completed (see the [1080p60 native AVFoundation versus Chromium report](https://sync.noisedeck.app/performance/research-2026-09-18-1080p60-native-avfoundation/)):
-  the native AVFoundation consumer received 23,664 frames with 0 duplicate
-  frames, 0 drops, and median relay latency of 3.22 ms, proving that the
-  CoreMediaIO system extension and daemon relay deliver lossless 1080p60.
-  Under identical conditions, Chromium delivered 6,277 repeated frames (20.9%)
-  and dropped 332 frames in its internal capture queue. The repeats and capture
-  ceiling originate in Chromium's video capture service and uncompressed socket
-  backpressure, not in the CoreMediaIO system extension. Earlier reports of a
-  slowdown over hours came from the test harness, not from Sync. Its memory
-  inspector suspended the sending browser, its second test client competed with
-  the sender for the loopback, and its launch shell ran the daemon at a lower
-  priority than the browsers. The harness no longer does any of these.
+- **Sustained 1080p60 camera delivery with concurrent 32-channel audio remains
+  unqualified.** The [18 September native versus Chromium measurements](https://sync.noisedeck.app/performance/research-2026-09-18-1080p60-native-avfoundation/measurements.json)
+  record 23,664 distinct native pictures in 599.982 seconds: 39.441 FPS, with
+  12,335 producer skips and 591 complete seconds below 50 FPS. Zero unexplained
+  native losses at that offered rate does not establish 60-FPS capacity. The
+  Chromium arm has invalid accounting, so it cannot establish an exclusive
+  capture-path cause. The [20 September web candidate](https://sync.noisedeck.app/performance/research-2026-09-20-web-native-frame-pacing/measurements.json)
+  reports 35,612 distinct pictures in 600 seconds, or 98.922% of 36,000 target
+  frame slots. This is below 99% and lacks concurrent 32-channel final-pixel
+  evidence. Native receiver, browser arrival, and final-rendered-pixel results
+  must remain separate. See the [current closure plan](https://sync.noisedeck.app/performance/research-2026-09-21-next-research-plan-review/).
 - **Short delivery stalls from browser senders remain under investigation.**
   If Chrome rendering and delivery both settle at 30 FPS on battery power,
   connect the computer to power and check Settings > Performance > Energy
@@ -138,21 +133,16 @@ diagnosed. Remove it when the fix ships.
   effect. A repeated candidate measurement failed its diagnostic deadline
   and has no accepted FPS. The prepared report retains both failed attempts. Publication is pending.
   The [controlled sender stage separation report](https://sync.noisedeck.app/performance/research-2026-09-18-sender-stage-separation/)
-  isolated GPU readback fence wait (11.7 ms quiet / 12.4 ms load), PBO buffer
-  readback with row flipping (3.3 ms), staging payload copy (0.6 ms), and
-  WebSocket transmission (0.8 ms), proving that the 20.7 ms stamp-to-send
-  latency reflects single-frame GPU pipeline depth and memory copies rather
-  than socket pressure.
-  The [combined audio and video load qualification report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
-  demonstrated zero audio dropouts, 0 low-rate intervals (<50 FPS), and flat
-  ~12.5 MB resident memory during a continuous 30-minute concurrent 32-channel
-  audio and uncompressed 1080p60 video soak. Native daemon optimizations
-  (NEON/SSE2 SIMD unmasking, decoupled audio ring buffer lock hold, and sampled
-  payload hashing) eliminated event loop starvation.
-  The [Windows platform parity report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
-  qualified the Windows Media Foundation virtual camera (`SyncCamera.dll`), DirectShow bridging
-  via Kernel Streaming proxy (`ksproxy.ax`), fixed-point BT.709 NV12 conversion, and WASAPI
-  audio capture architecture on Windows 11 Build 26200, confirming platform parity with macOS.
+  records a first-successful-fence-poll delay of 11.7 ms quiet / 12.4 ms loaded,
+  an upper bound on fence readiness rather than isolated GPU execution time.
+  Readback/row-flip call time was 3.3 ms, payload-copy time 0.6 ms, and
+  WebSocket send-call time 0.8 ms. These short sender observations do not
+  establish transmission completion or a general cause of delivery stalls.
+  The [combined diagnostic report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
+  measures synthetic audio cursors and video submissions to a test publisher.
+  Its 59.999 FPS is a sender rate; its approximately 12.4 MiB final physical
+  footprint differs from its 15,824 KiB final RSS. Neither the report nor
+  structural Windows tests certify final-pixel combined acceptance.
   The macOS camera fitter reduces conversion passes for all alpha modes
   on Apple Silicon. Two row ranges each use one pass per pixel.
   The fitter reuses its completion signals between frames.
