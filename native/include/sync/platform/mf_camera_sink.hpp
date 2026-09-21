@@ -38,6 +38,11 @@ class MfCameraSink final : public CameraSink {
     // Tests drive the ring directly and must not register a camera with the
     // system; production leaves this true.
     bool create_virtual_camera = true;
+    // Shared memory ring buffer path for desktop applications (e.g. Electron).
+    // An empty string uses the system temporary directory (windows_shm_default_path()).
+    std::wstring shm_path = L"";
+    // Whether to initialize the shared memory ring buffer for desktop bypass.
+    bool enable_shm = true;
   };
 
   MfCameraSink();
@@ -55,6 +60,9 @@ class MfCameraSink final : public CameraSink {
   [[nodiscard]] auto unavailable_status() const noexcept -> std::int32_t override;
   [[nodiscard]] auto has_capacity() const noexcept -> bool override;
   auto submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit override;
+  auto submit_written(CameraFrameWriter writer, void* context,
+                      std::uint64_t presentation_time_us) noexcept
+      -> CameraSinkWrite override;
 
  private:
   struct Impl;

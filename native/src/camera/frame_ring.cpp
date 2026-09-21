@@ -19,6 +19,18 @@ constexpr int kTornReadRetries = 4;
 
 auto section_name() -> std::wstring { return L"Global\\SyncCamera.frames"; }
 
+#if defined(_WIN32)
+#include <windows.h>
+auto windows_shm_default_path() -> std::wstring {
+  wchar_t temp[MAX_PATH];
+  const DWORD len = ::GetTempPathW(MAX_PATH, temp);
+  if (len > 0 && len < MAX_PATH) {
+    return std::wstring(temp, len) + windows_shm_filename();
+  }
+  return windows_shm_filename();
+}
+#endif
+
 FrameRingWriter::FrameRingWriter(std::span<std::byte> mapping) noexcept {
   if (mapping.data() == nullptr || mapping.size() < frame_ring_bytes()) return;
   auto* header = reinterpret_cast<FrameRingHeader*>(mapping.data());

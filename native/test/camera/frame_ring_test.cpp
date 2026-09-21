@@ -34,6 +34,10 @@ SYNC_TEST(the_section_name_is_global) {
   SYNC_REQUIRE(section_name().rfind(L"Global\\", 0) == 0);
 }
 
+SYNC_TEST(the_windows_shm_filename_matches_desktop_contract) {
+  SYNC_REQUIRE(noisefactor::sync::camera::windows_shm_filename() == L"SyncCamera.frames");
+}
+
 SYNC_TEST(demand_expires_so_a_closed_consumer_stops_the_sender) {
   std::vector<std::byte> mapping(frame_ring_bytes());
   FrameRingWriter writer(mapping);

@@ -99,6 +99,14 @@ class FrameRingWriter {
 // POSIX shared memory / memory mapped file path.
 [[nodiscard]] inline auto posix_shm_path() -> std::string { return "/tmp/SyncCamera.frames"; }
 
+// Windows shared memory ring buffer file name.
+[[nodiscard]] inline auto windows_shm_filename() -> std::wstring { return L"SyncCamera.frames"; }
+
+#if defined(_WIN32)
+// Default Windows shared memory ring buffer path in the process temporary directory.
+[[nodiscard]] auto windows_shm_default_path() -> std::wstring;
+#endif
+
 // How long after the media source's last request for a frame the sender keeps
 // treating the camera as watched. Generous next to a 60 fps request cadence,
 // so an ordinary hitch never reads as "nobody is looking", and short enough

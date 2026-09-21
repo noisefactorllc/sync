@@ -7,6 +7,7 @@
 #include <winternl.h>
 #include <wrl/client.h>
 
+#include <cstring>
 #include <string>
 
 #include <sync/camera/frame_ring.hpp>
@@ -45,7 +46,15 @@ struct MfCameraSink::Impl {
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::None;
   std::int32_t status = 0;
 
+  HANDLE shm_file = nullptr;
+  HANDLE shm_mapping = nullptr;
+  void* shm_view = nullptr;
+  std::unique_ptr<FrameRingWriter> shm_writer;
+  std::wstring resolved_shm_path;
+
   explicit Impl(MfCameraSink::Options given) : options(std::move(given)) {
+    init_shm(options.shm_path, options.enable_shm);
+
     if (!windows_supports_virtual_cameras()) {
       reason = CameraSinkUnavailableReason::NotSupported;
       return;
@@ -84,10 +93,101 @@ struct MfCameraSink::Impl {
   }
 
   ~Impl() {
+    close_shm();
     close_section();
     if (camera) camera->Shutdown();
     camera.Reset();
     if (media_foundation_started) ::MFShutdown();
+  }
+
+  void init_shm(const std::wstring& path, bool enable) noexcept {
+    if (!enable) return;
+    resolved_shm_path = path.empty() ? windows_shm_default_path() : path;
+    if (resolved_shm_path.empty()) return;
+
+    const std::size_t ring_bytes = frame_ring_bytes();
+    shm_file = ::CreateFileW(
+        resolved_shm_path.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (shm_file == INVALID_HANDLE_VALUE) {
+      shm_file = nullptr;
+      resolved_shm_path.clear();
+      return;
+    }
+
+    LARGE_INTEGER size;
+    size.QuadPart = static_cast<LONGLONG>(ring_bytes);
+    if (!::SetFilePointerEx(shm_file, size, nullptr, FILE_BEGIN) || !::SetEndOfFile(shm_file)) {
+      ::CloseHandle(shm_file);
+      shm_file = nullptr;
+      resolved_shm_path.clear();
+      return;
+    }
+
+    shm_mapping = ::CreateFileMappingW(
+        shm_file,
+        nullptr,
+        PAGE_READWRITE,
+        0,
+        0,
+        nullptr);
+    if (shm_mapping == nullptr) {
+      ::CloseHandle(shm_file);
+      shm_file = nullptr;
+      resolved_shm_path.clear();
+      return;
+    }
+
+    shm_view = ::MapViewOfFile(shm_mapping, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, ring_bytes);
+    if (shm_view == nullptr) {
+      ::CloseHandle(shm_mapping);
+      shm_mapping = nullptr;
+      ::CloseHandle(shm_file);
+      shm_file = nullptr;
+      resolved_shm_path.clear();
+      return;
+    }
+
+    shm_writer = std::make_unique<FrameRingWriter>(
+        std::span<std::byte>(static_cast<std::byte*>(shm_view), ring_bytes));
+    if (!shm_writer->valid()) {
+      shm_writer.reset();
+      ::UnmapViewOfFile(shm_view);
+      shm_view = nullptr;
+      ::CloseHandle(shm_mapping);
+      shm_mapping = nullptr;
+      ::CloseHandle(shm_file);
+      shm_file = nullptr;
+      resolved_shm_path.clear();
+    }
+  }
+
+  void close_shm() noexcept {
+    if (shm_writer) shm_writer.reset();
+    if (shm_view != nullptr) {
+      const std::size_t ring_bytes = frame_ring_bytes();
+      std::memset(shm_view, 0, ring_bytes);
+      ::FlushViewOfFile(shm_view, ring_bytes);
+      ::UnmapViewOfFile(shm_view);
+      shm_view = nullptr;
+    }
+    if (shm_mapping != nullptr) {
+      ::CloseHandle(shm_mapping);
+      shm_mapping = nullptr;
+    }
+    if (shm_file != nullptr) {
+      ::CloseHandle(shm_file);
+      shm_file = nullptr;
+    }
+    if (!resolved_shm_path.empty()) {
+      ::DeleteFileW(resolved_shm_path.c_str());
+      resolved_shm_path.clear();
+    }
   }
 
   void close_section() {
@@ -149,7 +249,6 @@ struct MfCameraSink::Impl {
     close_section();
     return false;
   }
-
 };
 
 MfCameraSink::MfCameraSink() : MfCameraSink(Options{}) {}
@@ -159,40 +258,108 @@ MfCameraSink::MfCameraSink(Options options) : impl_(std::make_unique<Impl>(std::
 MfCameraSink::~MfCameraSink() = default;
 
 auto MfCameraSink::available() const noexcept -> bool {
-  return impl_->reason == CameraSinkUnavailableReason::None;
+  return (impl_->shm_writer != nullptr && impl_->shm_writer->valid()) ||
+         impl_->reason == CameraSinkUnavailableReason::None;
 }
 
 auto MfCameraSink::unavailable_reason() const noexcept -> CameraSinkUnavailableReason {
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid()) {
+    return CameraSinkUnavailableReason::None;
+  }
   return impl_->reason;
 }
 
-auto MfCameraSink::unavailable_status() const noexcept -> std::int32_t { return impl_->status; }
+auto MfCameraSink::unavailable_status() const noexcept -> std::int32_t {
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid()) {
+    return 0;
+  }
+  return impl_->status;
+}
 
 auto MfCameraSink::has_capacity() const noexcept -> bool {
-  // Nowhere to put a frame, or nobody asking for one. Answering no here is
-  // what stops the publisher fitting a 1080p frame sixty times a second that
-  // nothing would read.
-  //
-  // The section alone is not the test. This process keeps its own view mapped,
-  // which keeps the named section alive after every consumer has gone, so
-  // "the section opens" stays true forever once anything has ever opened the
-  // camera. Whether the media source has recently asked for a frame is the
-  // question that actually has an answer.
-  if (!available() || !impl_->ensure_section()) return false;
-  return impl_->writer->has_demand(camera_clock_us());
+  const std::uint64_t now = camera_clock_us();
+  const bool shm_demand =
+      (impl_->shm_writer != nullptr && impl_->shm_writer->valid() && impl_->shm_writer->has_demand(now));
+  const bool vcam_demand =
+      (impl_->reason == CameraSinkUnavailableReason::None && impl_->ensure_section() &&
+       impl_->writer != nullptr && impl_->writer->has_demand(now));
+  return shm_demand || vcam_demand;
 }
 
 auto MfCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSinkSubmit {
-  if (!available()) return CameraSinkSubmit::Failed;
-  if (!impl_->ensure_section()) return CameraSinkSubmit::Backpressured;
   if (frame.width != kCanvas.width || frame.height != kCanvas.height) {
     return CameraSinkSubmit::Failed;
   }
-  if (!impl_->writer->has_demand(camera_clock_us())) return CameraSinkSubmit::Backpressured;
-  if (!impl_->writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us)) {
-    return CameraSinkSubmit::Failed;
+  if (!available()) return CameraSinkSubmit::Failed;
+
+  const std::uint64_t now = camera_clock_us();
+  bool wrote_any = false;
+
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid() &&
+      impl_->shm_writer->has_demand(now)) {
+    if (impl_->shm_writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us)) {
+      wrote_any = true;
+    }
   }
-  return CameraSinkSubmit::Accepted;
+
+  if (impl_->reason == CameraSinkUnavailableReason::None && impl_->ensure_section() &&
+      impl_->writer != nullptr && impl_->writer->has_demand(now)) {
+    if (impl_->writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us)) {
+      wrote_any = true;
+    }
+  }
+
+  return wrote_any ? CameraSinkSubmit::Accepted : CameraSinkSubmit::Backpressured;
+}
+
+auto MfCameraSink::submit_written(CameraFrameWriter writer, void* context,
+                                  std::uint64_t presentation_time_us) noexcept
+    -> CameraSinkWrite {
+  if (!available()) return CameraSinkWrite::Failed;
+
+  const std::uint64_t now = camera_clock_us();
+  const bool shm_demand =
+      (impl_->shm_writer != nullptr && impl_->shm_writer->valid() && impl_->shm_writer->has_demand(now));
+  const bool vcam_demand =
+      (impl_->reason == CameraSinkUnavailableReason::None && impl_->ensure_section() &&
+       impl_->writer != nullptr && impl_->writer->has_demand(now));
+
+  if (!shm_demand && !vcam_demand) {
+    return CameraSinkWrite::Backpressured;
+  }
+
+  if (shm_demand && vcam_demand) {
+    struct DualContext {
+      CameraFrameWriter writer;
+      void* context;
+      FrameRingWriter* vcam_writer;
+      std::uint64_t presentation_time_us;
+    } dual{writer, context, impl_->writer.get(), presentation_time_us};
+
+    const auto copy_to_both = [](void* ctx, std::span<std::byte> dest,
+                                 std::size_t stride) noexcept -> bool {
+      auto& d = *static_cast<DualContext*>(ctx);
+      if (!d.writer(d.context, dest, stride)) return false;
+      if (d.vcam_writer != nullptr && d.vcam_writer->valid() &&
+          d.vcam_writer->has_demand(camera_clock_us())) {
+        (void)d.vcam_writer->write(dest, stride, d.presentation_time_us);
+      }
+      return true;
+    };
+    return impl_->shm_writer->write_with(copy_to_both, &dual, presentation_time_us)
+               ? CameraSinkWrite::Accepted
+               : CameraSinkWrite::Failed;
+  }
+
+  if (shm_demand) {
+    return impl_->shm_writer->write_with(writer, context, presentation_time_us)
+               ? CameraSinkWrite::Accepted
+               : CameraSinkWrite::Failed;
+  }
+
+  return impl_->writer->write_with(writer, context, presentation_time_us)
+             ? CameraSinkWrite::Accepted
+             : CameraSinkWrite::Failed;
 }
 
 auto windows_supports_virtual_cameras() noexcept -> bool {

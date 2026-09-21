@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -17,6 +18,7 @@ namespace {
 using noisefactor::sync::camera::CameraSinkFrame;
 using noisefactor::sync::camera::CameraSinkSubmit;
 using noisefactor::sync::camera::CameraSinkUnavailableReason;
+using noisefactor::sync::camera::CameraSinkWrite;
 using noisefactor::sync::camera::camera_clock_us;
 using noisefactor::sync::camera::FrameRingReader;
 using noisefactor::sync::camera::FrameRingWriter;
@@ -38,7 +40,7 @@ constexpr std::size_t kStride = static_cast<std::size_t>(kCanvas.width) * kBytes
 constexpr wchar_t kTestSection[] = L"Local\\SyncCameraTest.frames";
 
 [[nodiscard]] auto test_options() -> MfCameraSink::Options {
-  return {.section = kTestSection, .create_virtual_camera = false};
+  return {.section = kTestSection, .create_virtual_camera = false, .enable_shm = false};
 }
 
 [[nodiscard]] auto now_us() -> std::uint64_t { return camera_clock_us(); }
@@ -239,6 +241,163 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
 
   const FrameRingReader reader(source.mapping());
   SYNC_REQUIRE(reader.newest_sequence() == 1);
+}
+
+[[nodiscard]] auto test_temp_path() -> std::wstring {
+  wchar_t temp[MAX_PATH];
+  const DWORD len = ::GetTempPathW(MAX_PATH, temp);
+  if (len > 0 && len < MAX_PATH) {
+    return std::wstring(temp, len) + L"SyncCameraSinkTest_" +
+           std::to_wstring(::GetCurrentProcessId()) + L".frames";
+  }
+  return L"SyncCameraSinkTest.frames";
+}
+
+SYNC_TEST(a_sink_creates_and_maps_windows_shm_ring_file) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  {
+    MfCameraSink sink(opts);
+    SYNC_REQUIRE(sink.available());
+    SYNC_REQUIRE(!sink.has_capacity());
+
+    const HANDLE hFile = ::CreateFileW(shm_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    SYNC_REQUIRE(hFile != INVALID_HANDLE_VALUE);
+
+    const HANDLE hMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+    SYNC_REQUIRE(hMap != nullptr);
+
+    void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
+    SYNC_REQUIRE(pView != nullptr);
+
+    const FrameRingReader reader(
+        std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
+    SYNC_REQUIRE(reader.valid());
+    SYNC_REQUIRE(reader.newest_sequence() == 0);
+
+    reader.record_demand(now_us());
+    SYNC_REQUIRE(sink.has_capacity());
+
+    SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x42), 8888)) == CameraSinkSubmit::Accepted);
+    SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    std::uint64_t pres = 0;
+    SYNC_REQUIRE(reader.read(out, kStride, pres));
+    SYNC_REQUIRE(pres == 8888);
+    SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x42);
+
+    ::UnmapViewOfFile(pView);
+    ::CloseHandle(hMap);
+    ::CloseHandle(hFile);
+  }
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
+}
+
+SYNC_TEST(a_sink_supports_zero_copy_direct_writer_on_shm_ring) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  {
+    MfCameraSink sink(opts);
+    const HANDLE hFile = ::CreateFileW(shm_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    SYNC_REQUIRE(hFile != INVALID_HANDLE_VALUE);
+    const HANDLE hMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+    void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
+    const FrameRingReader reader(
+        std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
+    reader.record_demand(now_us());
+
+    struct TestWriterContext {
+      std::uint8_t fill_val = 0x7E;
+      bool called = false;
+    } ctx;
+
+    const auto write_cb = [](void* context, std::span<std::byte> dest,
+                             std::size_t stride) noexcept -> bool {
+      (void)stride;
+      auto* c = static_cast<TestWriterContext*>(context);
+      c->called = true;
+      std::fill(dest.begin(), dest.end(), static_cast<std::byte>(c->fill_val));
+      return true;
+    };
+
+    const auto res = sink.submit_written(write_cb, &ctx, 12345);
+    SYNC_REQUIRE(res == CameraSinkWrite::Accepted);
+    SYNC_REQUIRE(ctx.called);
+    SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    std::uint64_t pres = 0;
+    SYNC_REQUIRE(reader.read(out, kStride, pres));
+    SYNC_REQUIRE(pres == 12345);
+    SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x7E);
+
+    ::UnmapViewOfFile(pView);
+    ::CloseHandle(hMap);
+    ::CloseHandle(hFile);
+  }
+}
+
+SYNC_TEST(a_sink_services_both_shm_and_virtual_camera_consumers) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const FakeSource vcam_source;
+  MfCameraSink sink(opts);
+
+  const HANDLE hFile = ::CreateFileW(shm_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  SYNC_REQUIRE(hFile != INVALID_HANDLE_VALUE);
+  const HANDLE hMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+  void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
+  const FrameRingReader shm_reader(
+      std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
+
+  const FrameRingReader vcam_reader(vcam_source.mapping());
+
+  // Both demand
+  shm_reader.record_demand(now_us());
+  vcam_source.demand(now_us());
+
+  SYNC_REQUIRE(sink.has_capacity());
+
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x33), 777)) == CameraSinkSubmit::Accepted);
+
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 1);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  std::vector<std::byte> shm_out(kFrameRingSlotBytes);
+  std::vector<std::byte> vcam_out(kFrameRingSlotBytes);
+  std::uint64_t p1 = 0, p2 = 0;
+  SYNC_REQUIRE(shm_reader.read(shm_out, kStride, p1));
+  SYNC_REQUIRE(vcam_reader.read(vcam_out, kStride, p2));
+  SYNC_REQUIRE(p1 == 777);
+  SYNC_REQUIRE(p2 == 777);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(shm_out[0]) == 0x33);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(vcam_out[0]) == 0x33);
+
+  ::UnmapViewOfFile(pView);
+  ::CloseHandle(hMap);
+  ::CloseHandle(hFile);
 }
 
 }  // namespace
