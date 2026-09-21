@@ -277,7 +277,7 @@ SYNC_TEST(a_sink_creates_and_maps_windows_shm_ring_file) {
     void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
     SYNC_REQUIRE(pView != nullptr);
 
-    const FrameRingReader reader(
+    FrameRingReader reader(
         std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
     SYNC_REQUIRE(reader.valid());
     SYNC_REQUIRE(reader.newest_sequence() == 0);
@@ -317,7 +317,7 @@ SYNC_TEST(a_sink_supports_zero_copy_direct_writer_on_shm_ring) {
     SYNC_REQUIRE(hFile != INVALID_HANDLE_VALUE);
     const HANDLE hMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
     void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
-    const FrameRingReader reader(
+    FrameRingReader reader(
         std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
     reader.record_demand(now_us());
 
@@ -369,7 +369,7 @@ SYNC_TEST(a_sink_services_both_shm_and_virtual_camera_consumers) {
   SYNC_REQUIRE(hFile != INVALID_HANDLE_VALUE);
   const HANDLE hMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
   void* pView = ::MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
-  const FrameRingReader shm_reader(
+  FrameRingReader shm_reader(
       std::span<const std::byte>(static_cast<const std::byte*>(pView), frame_ring_bytes()));
 
   const FrameRingReader vcam_reader(vcam_source.mapping());
