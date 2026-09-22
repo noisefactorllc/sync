@@ -3,10 +3,13 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <sync/camera/frame_ring.hpp>
@@ -20,6 +23,7 @@ using noisefactor::sync::camera::CameraSinkSubmit;
 using noisefactor::sync::camera::CameraSinkUnavailableReason;
 using noisefactor::sync::camera::CameraSinkWrite;
 using noisefactor::sync::camera::camera_clock_us;
+using noisefactor::sync::camera::FrameRingHeader;
 using noisefactor::sync::camera::FrameRingReader;
 using noisefactor::sync::camera::FrameRingWriter;
 using noisefactor::sync::camera::frame_ring_bytes;
@@ -247,14 +251,53 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
 }
 
 [[nodiscard]] auto test_temp_path() -> std::wstring {
+  static std::atomic<std::uint32_t> counter{0};
+  const auto id = counter.fetch_add(1, std::memory_order_relaxed);
   wchar_t temp[MAX_PATH];
   const DWORD len = ::GetTempPathW(MAX_PATH, temp);
   if (len > 0 && len < MAX_PATH) {
     return std::wstring(temp, len) + L"SyncCameraSinkTest_" +
-           std::to_wstring(::GetCurrentProcessId()) + L".frames";
+           std::to_wstring(::GetCurrentProcessId()) + L"_" + std::to_wstring(id) + L".frames";
   }
-  return L"SyncCameraSinkTest.frames";
+  return L"SyncCameraSinkTest_" + std::to_wstring(::GetCurrentProcessId()) + L"_" +
+         std::to_wstring(id) + L".frames";
 }
+
+struct ShmMapping {
+  HANDLE file = INVALID_HANDLE_VALUE;
+  HANDLE map = nullptr;
+  void* view = nullptr;
+
+  explicit ShmMapping(const std::wstring& path) {
+    file = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+      map = ::CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+      if (map != nullptr) {
+        view = ::MapViewOfFile(map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, frame_ring_bytes());
+      }
+    }
+  }
+
+  ~ShmMapping() {
+    if (view != nullptr) ::UnmapViewOfFile(view);
+    if (map != nullptr) ::CloseHandle(map);
+    if (file != INVALID_HANDLE_VALUE) ::CloseHandle(file);
+  }
+
+  ShmMapping(const ShmMapping&) = delete;
+  auto operator=(const ShmMapping&) -> ShmMapping& = delete;
+
+  [[nodiscard]] auto span() const noexcept -> std::span<const std::byte> {
+    if (view == nullptr) return {};
+    return {static_cast<const std::byte*>(view), frame_ring_bytes()};
+  }
+
+  [[nodiscard]] auto header() noexcept -> FrameRingHeader* {
+    return static_cast<FrameRingHeader*>(view);
+  }
+};
 
 SYNC_TEST(a_sink_creates_and_maps_windows_shm_ring_file) {
   const std::wstring shm_file = test_temp_path();
@@ -401,6 +444,246 @@ SYNC_TEST(a_sink_services_both_shm_and_virtual_camera_consumers) {
   ::UnmapViewOfFile(pView);
   ::CloseHandle(hMap);
   ::CloseHandle(hFile);
+}
+
+SYNC_TEST(a_sink_survives_asymmetric_vcam_disconnect_while_shm_consumer_remains_active) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const FakeSource vcam_source;
+  MfCameraSink sink(opts);
+
+  ShmMapping shm(shm_file);
+  SYNC_REQUIRE(shm.view != nullptr);
+  FrameRingReader shm_reader(shm.span());
+  const FrameRingReader vcam_reader(vcam_source.mapping());
+
+  // Both demand frames initially
+  shm_reader.record_demand(now_us());
+  vcam_source.demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+
+  // First frame is accepted and delivered to both
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x11), 101)) == CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 1);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  // VCAM consumer disconnects / demand goes stale (> 500ms in the past)
+  vcam_source.demand(now_us() - kFrameRingDemandTimeoutUs - 1000);
+
+  // SHM consumer remains active and demands frames
+  shm_reader.record_demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+
+  // Sink must continue accepting frames for SHM consumer without backpressure or stalling
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x22), 102)) == CameraSinkSubmit::Accepted);
+
+  // SHM consumer receives frame 2 cleanly
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 2);
+  std::vector<std::byte> shm_out(kFrameRingSlotBytes);
+  std::uint64_t pts = 0;
+  SYNC_REQUIRE(shm_reader.read(shm_out, kStride, pts));
+  SYNC_REQUIRE(pts == 102);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(shm_out[0]) == 0x22);
+
+  // VCAM ring was untouched (remains at sequence 1)
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  // VCAM consumer reconnects
+  vcam_source.demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x33), 103)) == CameraSinkSubmit::Accepted);
+
+  // Both now receive sequence 3 (SHM) and sequence 2 (VCAM)
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 3);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 2);
+  SYNC_REQUIRE(vcam_reader.read(shm_out, kStride, pts));
+  SYNC_REQUIRE(pts == 103);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(shm_out[0]) == 0x33);
+}
+
+SYNC_TEST(a_sink_survives_asymmetric_shm_disconnect_while_vcam_consumer_remains_active) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const FakeSource vcam_source;
+  MfCameraSink sink(opts);
+
+  ShmMapping shm(shm_file);
+  SYNC_REQUIRE(shm.view != nullptr);
+  FrameRingReader shm_reader(shm.span());
+  const FrameRingReader vcam_reader(vcam_source.mapping());
+
+  // Both demand frames initially
+  shm_reader.record_demand(now_us());
+  vcam_source.demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0xAA), 201)) == CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 1);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  // SHM consumer disconnects / demand goes stale
+  shm.header()->last_demand_us.store(now_us() - kFrameRingDemandTimeoutUs - 1000,
+                                     std::memory_order_release);
+
+  // VCAM consumer remains active
+  vcam_source.demand(now_us());
+  SYNC_REQUIRE(sink.has_capacity());
+
+  // Sink must continue accepting frames for VCAM consumer without backpressure
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0xBB), 202)) == CameraSinkSubmit::Accepted);
+
+  // VCAM receives frame 2 cleanly
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 2);
+  std::vector<std::byte> vcam_out(kFrameRingSlotBytes);
+  std::uint64_t pts = 0;
+  SYNC_REQUIRE(vcam_reader.read(vcam_out, kStride, pts));
+  SYNC_REQUIRE(pts == 202);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(vcam_out[0]) == 0xBB);
+
+  // SHM ring was untouched (remains at sequence 1)
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 1);
+
+  // Both disconnect -> sink enters backpressure
+  vcam_source.demand(now_us() - kFrameRingDemandTimeoutUs - 1000);
+  SYNC_REQUIRE(!sink.has_capacity());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0xCC), 203)) ==
+               CameraSinkSubmit::Backpressured);
+}
+
+SYNC_TEST(asymmetric_zero_copy_submit_written_survives_consumer_disconnect_and_reconnect) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const FakeSource vcam_source;
+  MfCameraSink sink(opts);
+
+  ShmMapping shm(shm_file);
+  SYNC_REQUIRE(shm.view != nullptr);
+  FrameRingReader shm_reader(shm.span());
+  const FrameRingReader vcam_reader(vcam_source.mapping());
+
+  const auto direct_writer = [](void* ctx, std::span<std::byte> dest,
+                                std::size_t /*stride*/) noexcept -> bool {
+    const auto val = *static_cast<std::uint8_t*>(ctx);
+    std::fill(dest.begin(), dest.end(), static_cast<std::byte>(val));
+    return true;
+  };
+
+  // Both demand initially
+  shm_reader.record_demand(now_us());
+  vcam_source.demand(now_us());
+
+  std::uint8_t b1 = 0x51;
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &b1, 301) == CameraSinkWrite::Accepted);
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 1);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  // VCAM disconnects -> direct writer writes solely to SHM
+  vcam_source.demand(now_us() - kFrameRingDemandTimeoutUs - 1000);
+  shm_reader.record_demand(now_us());
+
+  std::uint8_t b2 = 0x52;
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &b2, 302) == CameraSinkWrite::Accepted);
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 2);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 1);
+
+  // SHM disconnects and VCAM reconnects -> direct writer writes solely to VCAM
+  shm.header()->last_demand_us.store(now_us() - kFrameRingDemandTimeoutUs - 1000,
+                                     std::memory_order_release);
+  vcam_source.demand(now_us());
+
+  std::uint8_t b3 = 0x53;
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &b3, 303) == CameraSinkWrite::Accepted);
+  SYNC_REQUIRE(shm_reader.newest_sequence() == 2);
+  SYNC_REQUIRE(vcam_reader.newest_sequence() == 2);
+
+  // Both disconnect -> backpressured
+  vcam_source.demand(now_us() - kFrameRingDemandTimeoutUs - 1000);
+  std::uint8_t b4 = 0x54;
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &b4, 304) == CameraSinkWrite::Backpressured);
+}
+
+SYNC_TEST(concurrent_multi_reader_shm_and_virtual_camera_seqlock_consistency) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const FakeSource vcam_source;
+  MfCameraSink sink(opts);
+
+  ShmMapping shm(shm_file);
+  SYNC_REQUIRE(shm.view != nullptr);
+
+  constexpr int kNumFrames = 40;
+  std::atomic<bool> stop{false};
+  std::atomic<int> vcam_reads{0};
+  std::atomic<int> shm_reads_1{0};
+  std::atomic<int> shm_reads_2{0};
+  std::atomic<int> corruptions{0};
+
+  auto reader_loop = [&](std::span<const std::byte> mapping, std::atomic<int>& read_counter) {
+    FrameRingReader reader(mapping);
+    std::vector<std::byte> buf(kFrameRingSlotBytes);
+    while (!stop.load(std::memory_order_relaxed)) {
+      reader.record_demand(now_us());
+      std::uint64_t pts = 0;
+      if (reader.read(buf, kStride, pts)) {
+        if (pts > 0) {
+          const auto expected_byte = static_cast<std::uint8_t>(pts & 0xFF);
+          if (static_cast<std::uint8_t>(buf[0]) != expected_byte ||
+              static_cast<std::uint8_t>(buf[buf.size() / 2]) != expected_byte ||
+              static_cast<std::uint8_t>(buf[buf.size() - 1]) != expected_byte) {
+            corruptions.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            read_counter.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+      }
+      std::this_thread::yield();
+    }
+  };
+
+  std::thread t_vcam(reader_loop, vcam_source.mapping(), std::ref(vcam_reads));
+  std::thread t_shm1(reader_loop, shm.span(), std::ref(shm_reads_1));
+  std::thread t_shm2(reader_loop, shm.span(), std::ref(shm_reads_2));
+
+  for (int f = 1; f <= kNumFrames; ++f) {
+    const auto frame = canvas_filled(static_cast<std::uint8_t>(f & 0xFF));
+    const auto sub = submission(frame, static_cast<std::uint64_t>(f));
+    while (sink.submit(sub) != CameraSinkSubmit::Accepted) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(300));
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  stop.store(true, std::memory_order_release);
+
+  t_vcam.join();
+  t_shm1.join();
+  t_shm2.join();
+
+  SYNC_REQUIRE(corruptions.load(std::memory_order_acquire) == 0);
+  SYNC_REQUIRE(vcam_reads.load(std::memory_order_acquire) > 0);
+  SYNC_REQUIRE(shm_reads_1.load(std::memory_order_acquire) > 0);
+  SYNC_REQUIRE(shm_reads_2.load(std::memory_order_acquire) > 0);
 }
 
 }  // namespace
