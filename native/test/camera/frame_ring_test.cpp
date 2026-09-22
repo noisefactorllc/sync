@@ -1,9 +1,11 @@
 #include "test_harness.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <sync/camera/frame_ring.hpp>
@@ -189,6 +191,140 @@ SYNC_TEST(write_with_reverts_sequence_if_writer_fails) {
 
   SYNC_REQUIRE(!writer.write_with(failing_writer, nullptr, 999));
   SYNC_REQUIRE(reader.newest_sequence() == 0);
+}
+
+SYNC_TEST(monotonic_demand_heartbeat_under_concurrent_readers) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  FrameRingReader reader1(mapping);
+  FrameRingReader reader2(mapping);
+  FrameRingReader reader3(mapping);
+
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  threads.reserve(3);
+
+  // Thread 1 stamps high timestamps
+  threads.emplace_back([&]() {
+    while (!start.load(std::memory_order_relaxed)) {}
+    for (std::uint64_t t = 1000; t <= 2000; t += 10) {
+      reader1.record_demand(t);
+    }
+  });
+
+  // Thread 2 stamps lagging timestamps (must never regress reader 1)
+  threads.emplace_back([&]() {
+    while (!start.load(std::memory_order_relaxed)) {}
+    for (std::uint64_t t = 500; t <= 1500; t += 10) {
+      reader2.record_demand(t);
+    }
+  });
+
+  // Thread 3 stamps interleaved timestamps
+  threads.emplace_back([&]() {
+    while (!start.load(std::memory_order_relaxed)) {}
+    for (std::uint64_t t = 800; t <= 1800; t += 10) {
+      reader3.record_demand(t);
+    }
+  });
+
+  start.store(true, std::memory_order_release);
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  const auto* header = reinterpret_cast<const FrameRingHeader*>(mapping.data());
+  // The final recorded demand must be the maximum (2000), never regressed by thread 2 or 3
+  SYNC_REQUIRE(header->last_demand_us.load(std::memory_order_acquire) == 2000);
+}
+
+SYNC_TEST(concurrent_multi_reader_seqlock_consistency) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  FrameRingReader reader1(mapping);
+  FrameRingReader reader2(mapping);
+  FrameRingReader reader3(mapping);
+
+  constexpr int kNumFrames = 40;
+  std::atomic<bool> stop{false};
+  std::atomic<int> valid_reads1{0};
+  std::atomic<int> valid_reads2{0};
+  std::atomic<int> valid_reads3{0};
+  std::atomic<int> corruptions{0};
+
+  auto reader_func = [&](FrameRingReader& r, std::atomic<int>& valid_reads) {
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    while (!stop.load(std::memory_order_relaxed)) {
+      std::uint64_t presentation = 0;
+      if (r.read(out, kStride, presentation)) {
+        if (presentation > 0) {
+          const auto expected_byte = static_cast<std::uint8_t>(presentation & 0xFF);
+          // Verify that the frame is not torn: first byte, middle byte, and last byte match
+          if (static_cast<std::uint8_t>(out[0]) != expected_byte ||
+              static_cast<std::uint8_t>(out[out.size() / 2]) != expected_byte ||
+              static_cast<std::uint8_t>(out[out.size() - 1]) != expected_byte) {
+            corruptions.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            valid_reads.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+      }
+      std::this_thread::yield();
+    }
+  };
+
+  std::thread t1(reader_func, std::ref(reader1), std::ref(valid_reads1));
+  std::thread t2(reader_func, std::ref(reader2), std::ref(valid_reads2));
+  std::thread t3(reader_func, std::ref(reader3), std::ref(valid_reads3));
+
+  for (int f = 1; f <= kNumFrames; ++f) {
+    const auto frame = canvas_filled(static_cast<std::uint8_t>(f & 0xFF));
+    SYNC_REQUIRE(writer.write(frame, kStride, static_cast<std::uint64_t>(f)));
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  stop.store(true, std::memory_order_release);
+  t1.join();
+  t2.join();
+  t3.join();
+
+  SYNC_REQUIRE(corruptions.load(std::memory_order_acquire) == 0);
+  SYNC_REQUIRE(valid_reads1.load(std::memory_order_acquire) > 0);
+  SYNC_REQUIRE(valid_reads2.load(std::memory_order_acquire) > 0);
+  SYNC_REQUIRE(valid_reads3.load(std::memory_order_acquire) > 0);
+}
+
+SYNC_TEST(demand_multiplexing_staggered_lifetimes) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  FrameRingReader consumer_a(mapping);
+  FrameRingReader consumer_b(mapping);
+
+  constexpr std::uint64_t kT0 = 10'000'000;
+  SYNC_REQUIRE(!writer.has_demand(kT0));
+
+  // Consumer A connects
+  consumer_a.record_demand(kT0);
+  SYNC_REQUIRE(writer.has_demand(kT0));
+
+  // Consumer B connects later at T0 + 500ms
+  constexpr std::uint64_t kTB = kT0 + 500'000;
+  consumer_b.record_demand(kTB);
+  SYNC_REQUIRE(writer.has_demand(kTB));
+
+  // Consumer A stops heartbeat at T0 + 800ms, but Consumer B stays active at T0 + 1200ms
+  constexpr std::uint64_t kTB_active = kT0 + 1'200'000;
+  consumer_b.record_demand(kTB_active);
+
+  // At T0 + 1'500'000, consumer A has been silent for 1.5s (> timeout 1.0s),
+  // but consumer B was active at 1.2s (only 300ms ago), so demand must remain active!
+  constexpr std::uint64_t kCheckTime = kT0 + 1'500'000;
+  SYNC_REQUIRE(writer.has_demand(kCheckTime));
+
+  // Past Consumer B's timeout, demand finally expires
+  constexpr std::uint64_t kExpiryTime = kTB_active + kFrameRingDemandTimeoutUs + 1;
+  SYNC_REQUIRE(!writer.has_demand(kExpiryTime));
 }
 
 }  // namespace

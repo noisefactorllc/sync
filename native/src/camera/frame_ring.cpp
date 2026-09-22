@@ -134,7 +134,13 @@ void FrameRingReader::record_demand(std::uint64_t now_us) noexcept {
   // The cast itself remains because the span is const -- the mapping behind
   // it must be writable, which SectionOwner guarantees by mapping
   // FILE_MAP_WRITE.
-  const_cast<FrameRingHeader*>(header_)->last_demand_us.store(now_us, std::memory_order_release);
+  // Use a monotonic CAS loop so concurrent readers advancing at slightly
+  // different wall times never regress the newest demand heartbeat.
+  auto& demand = const_cast<FrameRingHeader*>(header_)->last_demand_us;
+  std::uint64_t current = demand.load(std::memory_order_relaxed);
+  while (current < now_us && !demand.compare_exchange_weak(
+             current, now_us, std::memory_order_release, std::memory_order_relaxed)) {
+  }
 }
 
 auto FrameRingReader::newest_sequence() const noexcept -> std::uint64_t {

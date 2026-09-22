@@ -363,26 +363,35 @@ auto CmioCameraSink::submit(const CameraSinkFrame& frame) noexcept -> CameraSink
   }
   if (!available()) return CameraSinkSubmit::Failed;
 
+  bool wrote_shm = false;
   if (impl_->ring_writer != nullptr && impl_->ring_writer->valid() &&
       impl_->ring_writer->has_demand(camera_clock_us())) {
-    (void)impl_->ring_writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us);
+    wrote_shm = impl_->ring_writer->write(frame.bgra, frame.row_stride, frame.presentation_time_us);
   }
 
-  // Copy the small borrowed view, not its pixels; the callback remains const
-  // with respect to the caller's frame without casting away constness.
-  CameraSinkFrame source = frame;
-  const auto copy = [](void* context, std::span<std::byte> destination,
-                        std::size_t destination_stride) noexcept -> bool {
-    const auto& source = *static_cast<const CameraSinkFrame*>(context);
-    const std::size_t row_bytes = static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
-    for (std::uint32_t row = 0; row < kCanvas.height; ++row) {
-      std::memcpy(destination.data() + static_cast<std::size_t>(row) * destination_stride,
-                  source.bgra.data() + static_cast<std::size_t>(row) * source.row_stride, row_bytes);
-    }
-    return true;
-  };
-  return detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
-                                   copy, &source);
+  CameraSinkSubmit cmio_status = CameraSinkSubmit::Backpressured;
+  if (static_cast<std::size_t>(CMSimpleQueueGetCount(impl_->queue)) < impl_->depth) {
+    // Copy the small borrowed view, not its pixels; the callback remains const
+    // with respect to the caller's frame without casting away constness.
+    CameraSinkFrame source = frame;
+    const auto copy = [](void* context, std::span<std::byte> destination,
+                          std::size_t destination_stride) noexcept -> bool {
+      const auto& source = *static_cast<const CameraSinkFrame*>(context);
+      const std::size_t row_bytes = static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
+      for (std::uint32_t row = 0; row < kCanvas.height; ++row) {
+        std::memcpy(destination.data() + static_cast<std::size_t>(row) * destination_stride,
+                    source.bgra.data() + static_cast<std::size_t>(row) * source.row_stride, row_bytes);
+      }
+      return true;
+    };
+    cmio_status = detail::submit_cmio_frame(impl_->pool, impl_->format, impl_->queue, impl_->depth,
+                                           copy, &source);
+  }
+
+  if (wrote_shm || cmio_status == CameraSinkSubmit::Accepted) {
+    return CameraSinkSubmit::Accepted;
+  }
+  return cmio_status;
 }
 
 auto CmioCameraSink::submit_written(CameraFrameWriter writer, void* context,
