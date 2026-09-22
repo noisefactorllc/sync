@@ -244,6 +244,7 @@ int run_with_providers(nfsync::ServerOptions &options,
   if (camera_selected) {
     camera_sink.emplace(nfsync::camera::LinuxCameraSink::Options{
         .device_path = command.camera_device_path,
+        .enable_shm = true,
         .metrics = options.metrics,
         .health_changed = runtime_status != nullptr
                               ? update_linux_camera_health

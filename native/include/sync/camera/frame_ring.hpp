@@ -96,8 +96,20 @@ class FrameRingWriter {
   std::byte* payload_ = nullptr;
 };
 
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
+
 // POSIX shared memory / memory mapped file path.
-[[nodiscard]] inline auto posix_shm_path() -> std::string { return "/tmp/SyncCamera.frames"; }
+[[nodiscard]] inline auto posix_shm_path() -> std::string {
+#if defined(__linux__)
+  struct stat st{};
+  if (::stat("/dev/shm", &st) == 0 && S_ISDIR(st.st_mode)) {
+    return "/dev/shm/SyncCamera.frames";
+  }
+#endif
+  return "/tmp/SyncCamera.frames";
+}
 
 // Windows shared memory ring buffer file name.
 [[nodiscard]] inline auto windows_shm_filename() -> std::wstring { return L"SyncCamera.frames"; }

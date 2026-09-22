@@ -1,5 +1,6 @@
 #include <sync/platform/linux_camera_sink.hpp>
 
+#include <sync/camera/frame_ring.hpp>
 #include <sync/camera/nv12.hpp>
 #include <sync/platform/camera_idle_card.hpp>
 #include <sync/platform/camera_identity.hpp>
@@ -13,11 +14,15 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <fcntl.h>
+#include <limits>
 #include <mutex>
 #include <new>
-#include <limits>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -111,6 +116,89 @@ struct LinuxCameraSink::Impl {
   unsigned consecutive_failures = 0;
   std::uint64_t reopen_delay_ms = 100;
 
+  std::string ring_path;
+  int ring_fd = -1;
+  void* ring_view = nullptr;
+  std::size_t ring_bytes = 0;
+  std::unique_ptr<FrameRingWriter> shm_writer;
+
+  void init_ring(std::string_view path, bool enable) noexcept {
+    if (!enable) return;
+    std::string candidate_path = path.empty() ? posix_shm_path() : std::string(path);
+    ring_bytes = frame_ring_bytes();
+    ring_path = std::move(candidate_path);
+
+    // Mode 0600 (S_IRUSR | S_IWUSR) creates an owner-private file.
+    // O_NOFOLLOW prevents following symlinks. O_CLOEXEC prevents fd leaks.
+    ring_fd = ::open(ring_path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (ring_fd < 0) {
+      ring_path.clear();
+      return;
+    }
+
+    struct stat st{};
+    if (::fstat(ring_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != ::geteuid()) {
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+      return;
+    }
+
+    if ((st.st_mode & 0777) != 0600) {
+      if (::fchmod(ring_fd, 0600) != 0) {
+        ::close(ring_fd);
+        ring_fd = -1;
+        ring_path.clear();
+        return;
+      }
+    }
+
+    if (::ftruncate(ring_fd, static_cast<off_t>(ring_bytes)) != 0) {
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+      return;
+    }
+
+    ring_view = ::mmap(nullptr, ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd, 0);
+    if (ring_view == MAP_FAILED) {
+      ring_view = nullptr;
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+      return;
+    }
+
+    shm_writer = std::make_unique<FrameRingWriter>(
+        std::span<std::byte>(static_cast<std::byte*>(ring_view), ring_bytes));
+    if (!shm_writer->valid()) {
+      shm_writer.reset();
+      ::munmap(ring_view, ring_bytes);
+      ring_view = nullptr;
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+    }
+  }
+
+  void close_ring() noexcept {
+    if (shm_writer) shm_writer.reset();
+    if (ring_view != nullptr && ring_view != MAP_FAILED) {
+      std::memset(ring_view, 0, ring_bytes);
+      ::msync(ring_view, ring_bytes, MS_SYNC);
+      ::munmap(ring_view, ring_bytes);
+      ring_view = nullptr;
+    }
+    if (ring_fd >= 0) {
+      ::close(ring_fd);
+      ring_fd = -1;
+    }
+    if (!ring_path.empty()) {
+      ::unlink(ring_path.c_str());
+      ring_path.clear();
+    }
+  }
+
   void publish_health(bool value, CameraSinkUnavailableReason reason,
                       std::int32_t status) noexcept {
     const bool previous = healthy_state.exchange(value);
@@ -122,6 +210,8 @@ struct LinuxCameraSink::Impl {
   }
 
   bool initialize() {
+    init_ring(options.shm_path, options.enable_shm);
+
     const LinuxCameraOpenResult opened =
         open_linux_camera(explicit_path, operations);
     if (opened.error != LinuxCameraDeviceError::None) {
@@ -129,7 +219,7 @@ struct LinuxCameraSink::Impl {
       initial_reason = failure.reason;
       initial_status = failure.status;
       publish_health(false, failure.reason, failure.status);
-      return false;
+      return (shm_writer != nullptr && shm_writer->valid());
     }
     descriptor = opened.descriptor;
     format = opened.format;
@@ -146,7 +236,7 @@ struct LinuxCameraSink::Impl {
       initial_reason = CameraSinkUnavailableReason::DeviceWriteFailed;
       initial_status = ENOMEM;
       publish_health(false, initial_reason, initial_status);
-      return false;
+      return (shm_writer != nullptr && shm_writer->valid());
     }
     const std::size_t bgra_stride =
         static_cast<std::size_t>(kCanvas.width) * kBytesPerPixel;
@@ -158,7 +248,7 @@ struct LinuxCameraSink::Impl {
       descriptor = -1;
       initial_reason = CameraSinkUnavailableReason::FormatRejected;
       publish_health(false, initial_reason, 0);
-      return false;
+      return (shm_writer != nullptr && shm_writer->valid());
     }
     initially_available = true;
     initial_reason = CameraSinkUnavailableReason::None;
@@ -307,6 +397,7 @@ struct LinuxCameraSink::Impl {
       operations.close_descriptor(descriptor);
       descriptor = -1;
     }
+    close_ring();
   }
 };
 
@@ -322,35 +413,47 @@ LinuxCameraSink::~LinuxCameraSink() noexcept {
 }
 
 auto LinuxCameraSink::available() const noexcept -> bool {
-  return impl_ != nullptr && impl_->initially_available;
+  return impl_ != nullptr && (impl_->initially_available ||
+                              (impl_->shm_writer != nullptr && impl_->shm_writer->valid()));
 }
 
 auto LinuxCameraSink::unavailable_reason() const noexcept
     -> CameraSinkUnavailableReason {
-  return impl_ == nullptr ? CameraSinkUnavailableReason::DeviceWriteFailed
-                          : impl_->initial_reason;
+  if (impl_ == nullptr) return CameraSinkUnavailableReason::DeviceWriteFailed;
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid()) {
+    return CameraSinkUnavailableReason::None;
+  }
+  return impl_->initial_reason;
 }
 
 auto LinuxCameraSink::unavailable_status() const noexcept -> std::int32_t {
-  return impl_ == nullptr ? 0 : impl_->initial_status;
+  if (impl_ == nullptr) return 0;
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid()) {
+    return 0;
+  }
+  return impl_->initial_status;
 }
 
 auto LinuxCameraSink::has_capacity() const noexcept -> bool {
-  if (impl_ == nullptr || !impl_->initially_available ||
-      !impl_->healthy_state.load()) {
-    return false;
+  if (impl_ == nullptr || impl_->stopping) return false;
+  const std::uint64_t now_us = camera_clock_us();
+  const bool shm_demand = (impl_->shm_writer != nullptr && impl_->shm_writer->valid() &&
+                           impl_->shm_writer->has_demand(now_us));
+  bool v4l2_capacity = false;
+  if (impl_->initially_available && impl_->healthy_state.load()) {
+    std::lock_guard lock(impl_->mutex);
+    v4l2_capacity = !impl_->stopping &&
+                    std::ranges::any_of(impl_->slots, [](const Impl::Slot& slot) {
+                      return slot.state == Impl::SlotState::Free ||
+                             slot.state == Impl::SlotState::Queued;
+                    });
   }
-  std::lock_guard lock(impl_->mutex);
-  return !impl_->stopping &&
-         std::ranges::any_of(impl_->slots, [](const Impl::Slot& slot) {
-           return slot.state == Impl::SlotState::Free ||
-                  slot.state == Impl::SlotState::Queued;
-         });
+  return shm_demand || v4l2_capacity;
 }
 
 auto LinuxCameraSink::submit(const CameraSinkFrame& frame) noexcept
     -> CameraSinkSubmit {
-  if (impl_ == nullptr || !impl_->initially_available ||
+  if (impl_ == nullptr || !available() ||
       frame.width != kCanvas.width || frame.height != kCanvas.height ||
       frame.row_stride < static_cast<std::size_t>(kCanvas.width) *
                              kBytesPerPixel ||
@@ -359,65 +462,180 @@ auto LinuxCameraSink::submit(const CameraSinkFrame& frame) noexcept
       frame.bgra.size() < frame.row_stride * frame.height) {
     return CameraSinkSubmit::Failed;
   }
-  std::size_t slot_index = impl_->slots.size();
-  bool replacement = false;
-  {
-    std::lock_guard lock(impl_->mutex);
-    if (impl_->stopping || !impl_->healthy_state.load()) {
-      if (impl_->options.metrics != nullptr) {
-        impl_->options.metrics->note_camera_backpressure();
-      }
-      return CameraSinkSubmit::Backpressured;
+
+  const std::uint64_t now_us = camera_clock_us();
+  bool wrote_any = false;
+
+  // 1. Deliver to POSIX shared memory ring buffer if demanded
+  if (impl_->shm_writer != nullptr && impl_->shm_writer->valid() &&
+      impl_->shm_writer->has_demand(now_us)) {
+    if (impl_->shm_writer->write(frame.bgra, frame.row_stride,
+                                 frame.presentation_time_us)) {
+      wrote_any = true;
     }
-    for (std::size_t index = 0; index < impl_->slots.size(); ++index) {
-      if (impl_->slots[index].state == Impl::SlotState::Queued) {
-        slot_index = index;
-        replacement = true;
-        break;
-      }
-    }
-    if (slot_index == impl_->slots.size()) {
-      for (std::size_t index = 0; index < impl_->slots.size(); ++index) {
-        if (impl_->slots[index].state == Impl::SlotState::Free) {
-          slot_index = index;
-          break;
+  }
+
+  // 2. Deliver to V4L2 loopback device if available and healthy
+  if (impl_->initially_available) {
+    std::size_t slot_index = impl_->slots.size();
+    bool replacement = false;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->stopping && impl_->healthy_state.load()) {
+        for (std::size_t index = 0; index < impl_->slots.size(); ++index) {
+          if (impl_->slots[index].state == Impl::SlotState::Queued) {
+            slot_index = index;
+            replacement = true;
+            break;
+          }
+        }
+        if (slot_index == impl_->slots.size()) {
+          for (std::size_t index = 0; index < impl_->slots.size(); ++index) {
+            if (impl_->slots[index].state == Impl::SlotState::Free) {
+              slot_index = index;
+              break;
+            }
+          }
+        }
+        if (slot_index < impl_->slots.size()) {
+          impl_->slots[slot_index].state = Impl::SlotState::Filling;
         }
       }
     }
-    if (slot_index == impl_->slots.size()) {
-      if (impl_->options.metrics != nullptr) {
-        impl_->options.metrics->note_camera_backpressure();
+
+    if (slot_index < impl_->slots.size()) {
+      auto& bytes = impl_->slots[slot_index].bytes;
+      std::fill(bytes.begin(), bytes.end(), std::byte{0});
+      if (bgra_to_nv12(frame.bgra, frame.row_stride, frame.width, frame.height,
+                       bytes, impl_->format.y_stride)) {
+        bool queued = false;
+        {
+          std::lock_guard lock(impl_->mutex);
+          if (!impl_->stopping && impl_->healthy_state.load()) {
+            impl_->slots[slot_index].state = Impl::SlotState::Queued;
+            queued = true;
+          } else {
+            impl_->slots[slot_index].state = Impl::SlotState::Free;
+          }
+        }
+        if (queued) {
+          wrote_any = true;
+          if (impl_->options.metrics != nullptr) {
+            impl_->options.metrics->note_camera_driving_frame();
+            if (replacement) impl_->options.metrics->note_camera_queue_replacement();
+          }
+          impl_->condition.notify_one();
+        }
+      } else {
+        std::lock_guard lock(impl_->mutex);
+        impl_->slots[slot_index].state = Impl::SlotState::Free;
       }
-      return CameraSinkSubmit::Backpressured;
     }
-    impl_->slots[slot_index].state = Impl::SlotState::Filling;
   }
 
-  auto& bytes = impl_->slots[slot_index].bytes;
-  std::fill(bytes.begin(), bytes.end(), std::byte{0});
-  if (!bgra_to_nv12(frame.bgra, frame.row_stride, frame.width, frame.height,
-                    bytes, impl_->format.y_stride)) {
-    std::lock_guard lock(impl_->mutex);
-    impl_->slots[slot_index].state = Impl::SlotState::Free;
-    return CameraSinkSubmit::Failed;
-  }
-  {
-    std::lock_guard lock(impl_->mutex);
-    if (impl_->stopping || !impl_->healthy_state.load()) {
-      impl_->slots[slot_index].state = Impl::SlotState::Free;
-      if (impl_->options.metrics != nullptr) {
-        impl_->options.metrics->note_camera_backpressure();
-      }
-      return CameraSinkSubmit::Backpressured;
-    }
-    impl_->slots[slot_index].state = Impl::SlotState::Queued;
-  }
+  if (wrote_any) return CameraSinkSubmit::Accepted;
+
   if (impl_->options.metrics != nullptr) {
-    impl_->options.metrics->note_camera_driving_frame();
-    if (replacement) impl_->options.metrics->note_camera_queue_replacement();
+    impl_->options.metrics->note_camera_backpressure();
   }
-  impl_->condition.notify_one();
-  return CameraSinkSubmit::Accepted;
+  return CameraSinkSubmit::Backpressured;
+}
+
+auto LinuxCameraSink::submit_written(CameraFrameWriter writer, void* context,
+                                     std::uint64_t presentation_time_us) noexcept
+    -> CameraSinkWrite {
+  if (impl_ == nullptr || !available()) return CameraSinkWrite::Failed;
+
+  const std::uint64_t now_us = camera_clock_us();
+  const bool shm_demand = (impl_->shm_writer != nullptr && impl_->shm_writer->valid() &&
+                           impl_->shm_writer->has_demand(now_us));
+  const bool v4l2_demand = (impl_->initially_available && impl_->healthy_state.load());
+
+  if (!shm_demand && !v4l2_demand) {
+    return CameraSinkWrite::Backpressured;
+  }
+
+  if (shm_demand && v4l2_demand) {
+    struct DualContext {
+      CameraFrameWriter writer;
+      void* context;
+      LinuxCameraSink::Impl* impl;
+      std::uint64_t presentation_time_us;
+    } dual{writer, context, impl_.get(), presentation_time_us};
+
+    const auto copy_and_queue = [](void* ctx, std::span<std::byte> dest,
+                                   std::size_t stride) noexcept -> bool {
+      auto& d = *static_cast<DualContext*>(ctx);
+      if (!d.writer(d.context, dest, stride)) return false;
+
+      std::size_t slot_index = d.impl->slots.size();
+      bool replacement = false;
+      {
+        std::lock_guard lock(d.impl->mutex);
+        if (!d.impl->stopping && d.impl->healthy_state.load()) {
+          for (std::size_t index = 0; index < d.impl->slots.size(); ++index) {
+            if (d.impl->slots[index].state == Impl::SlotState::Queued) {
+              slot_index = index;
+              replacement = true;
+              break;
+            }
+          }
+          if (slot_index == d.impl->slots.size()) {
+            for (std::size_t index = 0; index < d.impl->slots.size(); ++index) {
+              if (d.impl->slots[index].state == Impl::SlotState::Free) {
+                slot_index = index;
+                break;
+              }
+            }
+          }
+          if (slot_index < d.impl->slots.size()) {
+            d.impl->slots[slot_index].state = Impl::SlotState::Filling;
+          }
+        }
+      }
+
+      if (slot_index < d.impl->slots.size()) {
+        auto& bytes = d.impl->slots[slot_index].bytes;
+        std::fill(bytes.begin(), bytes.end(), std::byte{0});
+        if (bgra_to_nv12(dest, stride, kCanvas.width, kCanvas.height,
+                         bytes, d.impl->format.y_stride)) {
+          bool queued = false;
+          {
+            std::lock_guard lock(d.impl->mutex);
+            if (!d.impl->stopping && d.impl->healthy_state.load()) {
+              d.impl->slots[slot_index].state = Impl::SlotState::Queued;
+              queued = true;
+            } else {
+              d.impl->slots[slot_index].state = Impl::SlotState::Free;
+            }
+          }
+          if (queued) {
+            if (d.impl->options.metrics != nullptr) {
+              d.impl->options.metrics->note_camera_driving_frame();
+              if (replacement) d.impl->options.metrics->note_camera_queue_replacement();
+            }
+            d.impl->condition.notify_one();
+          }
+        } else {
+          std::lock_guard lock(d.impl->mutex);
+          d.impl->slots[slot_index].state = Impl::SlotState::Free;
+        }
+      }
+      return true;
+    };
+
+    return impl_->shm_writer->write_with(copy_and_queue, &dual, presentation_time_us)
+               ? CameraSinkWrite::Accepted
+               : CameraSinkWrite::Failed;
+  }
+
+  if (shm_demand) {
+    return impl_->shm_writer->write_with(writer, context, presentation_time_us)
+               ? CameraSinkWrite::Accepted
+               : CameraSinkWrite::Failed;
+  }
+
+  return CameraSinkWrite::Unsupported;
 }
 
 auto LinuxCameraSink::healthy() const noexcept -> bool {

@@ -332,7 +332,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_include_directories(sync_linux_camera_sink PUBLIC native/include)
   target_link_libraries(sync_linux_camera_sink PUBLIC
     sync_linux_camera_device sync_linux_camera_idle_card sync_camera_nv12
-    sync_camera_relay_policy sync_protocol Threads::Threads)
+    sync_camera_relay_policy sync_camera_frame_ring sync_protocol Threads::Threads)
 
   add_executable(sync_linux_camera_sink_tests
     native/test/linux/camera_sink_test.cpp

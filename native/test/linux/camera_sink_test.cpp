@@ -1,5 +1,6 @@
 #include "../test_harness.hpp"
 
+#include <sync/camera/frame_ring.hpp>
 #include <sync/camera/nv12.hpp>
 #include <sync/daemon_metrics.hpp>
 #include <sync/platform/camera_identity.hpp>
@@ -14,16 +15,60 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fcntl.h>
 #include <mutex>
 #include <span>
 #include <string>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace {
 
 namespace camera = noisefactor::sync::camera;
+
+struct PosixShmReaderMapping {
+  int fd = -1;
+  void* view = nullptr;
+  std::size_t size = 0;
+  std::string path;
+
+  explicit PosixShmReaderMapping(std::string_view file_path) : path(file_path) {
+    size = camera::frame_ring_bytes();
+    fd = ::open(path.c_str(), O_RDWR);
+    if (fd >= 0) {
+      view = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      if (view == MAP_FAILED) {
+        view = nullptr;
+        ::close(fd);
+        fd = -1;
+      }
+    }
+  }
+
+  ~PosixShmReaderMapping() {
+    if (view != nullptr) ::munmap(view, size);
+    if (fd >= 0) ::close(fd);
+  }
+
+  [[nodiscard]] bool valid() const noexcept { return view != nullptr; }
+
+  [[nodiscard]] std::span<std::byte> mapping() noexcept {
+    return {static_cast<std::byte*>(view), size};
+  }
+
+  PosixShmReaderMapping(const PosixShmReaderMapping&) = delete;
+  PosixShmReaderMapping& operator=(const PosixShmReaderMapping&) = delete;
+};
+
+auto test_temp_path() -> std::string {
+  static std::atomic<std::uint64_t> counter{0};
+  const auto id = counter.fetch_add(1, std::memory_order_relaxed);
+  return "/tmp/sync_test_linux_camera_shm_" + std::to_string(::getpid()) + "_" +
+         std::to_string(id) + ".frames";
+}
 
 std::atomic<bool> wall_clock_enabled{true};
 
@@ -284,4 +329,271 @@ SYNC_TEST(linux_camera_unavailability_formats_errno_not_osstatus) {
       camera::CameraSinkUnavailableReason::DevicePermissionDenied, EACCES);
   SYNC_REQUIRE(text.find("errno 13") != std::string::npos);
   SYNC_REQUIRE(text.find("OSStatus") == std::string::npos);
+}
+
+SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consumer_remains_active) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  operations.hold_first = true;
+  wall_clock_enabled.store(false, std::memory_order_relaxed);
+  const auto size = static_cast<std::ptrdiff_t>(camera::nv12_size_bytes(
+      camera::kCanvas.width, camera::kCanvas.height, camera::kCanvas.width));
+  operations.scripted = {{-1, ENODEV}, {-1, ENODEV}, {size, 0}};
+  noisefactor::sync::DaemonMetrics metrics;
+  HealthObserver health;
+
+  camera::LinuxCameraSink sink({
+      .shm_path = shm_file,
+      .enable_shm = true,
+      .device_operations = &operations,
+      .metrics = &metrics,
+      .clock_ms = controlled_clock_ms,
+      .health_changed = HealthObserver::changed,
+      .health_context = &health,
+  });
+
+  SYNC_REQUIRE(sink.available());
+  SYNC_REQUIRE(sink.healthy());
+
+  PosixShmReaderMapping shm(shm_file);
+  SYNC_REQUIRE(shm.valid());
+  camera::FrameRingReader reader(shm.mapping());
+
+  // Mark demand from the SHM reader
+  reader.mark_demand(camera::camera_clock_us());
+
+  const auto frame1 = frame(std::byte{0x11});
+  const auto frame2 = frame(std::byte{0x22});
+  const auto frame3 = frame(std::byte{0x33});
+
+  // Submit frame 1: accepted by both SHM and queued to V4L2
+  SYNC_REQUIRE(sink.submit(sink_frame(frame1)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(operations.wait_for_first());
+
+  // Release V4L2 background thread to encounter ENODEV
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+  operations.release();
+
+  // Keep submitting frames while V4L2 is failing
+  reader.mark_demand(camera::camera_clock_us());
+  SYNC_REQUIRE(sink.submit(sink_frame(frame2)) == camera::CameraSinkSubmit::Accepted);
+  reader.mark_demand(camera::camera_clock_us());
+  SYNC_REQUIRE(sink.submit(sink_frame(frame3)) == camera::CameraSinkSubmit::Accepted);
+
+  // The SHM reader reads the latest frame despite V4L2 failure
+  const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
+  std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0x33});
+
+  // Wait for V4L2 to recover
+  SYNC_REQUIRE(health.wait_for_recovery());
+  SYNC_REQUIRE(sink.healthy());
+
+  // Submit frame 4: both consumers receive it
+  const auto frame4 = frame(std::byte{0x44});
+  reader.mark_demand(camera::camera_clock_us());
+  SYNC_REQUIRE(sink.submit(sink_frame(frame4)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0x44});
+
+  SYNC_REQUIRE(operations.open_calls >= 2);
+}
+
+SYNC_TEST(linux_camera_sink_survives_asymmetric_shm_disconnect_while_v4l2_consumer_remains_active) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+  noisefactor::sync::DaemonMetrics metrics;
+
+  camera::LinuxCameraSink sink({
+      .shm_path = shm_file,
+      .enable_shm = true,
+      .device_operations = &operations,
+      .metrics = &metrics,
+  });
+
+  SYNC_REQUIRE(sink.available());
+  SYNC_REQUIRE(sink.healthy());
+
+  PosixShmReaderMapping shm(shm_file);
+  SYNC_REQUIRE(shm.valid());
+  camera::FrameRingReader reader(shm.mapping());
+
+  // Assert demand initially
+  reader.mark_demand(camera::camera_clock_us());
+
+  const auto frame1 = frame(std::byte{0xaa});
+  SYNC_REQUIRE(sink.submit(sink_frame(frame1)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(operations.wait_for_writes(1));
+
+  const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
+  std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0xaa});
+
+  // Disconnect SHM consumer: set last_demand_us in ring header to 1 so demand expires
+  auto* header = reinterpret_cast<camera::FrameRingHeader*>(shm.mapping().data());
+  header->last_demand_us.store(1, std::memory_order_release);
+
+  // Submit frames with expired SHM consumer: V4L2 continues receiving frames at 60 Hz
+  const auto frame2 = frame(std::byte{0xbb});
+  const auto frame3 = frame(std::byte{0xcc});
+  SYNC_REQUIRE(sink.submit(sink_frame(frame2)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(sink.submit(sink_frame(frame3)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(operations.wait_for_writes(3));
+
+  // SHM consumer reconnects by reasserting demand
+  reader.mark_demand(camera::camera_clock_us());
+  const auto frame4 = frame(std::byte{0xdd});
+  SYNC_REQUIRE(sink.submit(sink_frame(frame4)) == camera::CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(operations.wait_for_writes(4));
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0xdd});
+}
+
+SYNC_TEST(linux_camera_sink_asymmetric_zero_copy_submit_written_survives_consumer_disconnect_and_reconnect) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+
+  camera::LinuxCameraSink sink({
+      .shm_path = shm_file,
+      .enable_shm = true,
+      .device_operations = &operations,
+  });
+
+  SYNC_REQUIRE(sink.available());
+
+  PosixShmReaderMapping shm(shm_file);
+  SYNC_REQUIRE(shm.valid());
+  camera::FrameRingReader reader(shm.mapping());
+
+  auto* header = reinterpret_cast<camera::FrameRingHeader*>(shm.mapping().data());
+
+  struct RenderCtx {
+    std::byte pattern{0};
+  };
+
+  const auto direct_writer = [](void* ctx, std::span<std::byte> dest, std::size_t) noexcept -> bool {
+    auto& r = *static_cast<RenderCtx*>(ctx);
+    std::fill(dest.begin(), dest.end(), r.pattern);
+    return true;
+  };
+
+  // Scenario A: When SHM has no demand and only V4L2 is active, submit_written returns Unsupported
+  header->last_demand_us.store(1, std::memory_order_release);
+  RenderCtx ctx{std::byte{0x10}};
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 100) ==
+               camera::CameraSinkWrite::Unsupported);
+
+  // Scenario B: Dual active (both SHM demand active and V4L2 healthy)
+  reader.mark_demand(camera::camera_clock_us());
+  ctx.pattern = std::byte{0x77};
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 200) ==
+               camera::CameraSinkWrite::Accepted);
+  SYNC_REQUIRE(operations.wait_for_writes(1));
+
+  const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
+  std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0x77});
+
+  // Scenario C: V4L2 disconnected (write failure / unhealthy), but SHM active
+  operations.hold_first = true;
+  wall_clock_enabled.store(false, std::memory_order_relaxed);
+  const auto size = static_cast<std::ptrdiff_t>(camera::nv12_size_bytes(
+      camera::kCanvas.width, camera::kCanvas.height, camera::kCanvas.width));
+  operations.scripted = {{-1, ENODEV}, {-1, ENODEV}, {size, 0}};
+
+  // Submit normal frame to trigger ENODEV on V4L2
+  const auto kick = frame(std::byte{0x99});
+  sink.submit(sink_frame(kick));
+  SYNC_REQUIRE(operations.wait_for_first());
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+  operations.release();
+
+  // Wait briefly for V4L2 health state to drop
+  for (int i = 0; i < 50 && sink.healthy(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  // Now V4L2 is unhealthy, but SHM is still active: submit_written writes directly to SHM
+  ctx.pattern = std::byte{0x88};
+  reader.mark_demand(camera::camera_clock_us());
+  SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 300) ==
+               camera::CameraSinkWrite::Accepted);
+  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(read_buf[0] == std::byte{0x88});
+}
+
+SYNC_TEST(linux_camera_concurrent_multi_reader_shm_and_v4l2_seqlock_consistency) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  wall_clock_enabled.store(true, std::memory_order_relaxed);
+
+  camera::LinuxCameraSink sink({
+      .shm_path = shm_file,
+      .enable_shm = true,
+      .device_operations = &operations,
+  });
+
+  SYNC_REQUIRE(sink.available());
+
+  PosixShmReaderMapping shm1(shm_file);
+  PosixShmReaderMapping shm2(shm_file);
+  PosixShmReaderMapping shm3(shm_file);
+  SYNC_REQUIRE(shm1.valid());
+  SYNC_REQUIRE(shm2.valid());
+  SYNC_REQUIRE(shm3.valid());
+
+  std::atomic<bool> producer_done{false};
+  std::atomic<std::size_t> r1_successes{0};
+  std::atomic<std::size_t> r2_successes{0};
+  std::atomic<std::size_t> r3_successes{0};
+  std::atomic<bool> consistency_violation{false};
+
+  const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
+
+  auto reader_worker = [&](PosixShmReaderMapping& mapping,
+                           std::atomic<std::size_t>& counter) {
+    camera::FrameRingReader reader(mapping.mapping());
+    std::vector<std::byte> buffer(stride * camera::kCanvas.height);
+
+    while (!producer_done.load(std::memory_order_relaxed)) {
+      reader.mark_demand(camera::camera_clock_us());
+      if (reader.read_latest(buffer, stride)) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+        // Verify buffer consistency across entire frame (no torn read)
+        const std::byte sample = buffer[0];
+        const std::byte mid = buffer[buffer.size() / 2];
+        const std::byte end = buffer[buffer.size() - 4];
+        if (sample != mid || sample != end) {
+          consistency_violation.store(true, std::memory_order_release);
+        }
+      }
+      std::this_thread::yield();
+    }
+  };
+
+  std::thread t1([&] { reader_worker(shm1, r1_successes); });
+  std::thread t2([&] { reader_worker(shm2, r2_successes); });
+  std::thread t3([&] { reader_worker(shm3, r3_successes); });
+
+  for (unsigned i = 1; i <= 60; ++i) {
+    const std::byte b = static_cast<std::byte>(i & 0x7f);
+    const auto f = frame(b);
+    sink.submit(sink_frame(f));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+
+  producer_done.store(true, std::memory_order_release);
+  t1.join();
+  t2.join();
+  t3.join();
+
+  SYNC_REQUIRE(!consistency_violation.load());
+  SYNC_REQUIRE(r1_successes.load() > 0);
+  SYNC_REQUIRE(r2_successes.load() > 0);
+  SYNC_REQUIRE(r3_successes.load() > 0);
 }

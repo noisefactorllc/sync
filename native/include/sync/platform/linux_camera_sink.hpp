@@ -14,6 +14,8 @@ class LinuxCameraSink final : public CameraSink {
  public:
   struct Options {
     std::string_view device_path{};
+    std::string_view shm_path{};
+    bool enable_shm = false;
     LinuxCameraDeviceOps* device_operations = nullptr;
     DaemonMetrics* metrics = nullptr;
     std::uint64_t (*clock_ms)() noexcept = nullptr;
@@ -37,6 +39,9 @@ class LinuxCameraSink final : public CameraSink {
   [[nodiscard]] auto has_capacity() const noexcept -> bool override;
   auto submit(const CameraSinkFrame& frame) noexcept
       -> CameraSinkSubmit override;
+  auto submit_written(CameraFrameWriter writer, void* context,
+                      std::uint64_t presentation_time_us) noexcept
+      -> CameraSinkWrite override;
   [[nodiscard]] auto healthy() const noexcept -> bool;
   [[nodiscard]] auto current_reason() const noexcept
       -> CameraSinkUnavailableReason;
