@@ -361,7 +361,7 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
   camera::FrameRingReader reader(shm.mapping());
 
   // Mark demand from the SHM reader
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
 
   const auto frame1 = frame(std::byte{0x11});
   const auto frame2 = frame(std::byte{0x22});
@@ -376,15 +376,16 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
   operations.release();
 
   // Keep submitting frames while V4L2 is failing
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit(sink_frame(frame2)) == camera::CameraSinkSubmit::Accepted);
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit(sink_frame(frame3)) == camera::CameraSinkSubmit::Accepted);
 
   // The SHM reader reads the latest frame despite V4L2 failure
   const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
   std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  std::uint64_t pts = 0;
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x33});
 
   // Wait for V4L2 to recover
@@ -393,9 +394,9 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
 
   // Submit frame 4: both consumers receive it
   const auto frame4 = frame(std::byte{0x44});
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit(sink_frame(frame4)) == camera::CameraSinkSubmit::Accepted);
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x44});
 
   SYNC_REQUIRE(operations.open_calls >= 2);
@@ -422,7 +423,7 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_shm_disconnect_while_v4l2_consum
   camera::FrameRingReader reader(shm.mapping());
 
   // Assert demand initially
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
 
   const auto frame1 = frame(std::byte{0xaa});
   SYNC_REQUIRE(sink.submit(sink_frame(frame1)) == camera::CameraSinkSubmit::Accepted);
@@ -430,7 +431,8 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_shm_disconnect_while_v4l2_consum
 
   const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
   std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  std::uint64_t pts = 0;
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0xaa});
 
   // Disconnect SHM consumer: set last_demand_us in ring header to 1 so demand expires
@@ -445,11 +447,11 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_shm_disconnect_while_v4l2_consum
   SYNC_REQUIRE(operations.wait_for_writes(3));
 
   // SHM consumer reconnects by reasserting demand
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   const auto frame4 = frame(std::byte{0xdd});
   SYNC_REQUIRE(sink.submit(sink_frame(frame4)) == camera::CameraSinkSubmit::Accepted);
   SYNC_REQUIRE(operations.wait_for_writes(4));
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0xdd});
 }
 
@@ -489,7 +491,7 @@ SYNC_TEST(linux_camera_sink_asymmetric_zero_copy_submit_written_survives_consume
                camera::CameraSinkWrite::Unsupported);
 
   // Scenario B: Dual active (both SHM demand active and V4L2 healthy)
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   ctx.pattern = std::byte{0x77};
   SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 200) ==
                camera::CameraSinkWrite::Accepted);
@@ -497,7 +499,8 @@ SYNC_TEST(linux_camera_sink_asymmetric_zero_copy_submit_written_survives_consume
 
   const std::size_t stride = static_cast<std::size_t>(camera::kCanvas.width) * 4U;
   std::vector<std::byte> read_buf(stride * camera::kCanvas.height);
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  std::uint64_t pts = 0;
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x77});
 
   // Scenario C: V4L2 disconnected (write failure / unhealthy), but SHM active
@@ -521,10 +524,10 @@ SYNC_TEST(linux_camera_sink_asymmetric_zero_copy_submit_written_survives_consume
 
   // Now V4L2 is unhealthy, but SHM is still active: submit_written writes directly to SHM
   ctx.pattern = std::byte{0x88};
-  reader.mark_demand(camera::camera_clock_us());
+  reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 300) ==
                camera::CameraSinkWrite::Accepted);
-  SYNC_REQUIRE(reader.read_latest(read_buf, stride));
+  SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x88});
 }
 
@@ -560,10 +563,11 @@ SYNC_TEST(linux_camera_concurrent_multi_reader_shm_and_v4l2_seqlock_consistency)
                            std::atomic<std::size_t>& counter) {
     camera::FrameRingReader reader(mapping.mapping());
     std::vector<std::byte> buffer(stride * camera::kCanvas.height);
+    std::uint64_t worker_pts = 0;
 
     while (!producer_done.load(std::memory_order_relaxed)) {
-      reader.mark_demand(camera::camera_clock_us());
-      if (reader.read_latest(buffer, stride)) {
+      reader.record_demand(camera::camera_clock_us());
+      if (reader.read(buffer, stride, worker_pts)) {
         counter.fetch_add(1, std::memory_order_relaxed);
         // Verify buffer consistency across entire frame (no torn read)
         const std::byte sample = buffer[0];
