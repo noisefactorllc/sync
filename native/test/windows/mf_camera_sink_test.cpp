@@ -78,10 +78,13 @@ struct FakeSource {
     return {static_cast<const std::byte*>(view), frame_ring_bytes()};
   }
 
-  // What the media source does on every RequestSample.
+  // What the media source does on every RequestSample, or what tests use
+  // to simulate stale demand timestamps without waiting for real time to elapse.
   void demand(std::uint64_t at_us) const {
-    FrameRingReader reader(mapping());
-    reader.record_demand(at_us);
+    if (view != nullptr) {
+      auto* header = static_cast<noisefactor::sync::camera::FrameRingHeader*>(view);
+      header->last_demand_us.store(at_us, std::memory_order_relaxed);
+    }
   }
 };
 
