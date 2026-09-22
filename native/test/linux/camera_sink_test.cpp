@@ -339,7 +339,7 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
   wall_clock_enabled.store(false, std::memory_order_relaxed);
   const auto size = static_cast<std::ptrdiff_t>(camera::nv12_size_bytes(
       camera::kCanvas.width, camera::kCanvas.height, camera::kCanvas.width));
-  operations.scripted = {{-1, ENODEV}, {-1, ENODEV}, {size, 0}};
+  operations.scripted = {{-1, ENODEV}, {size, 0}};
   noisefactor::sync::DaemonMetrics metrics;
   HealthObserver health;
 
@@ -374,8 +374,9 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
   // Release V4L2 background thread to encounter ENODEV
   wall_clock_enabled.store(true, std::memory_order_relaxed);
   operations.release();
+  SYNC_REQUIRE(operations.wait_for_writes(1));
 
-  // Keep submitting frames while V4L2 is failing
+  // While V4L2 encountered device loss, SHM consumer remains completely active and unblocked
   reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit(sink_frame(frame2)) == camera::CameraSinkSubmit::Accepted);
   reader.record_demand(camera::camera_clock_us());
@@ -398,6 +399,7 @@ SYNC_TEST(linux_camera_sink_survives_asymmetric_v4l2_disconnect_while_shm_consum
   SYNC_REQUIRE(sink.submit(sink_frame(frame4)) == camera::CameraSinkSubmit::Accepted);
   SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x44});
+  SYNC_REQUIRE(operations.wait_for_writes(2));
 
   SYNC_REQUIRE(operations.open_calls >= 2);
 }
@@ -503,26 +505,23 @@ SYNC_TEST(linux_camera_sink_asymmetric_zero_copy_submit_written_survives_consume
   SYNC_REQUIRE(reader.read(read_buf, stride, pts));
   SYNC_REQUIRE(read_buf[0] == std::byte{0x77});
 
-  // Scenario C: V4L2 disconnected (write failure / unhealthy), but SHM active
-  operations.hold_first = true;
-  wall_clock_enabled.store(false, std::memory_order_relaxed);
-  const auto size = static_cast<std::ptrdiff_t>(camera::nv12_size_bytes(
-      camera::kCanvas.width, camera::kCanvas.height, camera::kCanvas.width));
-  operations.scripted = {{-1, ENODEV}, {-1, ENODEV}, {size, 0}};
+  // Scenario C: V4L2 disconnected (write failure / device removed), but SHM active
+  operations.discoverable = false;
+  operations.scripted = {{-1, ENODEV}};
 
   // Submit normal frame to trigger ENODEV on V4L2
   const auto kick = frame(std::byte{0x99});
   sink.submit(sink_frame(kick));
-  SYNC_REQUIRE(operations.wait_for_first());
-  wall_clock_enabled.store(true, std::memory_order_relaxed);
-  operations.release();
+  SYNC_REQUIRE(operations.wait_for_writes(2));
 
-  // Wait briefly for V4L2 health state to drop
+  // Wait for V4L2 health state to drop
   for (int i = 0; i < 50 && sink.healthy(); ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
+  SYNC_REQUIRE(!sink.healthy());
 
-  // Now V4L2 is unhealthy, but SHM is still active: submit_written writes directly to SHM
+  // Now V4L2 is unhealthy and unrecoverable (discoverable=false), but SHM is still active:
+  // submit_written writes directly to SHM without needing NV12 conversion
   ctx.pattern = std::byte{0x88};
   reader.record_demand(camera::camera_clock_us());
   SYNC_REQUIRE(sink.submit_written(direct_writer, &ctx, 300) ==
