@@ -7,6 +7,10 @@
 #include <span>
 #include <string>
 
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
+
 #include <sync/platform/camera_identity.hpp>
 
 namespace noisefactor::sync::camera {
@@ -95,10 +99,6 @@ class FrameRingWriter {
   FrameRingHeader* header_ = nullptr;
   std::byte* payload_ = nullptr;
 };
-
-#if defined(__linux__)
-#include <sys/stat.h>
-#endif
 
 // POSIX shared memory / memory mapped file path.
 [[nodiscard]] inline auto posix_shm_path() -> std::string {

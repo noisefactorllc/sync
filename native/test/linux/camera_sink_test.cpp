@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
