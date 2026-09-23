@@ -44,8 +44,8 @@ constexpr std::size_t kMaximumControlMessageBytes = 16U * 1024U;
 constexpr std::size_t kMaximumDataMessageBytes = 64U * 1024U * 1024U + 64U;
 constexpr std::size_t kMaximumInboundDataPayloadBytes =
     128U * 1024U * 1024U;
-constexpr std::size_t kMaximumQueuedWriteBytes = 64U * 1024U;
-constexpr std::size_t kReadBufferBytes = 64U * 1024U;
+constexpr std::size_t kMaximumQueuedWriteBytes = 256U * 1024U;
+constexpr std::size_t kReadBufferBytes = 256U * 1024U;
 constexpr std::uint64_t kHttpHeaderDeadlineMs = 1000;
 constexpr std::uint64_t kControlHelloDeadlineMs = 1000;
 constexpr std::uint64_t kPairingRequestDeadlineMs = 1000;
@@ -555,6 +555,8 @@ class Server {
     connections_[slot] = connection;
     set_deadline(*connection, DeadlineKind::HttpHeader, kHttpHeaderDeadlineMs);
     uv_tcp_nodelay(&connection->handle, 1);
+    int rcv_buf = 4 * 1024 * 1024;
+    uv_recv_buffer_size(reinterpret_cast<uv_handle_t*>(&connection->handle), &rcv_buf);
     const int read_result = uv_read_start(
         reinterpret_cast<uv_stream_t*>(&connection->handle), allocate_read_buffer, on_read);
     if (read_result != 0) close_connection(*connection);

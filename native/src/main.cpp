@@ -9,6 +9,7 @@
 #include <sync/platform/ndi_publisher.hpp>
 
 #if defined(__APPLE__)
+#include <pthread/qos.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <sync/platform/camera_publisher.hpp>
 #include <sync/platform/cmio_camera_sink.hpp>
@@ -515,6 +516,9 @@ int run_production(nfsync::ServerOptions &options,
 
 int main(int argc, char** argv) {
   try {
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 #if defined(_WIN32)
     // The ready record and the management-command output are a machine-read
     // protocol, not human text. Windows' default text mode would rewrite every

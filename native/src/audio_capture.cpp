@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -33,21 +34,7 @@ void CaptureBuffer::push(std::span<const float> samples) noexcept {
   if (samples.size() % channels_ != 0 || samples.empty()) return;
   const auto frames = samples.size() / channels_;
   const auto start = next_frame_.fetch_add(frames, std::memory_order_relaxed);
-  std::unique_lock lock(mutex_, std::try_to_lock);
-  if (!lock.owns_lock()) {
-    for (int retry = 0; retry < 100; ++retry) {
-#if defined(__aarch64__) || defined(__arm64__)
-      asm volatile("isb" ::: "memory");
-#elif defined(__x86_64__) || defined(_M_X64)
-      _mm_pause();
-#endif
-      if (lock.try_lock()) break;
-    }
-  }
-  if (!lock.owns_lock()) {
-    dropped_frames_.fetch_add(frames, std::memory_order_relaxed);
-    return;
-  }
+  std::unique_lock lock(mutex_);
   if (first_frame_ + size_ != start) {
     dropped_frames_.fetch_add(size_, std::memory_order_relaxed);
     size_ = 0;
