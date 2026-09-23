@@ -72,14 +72,14 @@ Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.
 
 $capturePath = Join-Path $ArtifactDir "capture.json"
 $qualified = $false
-$lastExitCode = 1
+$probeExitCode = 1
 for ($attempt = 1; $attempt -le 5; $attempt++) {
   $captureOutput = & $probe --source-id $source.id
-  $lastExitCode = $LASTEXITCODE
+  $probeExitCode = $LASTEXITCODE
   if ($captureOutput) {
     $captureOutput | Out-File -FilePath $capturePath -Encoding utf8
   }
-  if ($lastExitCode -eq 0 -and (Test-Path $capturePath)) {
+  if ($probeExitCode -eq 0 -and (Test-Path $capturePath)) {
     try {
       $capture = Get-Content $capturePath -Raw | ConvertFrom-Json
       if ($capture.qualified) {
@@ -90,15 +90,17 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
       Write-Warning "Attempt ${attempt}: failed to parse capture output: $_"
     }
   }
-  Write-Output "WASAPI capture qualification attempt $attempt/5 produced no frames; retrying in 2s..."
-  Start-Sleep -Seconds 2
+  if ($attempt -lt 5) {
+    Write-Output "WASAPI capture qualification attempt $attempt/5 did not qualify; retrying in 2s..."
+    Start-Sleep -Seconds 2
+  }
 }
 
 if (-not $qualified) {
-  Write-Error "sync_audio_native_probe failed with exit code $lastExitCode"
+  Write-Output "sync_audio_native_probe failed to qualify (exit code $probeExitCode)"
   if (Test-Path $capturePath) {
     Get-Content $capturePath | ForEach-Object { Write-Output "PROBE: $_" }
   }
-  throw "WASAPI audio capture qualification failed with exit code $lastExitCode"
+  throw "WASAPI audio capture qualification failed with exit code $probeExitCode"
 }
 Write-Output "WASAPI audio source $($source.id) successfully qualified"
