@@ -198,7 +198,14 @@ private:
 };
 
 bool test_fixtures_enabled() noexcept {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
   const auto *env = std::getenv("SYNC_AUDIO_TEST_FIXTURE");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
   return env != nullptr && std::string_view(env) != "0" && !std::string_view(env).empty();
 }
 
