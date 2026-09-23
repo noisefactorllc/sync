@@ -66,28 +66,39 @@ if (-not $inventory -or -not $inventory.sources -or $inventory.sources.Count -eq
   throw "WASAPI audio inventory returned 0 sources; virtual audio loopback driver is required"
 }
 
-# 4. Qualify real capture from the first enumerated source.
+# 4. Qualify real capture from the first enumerated source with retry for endpoint warmup.
 $source = $inventory.sources[0]
 Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
 
 $capturePath = Join-Path $ArtifactDir "capture.json"
-$captureOutput = & $probe --source-id $source.id
-$exitCode = $LASTEXITCODE
-
-if ($captureOutput) {
-  $captureOutput | Out-File -FilePath $capturePath -Encoding utf8
+$qualified = $false
+$lastExitCode = 1
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+  $captureOutput = & $probe --source-id $source.id
+  $lastExitCode = $LASTEXITCODE
+  if ($captureOutput) {
+    $captureOutput | Out-File -FilePath $capturePath -Encoding utf8
+  }
+  if ($lastExitCode -eq 0 -and (Test-Path $capturePath)) {
+    try {
+      $capture = Get-Content $capturePath -Raw | ConvertFrom-Json
+      if ($capture.qualified) {
+        $qualified = $true
+        break
+      }
+    } catch {
+      Write-Warning "Attempt ${attempt}: failed to parse capture output: $_"
+    }
+  }
+  Write-Output "WASAPI capture qualification attempt $attempt/5 produced no frames; retrying in 2s..."
+  Start-Sleep -Seconds 2
 }
 
-if ($exitCode -ne 0) {
-  Write-Error "sync_audio_native_probe failed with exit code $exitCode"
+if (-not $qualified) {
+  Write-Error "sync_audio_native_probe failed with exit code $lastExitCode"
   if (Test-Path $capturePath) {
     Get-Content $capturePath | ForEach-Object { Write-Output "PROBE: $_" }
   }
-  throw "WASAPI audio capture qualification failed with exit code $exitCode"
-}
-
-$capture = Get-Content $capturePath -Raw | ConvertFrom-Json
-if (-not $capture.qualified) {
-  throw "WASAPI audio source $($source.id) failed qualification: $($capture | ConvertTo-Json -Compress)"
+  throw "WASAPI audio capture qualification failed with exit code $lastExitCode"
 }
 Write-Output "WASAPI audio source $($source.id) successfully qualified"
