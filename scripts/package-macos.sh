@@ -43,7 +43,7 @@ fi
 
 syphon_framework="${5:-}"
 dylib_search_path="${6:-}"
-for command in ditto dylibbundler rsvg-convert sips iconutil; do
+for command in ditto dylibbundler install_name_tool rsvg-convert sips iconutil; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "package-macos: missing required command: $command" >&2
     exit 1
@@ -110,6 +110,29 @@ for executable in "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd" \
     dylibbundler_arguments+=(-s "$dylib_search_path")
   fi
   printf 'quit\n' | dylibbundler "${dylibbundler_arguments[@]}"
+done
+
+# dylibbundler copies Homebrew libraries but does not consistently rewrite
+# syncd's load commands. Resolve these two direct dependencies to the copied
+# regular files before bundle verification and signing.
+for library in libuv libcrypto; do
+  bundled_library="$(find "$bundle/Contents/Frameworks" -maxdepth 1 -type f \
+    -name "$library*.dylib" -print -quit)"
+  if [[ -z "$bundled_library" ]]; then
+    echo "package-macos: missing bundled $library" >&2
+    exit 1
+  fi
+  expected_dependency="@executable_path/../Frameworks/$(basename "$bundled_library")"
+  while IFS= read -r dependency; do
+    case "$(basename "$dependency")" in
+      "$library"*.dylib)
+        if [[ "$dependency" != "$expected_dependency" ]]; then
+          install_name_tool -change "$dependency" "$expected_dependency" \
+            "$bundle/Contents/MacOS/syncd"
+        fi
+        ;;
+    esac
+  done < <(otool -L "$bundle/Contents/MacOS/syncd" | awk 'NR > 1 { print $1 }')
 done
 
 "$source_dir/scripts/verify-macos-bundle.sh" "$bundle" "$version"

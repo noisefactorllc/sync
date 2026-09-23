@@ -36,7 +36,7 @@ public:
         wrong_thread_reads_(wrong_thread_reads), wrong_thread_closes_(wrong_thread_closes),
         max_reads_(max_reads), gate_path_(std::move(gate_path)), pattern_(pattern),
         owner_thread_(std::this_thread::get_id()), buffer_(48000, channels, 16384),
-        producer_([this](std::stop_token stop) {
+        producer_([this] {
           std::vector<float> samples(240 * channels_);
           auto fill_samples = [this, &samples](std::uint64_t frame_offset) {
             if (pattern_ == WaveformPattern::LinearRamp) {
@@ -66,7 +66,7 @@ public:
           buffer_.push(samples);
           total_frames += 240;
           auto next_time = std::chrono::steady_clock::now();
-          while (!stop.stop_requested()) {
+          while (!stop_requested_.load(std::memory_order_relaxed)) {
             next_time += std::chrono::milliseconds(5);
             std::this_thread::sleep_until(next_time);
             fill_samples(total_frames);
@@ -76,7 +76,7 @@ public:
         }) { ++active_; }
   ~TestCapture() override {
     if (std::this_thread::get_id() != owner_thread_) ++wrong_thread_closes_;
-    producer_.request_stop();
+    stop_requested_.store(true, std::memory_order_relaxed);
     producer_.join();
     --active_;
   }
@@ -101,7 +101,8 @@ private:
   WaveformPattern pattern_{WaveformPattern::LinearRamp};
   std::thread::id owner_thread_;
   sync_audio::CaptureBuffer buffer_;
-  std::jthread producer_;
+  std::atomic<bool> stop_requested_{false};
+  std::thread producer_;
 };
 
 class TestBackend final : public sync_audio::InputBackend {

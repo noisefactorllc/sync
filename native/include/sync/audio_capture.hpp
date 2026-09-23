@@ -22,11 +22,11 @@ struct Packet {
   std::vector<float> samples;
 };
 
-// The device callback never waits, allocates, or retains an unbounded backlog.
+// The device callback retains a bounded backlog for temporary reader stalls.
 class CaptureBuffer {
 public:
   CaptureBuffer(unsigned sample_rate, unsigned channels,
-                std::size_t capacity_frames = 4096);
+                std::size_t capacity_frames = 65536);
   void push(std::span<const float> samples) noexcept;
   Packet read();
 private:

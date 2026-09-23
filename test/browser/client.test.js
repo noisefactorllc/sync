@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeFrameHeaderV1 } from '../../browser/protocol.js';
+import { ALPHA_MODE, COLOR_SPACE, decodeFrameHeaderV1, encodeFrameV1, PIXEL_FORMAT } from '../../browser/protocol.js';
 
 import {
   SYNC_DEFAULT_ENDPOINT,
@@ -176,6 +176,99 @@ class ExportQueue {
     this.closeOptions.push(options);
   }
 }
+
+test('NV12 stream sender writes packed frames with browser stream backpressure', async (t) => {
+  const writes = [];
+  class FakeWebSocketStream {
+    constructor(url, { protocols }) {
+      assert.equal(url, `${ENDPOINT.replace('http', 'ws')}/senders/sender_1`);
+      this.opened = Promise.resolve({
+        protocol: protocols[0],
+        writable: new WritableStream({ write: async (frame) => {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          writes.push(new Uint8Array(frame).slice());
+        } }),
+      });
+      this.closed = new Promise(resolve => { this.finish = resolve; });
+    }
+    close() { this.finish({ closeCode: 1000, reason: '' }); }
+  }
+  scriptedControl({ onControl(message, socket) {
+    if (message.type === 'getStats') {
+      socket.message('{"type":"stats","id":"sender_1","accepted":1,"dropped":0,' +
+        '"rejected":0,"failed":0,"lastSequence":1,"lastPresentationTimeUs":1000,"checksum":0}');
+    }
+  } });
+  const bridge = client({ WebSocketStream: FakeWebSocketStream });
+  t.after(() => bridge.close());
+  const sender = await bridge.createNv12StreamSender('NV12 video');
+  const frame = encodeFrameV1({ width: 2, height: 2, rowStride: 2, sequence: 1,
+    presentationTimeUs: 1000, pixelFormat: PIXEL_FORMAT.NV12,
+    colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE },
+  new Uint8Array([16, 235, 16, 235, 128, 128]));
+  const pendingWrite = sender.writeFrame(frame);
+  new Uint8Array(frame)[64] = 99;
+  await pendingWrite;
+  assert.equal(writes.length, 1);
+  assert.equal(decodeFrameHeaderV1(writes[0]).pixelFormat, PIXEL_FORMAT.NV12);
+  assert.equal(writes[0][64], 16);
+  const rgba = encodeFrameV1({ width: 2, height: 2, rowStride: 8, sequence: 2,
+    presentationTimeUs: 2000, pixelFormat: PIXEL_FORMAT.RGBA8_UNORM,
+    colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE }, new Uint8Array(16));
+  await assert.rejects(sender.writeFrame(rgba), SyncConfigurationError);
+  assert.equal(writes.length, 1);
+  assert.equal((await sender.getStats()).accepted, 1);
+  sender.close();
+  await sender.closed;
+  await assert.rejects(sender.writeFrame(frame), SyncLifecycleError);
+});
+
+test('H.264 stream sender writes independent compressed access units', async (t) => {
+  const writes = [];
+  const inputBuffers = [];
+  class FakeWebSocketStream {
+    constructor(url, { protocols }) {
+      assert.equal(url, `${ENDPOINT.replace('http', 'ws')}/senders/sender_1`);
+      this.opened = Promise.resolve({
+        protocol: protocols[0],
+        writable: new WritableStream({ write: async frame => {
+          inputBuffers.push(frame.buffer);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          writes.push(new Uint8Array(frame).slice());
+        } }),
+      });
+      this.closed = new Promise(resolve => { this.finish = resolve; });
+    }
+    close() { this.finish({ closeCode: 1000, reason: '' }); }
+  }
+  scriptedControl();
+  const bridge = client({ WebSocketStream: FakeWebSocketStream });
+  t.after(() => bridge.close());
+  const sender = await bridge.createH264StreamSender('H.264 video');
+  const frame = encodeFrameV1({ width: 2, height: 2, rowStride: 0, sequence: 1,
+    presentationTimeUs: 1000, pixelFormat: PIXEL_FORMAT.H264_ANNEXB,
+    colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE },
+  new Uint8Array([0, 0, 0, 1, 0x65]));
+  const pending = sender.writeFrame(frame);
+  new Uint8Array(frame)[68] = 0;
+  await pending;
+  assert.equal(writes.length, 1);
+  assert.equal(decodeFrameHeaderV1(writes[0]).pixelFormat, PIXEL_FORMAT.H264_ANNEXB);
+  assert.equal(writes[0][68], 0x65);
+  const ownedFrame = encodeFrameV1({ width: 2, height: 2, rowStride: 0, sequence: 2,
+    presentationTimeUs: 2000, pixelFormat: PIXEL_FORMAT.H264_ANNEXB,
+    colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE },
+  new Uint8Array([0, 0, 0, 1, 0x41]));
+  await sender.writeFrame(ownedFrame, { copy: false });
+  assert.equal(inputBuffers[1], ownedFrame);
+  const nv12 = encodeFrameV1({ width: 2, height: 2, rowStride: 2, sequence: 2,
+    presentationTimeUs: 2000, pixelFormat: PIXEL_FORMAT.NV12,
+    colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE },
+  new Uint8Array(6));
+  await assert.rejects(sender.writeFrame(nv12), SyncConfigurationError);
+  sender.close();
+  await sender.closed;
+});
 
 test('sender statistics use the control queue and preserve uint64 checksums', async (t) => {
   const commands = [];

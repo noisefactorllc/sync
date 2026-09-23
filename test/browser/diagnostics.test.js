@@ -20,7 +20,7 @@ test('diagnostics retain transport stages and omit credentials and page data', a
   });
   assert.equal(snapshot.local.sent, 6);
   assert.equal(snapshot.native.accepted, 4);
-  assert.equal(snapshot.sdkVersion, '0.3.0');
+  assert.equal(snapshot.sdkVersion, '0.3.3');
   assert.equal(snapshot.daemonVersion, '0.2.56');
   assert.equal(snapshot.error, 'SYNC_SENDER_LOST');
   assert.equal(JSON.stringify(snapshot).includes(secret), false);

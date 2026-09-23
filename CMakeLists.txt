@@ -60,6 +60,11 @@ FetchContent_Declare(rtaudio
 )
 FetchContent_MakeAvailable(rtaudio)
 if(APPLE)
+  if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(SYNC_MACOS_MINIMUM_SYSTEM_VERSION "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+  else()
+    set(SYNC_MACOS_MINIMUM_SYSTEM_VERSION "13.0")
+  endif()
   # RtAudio 6.0.1 checks the output listener flag while closing an input stream,
   # leaving its disconnect callback registered after the capture is destroyed.
   # Compile a corrected copy without modifying a shared FetchContent source tree.
@@ -125,6 +130,7 @@ add_library(sync_protocol
   native/src/control.cpp
   native/src/daemon_metrics.cpp
   native/src/frame_receiver.cpp
+  native/src/h264_decoder.cpp
   native/src/origin.cpp
   native/src/pairing.cpp
   native/src/authority_worker.cpp
@@ -142,6 +148,16 @@ target_compile_definitions(sync_protocol PUBLIC
   SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
 )
 target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads)
+if(APPLE)
+  find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+  find_library(CORE_FOUNDATION_PROTOCOL_FRAMEWORK CoreFoundation REQUIRED)
+  find_library(CORE_MEDIA_FRAMEWORK CoreMedia REQUIRED)
+  find_library(CORE_VIDEO_FRAMEWORK CoreVideo REQUIRED)
+  find_library(VIDEO_TOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+  target_link_libraries(sync_protocol PRIVATE
+    ${ACCELERATE_FRAMEWORK} ${CORE_FOUNDATION_PROTOCOL_FRAMEWORK} ${CORE_MEDIA_FRAMEWORK}
+    ${CORE_VIDEO_FRAMEWORK} ${VIDEO_TOOLBOX_FRAMEWORK})
+endif()
 if(WIN32)
   # Advapi32 supplies the process-token and DACL calls the pairing store's
   # owner-only permissions are built from. Randomness already comes from
@@ -183,6 +199,7 @@ target_link_libraries(syncd PRIVATE sync_cli sync_ndi_publisher ${SYNC_LIBUV_TAR
 
 enable_testing()
 add_executable(sync_audio_test_server native/test/audio_test_server.cpp native/src/server.cpp)
+target_compile_features(sync_audio_test_server PRIVATE cxx_std_20)
 target_link_libraries(sync_audio_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
 add_test(NAME sync_protocol_tests COMMAND sync_protocol_tests)
 
@@ -782,6 +799,7 @@ if(APPLE)
   add_test(NAME sync_syphon_consumer_tests COMMAND sync_syphon_consumer_tests)
 
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+  target_link_libraries(sync_protocol PRIVATE ${ACCELERATE_FRAMEWORK})
 
   # sync_camera_fitter is declared above, next to the rest of the portable
   # camera core; on Apple its source is the vImage .mm, which needs ARC and

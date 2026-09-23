@@ -88,6 +88,26 @@ SYNC_TEST(audio_capture_discards_oldest_frames_at_its_fixed_capacity) {
   SYNC_REQUIRE((packet.samples == std::vector<float>{2, 12, 3, 13, 4, 14}));
 }
 
+SYNC_TEST(audio_capture_default_capacity_survives_a_one_second_reader_stall_at_32_channels) {
+  audio::CaptureBuffer input(44100, 32);
+  std::array<float, 256 * 32> samples{};
+  for (std::size_t batch = 0; batch < 200; ++batch) {
+    for (std::size_t frame = 0; frame < 256; ++frame)
+      for (std::size_t channel = 0; channel < 32; ++channel)
+        samples[frame * 32 + channel] = static_cast<float>(batch * 256 + frame);
+    input.push(samples);
+  }
+  std::size_t received = 0;
+  for (;;) {
+    const auto packet = input.read();
+    SYNC_REQUIRE(packet.dropped_frames == 0);
+    if (packet.samples.empty()) break;
+    SYNC_REQUIRE(packet.first_frame == received);
+    received += packet.samples.size() / 32;
+  }
+  SYNC_REQUIRE(received == 200 * 256);
+}
+
 SYNC_TEST(audio_capture_bounds_oversized_callbacks_and_sanitizes_nonfinite_samples) {
   audio::CaptureBuffer input(48000, 1, 2);
   input.push(std::array<float, 4>{1, 2, -0.5f, std::numeric_limits<float>::quiet_NaN()});

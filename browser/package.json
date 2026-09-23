@@ -1,6 +1,6 @@
 {
   "name": "@noisefactor/sync",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "description": "Publish browser video and receive native multichannel audio through Sync",
   "type": "module",
   "license": "MIT",

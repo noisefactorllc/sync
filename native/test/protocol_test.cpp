@@ -80,6 +80,57 @@ SYNC_TEST(decodes_the_browser_generated_golden_frame_without_copying_payload) {
   }
 }
 
+SYNC_TEST(decodes_a_packed_nv12_frame_without_copying_payload) {
+  auto frame = load_golden_frame();
+  write_u16(frame, 12, 2);
+  write_u16(frame, 16, 1);
+  write_u32(frame, 28, 2);
+  write_u32(frame, 32, 6);
+  frame.resize(kHeaderBytes + 6);
+  const std::array<std::byte, 6> pixels = {
+      std::byte{16}, std::byte{235}, std::byte{81},
+      std::byte{145}, std::byte{128}, std::byte{128},
+  };
+  for (std::size_t index = 0; index < pixels.size(); ++index) {
+    frame[kHeaderBytes + index] = pixels[index];
+  }
+
+  const auto decoded = decode_frame(frame);
+  SYNC_REQUIRE(decoded.ok());
+  SYNC_REQUIRE(decoded.frame->pixel_format == 2);
+  SYNC_REQUIRE(decoded.frame->row_stride == 2);
+  SYNC_REQUIRE(decoded.frame->payload_bytes == 6);
+  SYNC_REQUIRE(decoded.frame->payload.data() == frame.data() + kHeaderBytes);
+}
+
+SYNC_TEST(decodes_a_bounded_h264_annexb_access_unit) {
+  auto frame = load_golden_frame();
+  write_u16(frame, 12, 3);
+  write_u16(frame, 16, 1);
+  write_u32(frame, 28, 0);
+  write_u32(frame, 32, 5);
+  frame.resize(kHeaderBytes + 5);
+  const std::array<std::byte, 5> nal = {
+      std::byte{0}, std::byte{0}, std::byte{0}, std::byte{1}, std::byte{0x65}};
+  for (std::size_t index = 0; index < nal.size(); ++index) frame[kHeaderBytes + index] = nal[index];
+
+  const auto decoded = decode_frame(frame);
+  SYNC_REQUIRE(decoded.ok());
+  SYNC_REQUIRE(decoded.frame->pixel_format == 3);
+  SYNC_REQUIRE(decoded.frame->row_stride == 0);
+  SYNC_REQUIRE(decoded.frame->payload_bytes == 5);
+  SYNC_REQUIRE(decoded.frame->payload.data() == frame.data() + kHeaderBytes);
+
+  write_u32(frame, 28, 2);
+  require_error(frame, DecodeError::InvalidCompressedStride);
+  write_u32(frame, 28, 0);
+  write_u32(frame, 32, 0);
+  frame.resize(kHeaderBytes);
+  require_error(frame, DecodeError::PayloadSizeMismatch);
+  write_u32(frame, 32, 5);
+  require_error(frame, DecodeError::FrameSizeMismatch);
+}
+
 SYNC_TEST(rejects_a_frame_shorter_than_the_header) {
   std::vector<std::byte> frame(kHeaderBytes - 1);
   require_error(frame, DecodeError::InputTooShort);
@@ -115,7 +166,7 @@ SYNC_TEST(rejects_absent_or_unknown_flags) {
 
 SYNC_TEST(rejects_unknown_enums) {
   auto pixel_format = load_golden_frame();
-  write_u16(pixel_format, 12, 2);
+  write_u16(pixel_format, 12, 4);
   require_error(pixel_format, DecodeError::UnsupportedPixelFormat);
 
   auto color_space = load_golden_frame();

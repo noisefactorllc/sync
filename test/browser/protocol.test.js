@@ -72,6 +72,51 @@ test('round-trips the v1 golden frame metadata and payload contract', () => {
   });
 });
 
+test('frames packed 2 by 2 NV12 video with its six-byte payload', () => {
+  const nv12 = new Uint8Array([16, 235, 81, 145, 128, 128]);
+  const fields = {
+    ...metadata,
+    rowStride: 2,
+    pixelFormat: PIXEL_FORMAT.NV12,
+    alphaMode: ALPHA_MODE.OPAQUE,
+  };
+  const encoded = encodeFrameV1(fields, nv12);
+
+  assert.equal(encoded.byteLength, 70);
+  assert.deepEqual([...new Uint8Array(encoded, 64)], [...nv12]);
+  assert.deepEqual(decodeFrameHeaderV1(encoded), {
+    version: 1,
+    headerBytes: 64,
+    flags: 1,
+    pixelFormat: PIXEL_FORMAT.NV12,
+    colorSpace: COLOR_SPACE.SRGB,
+    alphaMode: ALPHA_MODE.OPAQUE,
+    width: 2,
+    height: 2,
+    rowStride: 2,
+    payloadBytes: 6,
+    sequence: 4294967301,
+    presentationTimeUs: 1723305600123456,
+  });
+});
+
+test('frames bounded H.264 Annex B access units without a raw row stride', () => {
+  const accessUnit = new Uint8Array([0, 0, 0, 1, 0x65]);
+  const fields = {
+    ...metadata,
+    rowStride: 0,
+    pixelFormat: PIXEL_FORMAT.H264_ANNEXB,
+    alphaMode: ALPHA_MODE.OPAQUE,
+  };
+  const frame = encodeFrameV1(fields, accessUnit);
+  assert.equal(frame.byteLength, 69);
+  assert.deepEqual([...new Uint8Array(frame, 64)], [...accessUnit]);
+  assert.equal(decodeFrameHeaderV1(frame).payloadBytes, accessUnit.length);
+  assert.equal(decodeFrameHeaderV1(frame).rowStride, 0);
+  assert.throws(() => encodeFrameV1({ ...fields, rowStride: 2 }, accessUnit), /stride/i);
+  assert.throws(() => encodeFrameV1(fields, new Uint8Array(0)), /payload/i);
+});
+
 test('rejects unsupported metadata and incorrect payload size before framing', () => {
   assert.throws(() => encodeFrameV1({ ...metadata, pixelFormat: 99 }, payload), /pixel format/i);
   assert.throws(() => encodeFrameV1({ ...metadata, colorSpace: 99 }, payload), /color space/i);
@@ -137,4 +182,3 @@ test('rejects a provided buffer that is too small or not an ArrayBuffer', () => 
   assert.throws(() => encodeFrameV1(metadata, payload, new Uint8Array(96)), TypeError);
   assert.throws(() => encodeFrameV1(metadata, payload, {}), TypeError);
 });
-

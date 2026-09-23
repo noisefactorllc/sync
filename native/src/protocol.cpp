@@ -70,15 +70,21 @@ DecodeResult decode_frame(std::span<const std::byte> input, Limits limits) noexc
   }
 
   const std::uint16_t pixel_format = read_u16_le(input, 12);
-  if (pixel_format != 1) {
+  if (pixel_format != 1 && pixel_format != 2 && pixel_format != 3) {
     return failure(DecodeError::UnsupportedPixelFormat);
   }
   const std::uint16_t color_space = read_u16_le(input, 14);
   if (color_space != 1 && color_space != 2) {
     return failure(DecodeError::UnsupportedColorSpace);
   }
+  if (pixel_format == 3 && color_space != 1) {
+    return failure(DecodeError::UnsupportedColorSpace);
+  }
   const std::uint16_t alpha_mode = read_u16_le(input, 16);
   if (alpha_mode != 1 && alpha_mode != 2 && alpha_mode != 3) {
+    return failure(DecodeError::UnsupportedAlphaMode);
+  }
+  if ((pixel_format == 2 || pixel_format == 3) && alpha_mode != 1) {
     return failure(DecodeError::UnsupportedAlphaMode);
   }
   if (read_u16_le(input, 18) != 0) {
@@ -103,19 +109,34 @@ DecodeResult decode_frame(std::span<const std::byte> input, Limits limits) noexc
   if (height > limits.max_height) {
     return failure(DecodeError::HeightLimitExceeded);
   }
-  if (multiplication_overflows_u32(width, 4)) {
-    return failure(DecodeError::ArithmeticOverflow);
+  if ((pixel_format == 2 && ((width | height | row_stride) & 1U) != 0) ||
+      (pixel_format == 3 && ((width | height) & 1U) != 0)) {
+    return failure(DecodeError::InvalidSubsampledDimensions);
   }
-  const std::uint32_t minimum_stride = width * 4U;
-  if (row_stride < minimum_stride) {
-    return failure(DecodeError::StrideTooSmall);
-  }
-  if (multiplication_overflows_u32(row_stride, height)) {
-    return failure(DecodeError::ArithmeticOverflow);
-  }
-  const std::uint32_t expected_payload_bytes = row_stride * height;
-  if (payload_bytes != expected_payload_bytes) {
-    return failure(DecodeError::PayloadSizeMismatch);
+  if (pixel_format == 3) {
+    if (row_stride != 0) return failure(DecodeError::InvalidCompressedStride);
+    if (payload_bytes == 0) return failure(DecodeError::PayloadSizeMismatch);
+    if (payload_bytes > 8U * 1024U * 1024U) {
+      return failure(DecodeError::PayloadLimitExceeded);
+    }
+  } else {
+    if (pixel_format == 1 && multiplication_overflows_u32(width, 4)) {
+      return failure(DecodeError::ArithmeticOverflow);
+    }
+    const std::uint32_t minimum_stride = pixel_format == 1 ? width * 4U : width;
+    if (row_stride < minimum_stride) {
+      return failure(DecodeError::StrideTooSmall);
+    }
+    const std::uint64_t plane_rows = pixel_format == 1
+        ? static_cast<std::uint64_t>(height)
+        : static_cast<std::uint64_t>(height) + height / 2U;
+    const std::uint64_t payload_size = static_cast<std::uint64_t>(row_stride) * plane_rows;
+    if (payload_size > std::numeric_limits<std::uint32_t>::max()) {
+      return failure(DecodeError::ArithmeticOverflow);
+    }
+    if (payload_bytes != static_cast<std::uint32_t>(payload_size)) {
+      return failure(DecodeError::PayloadSizeMismatch);
+    }
   }
   if (payload_bytes > limits.max_payload_bytes) {
     return failure(DecodeError::PayloadLimitExceeded);

@@ -20,6 +20,8 @@ enum class DecodeError {
   UnsupportedAlphaMode,
   NonZeroReserved,
   ZeroDimensions,
+  InvalidSubsampledDimensions,
+  InvalidCompressedStride,
   StrideTooSmall,
   ArithmeticOverflow,
   PayloadSizeMismatch,

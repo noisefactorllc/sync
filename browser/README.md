@@ -4,7 +4,7 @@
 The default endpoint is `http://127.0.0.1:53979`.
 You can supply an explicit IPv4 or IPv6 loopback endpoint for development.
 
-The SDK version is `@noisefactor/sync` 0.3.0.
+The SDK version is `@noisefactor/sync` 0.3.3.
 The local installation procedures do not publish the package to npm.
 Read the [repository developer guide](https://github.com/noisefactorllc/sync/blob/main/docs/developers.md) for tarball and vendored-module procedures.
 The SDK does not install the native companion.
@@ -113,6 +113,17 @@ They do not convert color spaces, premultiply alpha, or remove premultiplication
 Set the descriptor to match the bytes that your renderer produces.
 
 See the [repository examples](https://github.com/noisefactorllc/sync/tree/main/examples) for Canvas 2D, WebGL2, and WebGPU source code.
+
+On macOS, `createH264StreamSender(name)` sends one WebCodecs H.264 Annex B
+access unit per protocol frame. Set `PIXEL_FORMAT.H264_ANNEXB`, `rowStride: 0`,
+`COLOR_SPACE.SRGB`, and `ALPHA_MODE.OPAQUE` in `encodeFrameV1()`.
+Then await `sender.writeFrame(frame)`. Configure `VideoEncoder` with
+`avc: { format: 'annexb' }`. Limit each access unit to 8 MiB.
+If you own the frame buffer, call `sender.writeFrame(frame, { copy: false })`
+to avoid another copy. Keep its bytes unchanged until the promise resolves.
+You must encode and pace the output. A keyframe can take longer to decode
+than a delta frame. The native H.264 decoder requires Sync 0.2.84 or later
+on macOS.
 
 ## Receive native audio
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -141,7 +142,7 @@ public:
   FixtureCapture(unsigned channels, WaveformPattern pattern = WaveformPattern::LinearRamp)
       : channels_(channels), pattern_(pattern),
         buffer_(48000, channels, 65536),
-        producer_([this](std::stop_token stop) {
+        producer_([this] {
           std::vector<float> samples(240 * channels_);
           auto fill_samples = [this, &samples](std::uint64_t frame_offset) {
             if (pattern_ == WaveformPattern::LinearRamp) {
@@ -171,7 +172,7 @@ public:
           buffer_.push(samples);
           total_frames += 240;
           auto next_time = std::chrono::steady_clock::now();
-          while (!stop.stop_requested()) {
+          while (!stop_.load(std::memory_order_acquire)) {
             next_time += std::chrono::milliseconds(5);
             const auto now = std::chrono::steady_clock::now();
             if (next_time < now) {
@@ -184,7 +185,7 @@ public:
           }
         }) {}
   ~FixtureCapture() override {
-    producer_.request_stop();
+    stop_.store(true, std::memory_order_release);
     producer_.join();
   }
   Packet read() override {
@@ -194,7 +195,8 @@ private:
   unsigned channels_;
   WaveformPattern pattern_{WaveformPattern::LinearRamp};
   CaptureBuffer buffer_;
-  std::jthread producer_;
+  std::atomic<bool> stop_{false};
+  std::thread producer_;
 };
 
 bool test_fixtures_enabled() noexcept {

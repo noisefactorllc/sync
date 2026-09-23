@@ -15,6 +15,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 @protocol SyncSyphonServerDirectory <NSObject>
@@ -35,7 +37,7 @@
 namespace {
 
 constexpr std::size_t kMarkerBytes = 28;
-constexpr std::size_t kReadbackBytesPerRow = 256;
+constexpr std::size_t kReadbackBytesPerRow = 1024;
 constexpr std::size_t kMaximumSamples = 60U * 60U * 10U;
 constexpr std::size_t kReadbackSlots = 4;
 constexpr std::array<std::uint8_t, 4> kMarkerSignature{{'S', 'Y', 'N', 'C'}};
@@ -47,6 +49,10 @@ struct Options {
   std::uint32_t discovery_timeout_ms = 0;
   std::uint32_t expected_width = 0;
   std::uint32_t expected_height = 0;
+  bool nv12_marker = false;
+  bool h264_marker = false;
+  bool plain_video = false;
+  bool plain_content = false;
 };
 
 struct Sample {
@@ -71,6 +77,11 @@ struct ProbeState {
   std::atomic<std::uint64_t> dimension_mismatches{0};
   std::atomic<std::uint64_t> command_errors{0};
   std::atomic<std::uint64_t> in_flight{0};
+  std::atomic<std::uint64_t> plain_frames{0};
+  std::atomic<std::int64_t> first_plain_us{0};
+  std::atomic<std::int64_t> last_plain_us{0};
+  std::mutex content_mutex;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> content_hashes;
   std::mutex samples_mutex;
   std::vector<Sample> samples;
 };
@@ -88,14 +99,25 @@ auto parse_u32(std::string_view value, std::uint32_t& output) noexcept -> bool {
 }
 
 auto parse_options(int argc, char** argv, Options& options) noexcept -> bool {
-  if (argc != 7) return false;
+  if (argc != 7 && argc != 8) return false;
+  if (argc == 8) {
+    const std::string_view marker(argv[7]);
+    if (marker != "nv12" && marker != "h264" && marker != "plain" &&
+        marker != "plain-content") return false;
+    options.nv12_marker = marker == "nv12";
+    options.h264_marker = marker == "h264";
+    options.plain_video = marker == "plain" || marker == "plain-content";
+    options.plain_content = marker == "plain-content";
+  }
   options.framework_path = argv[1];
   options.server_name = argv[2];
-  return !options.framework_path.empty() && !options.server_name.empty() &&
+  const bool parsed = !options.framework_path.empty() && !options.server_name.empty() &&
          parse_u32(argv[3], options.duration_ms) &&
          parse_u32(argv[4], options.discovery_timeout_ms) &&
          parse_u32(argv[5], options.expected_width) &&
          parse_u32(argv[6], options.expected_height);
+  return parsed && (!options.plain_content ||
+                    (options.expected_width >= 16U && options.expected_height >= 16U));
 }
 
 auto exact_string(std::string_view bytes) noexcept -> NSString* {
@@ -139,15 +161,34 @@ auto read_u64_le(std::span<const std::uint8_t> bytes, std::size_t offset) noexce
   return value;
 }
 
-auto decode_marker(const void* raw_bytes, Sample& sample) noexcept -> bool {
+auto decode_marker(const void* raw_bytes, Sample& sample,
+                   bool nv12_marker, bool h264_marker) noexcept -> bool {
   if (raw_bytes == nullptr) return false;
   const auto* bgra = static_cast<const std::uint8_t*>(raw_bytes);
   std::array<std::uint8_t, kMarkerBytes> rgba{};
-  for (std::size_t pixel = 0; pixel < kMarkerBytes / 4U; ++pixel) {
-    rgba[pixel * 4U] = bgra[pixel * 4U + 2U];
-    rgba[pixel * 4U + 1U] = bgra[pixel * 4U + 1U];
-    rgba[pixel * 4U + 2U] = bgra[pixel * 4U];
-    rgba[pixel * 4U + 3U] = bgra[pixel * 4U + 3U];
+  if (h264_marker) {
+    for (std::size_t bit = 0; bit < kMarkerBytes * 8U; ++bit) {
+      const std::size_t x = (bit % 16U) * 8U + 4U;
+      const std::size_t y = (bit / 16U) * 8U + 4U;
+      if (bgra[y * kReadbackBytesPerRow + x * 4U] > 127) {
+        rgba[bit / 8U] |= static_cast<std::uint8_t>(1U << (bit % 8U));
+      }
+    }
+  } else if (nv12_marker) {
+    for (std::size_t byte = 0; byte < rgba.size(); ++byte) {
+      for (std::size_t bit = 0; bit < 8; ++bit) {
+        if (bgra[(byte * 8U + bit) * 4U] > 127) {
+          rgba[byte] |= static_cast<std::uint8_t>(1U << bit);
+        }
+      }
+    }
+  } else {
+    for (std::size_t pixel = 0; pixel < kMarkerBytes / 4U; ++pixel) {
+      rgba[pixel * 4U] = bgra[pixel * 4U + 2U];
+      rgba[pixel * 4U + 1U] = bgra[pixel * 4U + 1U];
+      rgba[pixel * 4U + 2U] = bgra[pixel * 4U];
+      rgba[pixel * 4U + 3U] = bgra[pixel * 4U + 3U];
+    }
   }
   if (!std::equal(kMarkerSignature.begin(), kMarkerSignature.end(), rgba.begin())) {
     return false;
@@ -201,7 +242,7 @@ int main(int argc, char** argv) {
     Options options;
     if (!parse_options(argc, argv, options)) {
       std::cerr << "usage: sync_syphon_receiver_probe <Syphon.framework> <server-name> "
-                   "<duration-ms> <discovery-timeout-ms> <width> <height>\n";
+                   "<duration-ms> <discovery-timeout-ms> <width> <height> [nv12|h264|plain|plain-content]\n";
       return 2;
     }
 
@@ -265,7 +306,9 @@ int main(int argc, char** argv) {
 
     auto state = std::make_shared<ProbeState>();
     for (ReadbackSlot& slot : state->slots) {
-      slot.buffer = [device newBufferWithLength:kReadbackBytesPerRow
+      slot.buffer = [device newBufferWithLength:kReadbackBytesPerRow *
+                                               (options.h264_marker ? 112U :
+                                                options.plain_content ? 16U : 1U)
                                         options:MTLResourceStorageModeShared];
       if (slot.buffer == nil) {
         std::cerr << "sync_syphon_receiver_probe: failed to allocate readback slots\n";
@@ -283,7 +326,8 @@ int main(int argc, char** argv) {
                            device:device
                           options:nil
                   newFrameHandler:^(id<SyncSyphonMetalClient> callback_client) {
-                    state->frames_seen.fetch_add(1, std::memory_order_relaxed);
+                    const auto frame_index =
+                        state->frames_seen.fetch_add(1, std::memory_order_relaxed) + 1U;
                     ReadbackSlot* claimed = nullptr;
                     for (ReadbackSlot& slot : state->slots) {
                       bool expected = false;
@@ -312,6 +356,18 @@ int main(int argc, char** argv) {
                             1, std::memory_order_relaxed);
                         return;
                       }
+                      if (options.plain_video) {
+                        const auto observed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        std::int64_t first = 0;
+                        state->first_plain_us.compare_exchange_strong(first, observed_us);
+                        state->last_plain_us.store(observed_us, std::memory_order_relaxed);
+                        state->plain_frames.fetch_add(1, std::memory_order_relaxed);
+                        if (!options.plain_content) {
+                          claimed->busy.store(false, std::memory_order_release);
+                          return;
+                        }
+                      }
                       id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];
                       id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
                       if (command_buffer == nil || blit == nil) {
@@ -322,8 +378,17 @@ int main(int argc, char** argv) {
                       [blit copyFromTexture:texture
                                 sourceSlice:0
                                 sourceLevel:0
-                               sourceOrigin:MTLOriginMake(0, 0, 0)
-                                 sourceSize:MTLSizeMake(kMarkerBytes / 4U, 1, 1)
+                               sourceOrigin:MTLOriginMake(options.plain_content ?
+                                                            (options.expected_width - 16U) / 2U : 0U,
+                                                          options.plain_content ?
+                                                            (options.expected_height - 16U) / 2U : 0U,
+                                                          0)
+                                 sourceSize:MTLSizeMake(options.h264_marker ? 128U :
+                                                            options.nv12_marker ? kMarkerBytes * 8U
+                                                            : options.plain_content ? 16U
+                                                                                : kMarkerBytes / 4U,
+                                                         options.h264_marker ? 112U :
+                                                         options.plain_content ? 16U : 1U, 1)
                                    toBuffer:claimed->buffer
                           destinationOffset:0
                      destinationBytesPerRow:kReadbackBytesPerRow
@@ -333,9 +398,22 @@ int main(int argc, char** argv) {
                       [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
                         if (completed.status != MTLCommandBufferStatusCompleted) {
                           state->command_errors.fetch_add(1, std::memory_order_relaxed);
+                        } else if (options.plain_content) {
+                          const auto* bytes = static_cast<const std::uint8_t*>(claimed->buffer.contents);
+                          std::uint64_t hash = 14695981039346656037ULL;
+                          for (std::size_t row = 0; row < 16U; ++row) {
+                            for (std::size_t column = 0; column < 16U * 4U; ++column) {
+                              hash ^= bytes[row * kReadbackBytesPerRow + column];
+                              hash *= 1099511628211ULL;
+                            }
+                          }
+                          std::lock_guard lock(state->content_mutex);
+                          state->content_hashes.emplace_back(frame_index, hash);
                         } else {
                           Sample sample;
-                          if (decode_marker(claimed->buffer.contents, sample)) {
+                          if (decode_marker(claimed->buffer.contents, sample,
+                                            options.nv12_marker,
+                                            options.h264_marker)) {
                             std::lock_guard lock(state->samples_mutex);
                             if (state->samples.size() < kMaximumSamples) {
                               state->samples.push_back(sample);
@@ -348,6 +426,11 @@ int main(int argc, char** argv) {
                         state->in_flight.fetch_sub(1, std::memory_order_relaxed);
                       }];
                       [command_buffer commit];
+                      // A Syphon texture may be reused before an asynchronous
+                      // readback executes. Finish H.264 marker and content
+                      // copies while this callback still owns its frame image.
+                      if (options.h264_marker || options.plain_content)
+                        [command_buffer waitUntilCompleted];
                     }
                   }];
     if (client == nil) {
@@ -373,6 +456,13 @@ int main(int argc, char** argv) {
               [](const Sample& left, const Sample& right) {
                 return left.sequence < right.sequence;
               });
+    std::vector<std::uint64_t> duplicate_sequence_ids;
+    for (std::size_t index = 1; index < captured.size(); ++index) {
+      if (captured[index].sequence == captured[index - 1U].sequence &&
+          duplicate_sequence_ids.size() < 64) {
+        duplicate_sequence_ids.push_back(captured[index].sequence);
+      }
+    }
     const auto unique_end = std::unique(
         captured.begin(), captured.end(),
         [](const Sample& left, const Sample& right) {
@@ -382,9 +472,11 @@ int main(int argc, char** argv) {
         static_cast<std::size_t>(std::distance(unique_end, captured.end()));
     captured.erase(unique_end, captured.end());
     std::uint64_t missed_sequences = 0;
+    std::vector<std::uint64_t> gap_after;
     for (std::size_t index = 1; index < captured.size(); ++index) {
       if (captured[index].sequence > captured[index - 1U].sequence + 1U) {
         missed_sequences += captured[index].sequence - captured[index - 1U].sequence - 1U;
+        if (gap_after.size() < 64) gap_after.push_back(captured[index - 1U].sequence);
       }
     }
     std::vector<std::int64_t> latencies;
@@ -405,9 +497,34 @@ int main(int argc, char** argv) {
       min_latency = *bounds.first;
       max_latency = *bounds.second;
     }
+    const auto plain_frames = state->plain_frames.load(std::memory_order_relaxed);
+    const auto plain_span_us = state->last_plain_us.load(std::memory_order_relaxed) -
+                               state->first_plain_us.load(std::memory_order_relaxed);
+    const double plain_fps = plain_frames > 1 && plain_span_us > 0
+        ? static_cast<double>(plain_frames - 1) * 1000000.0 /
+              static_cast<double>(plain_span_us)
+        : 0.0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> content_hashes;
+    {
+      std::lock_guard lock(state->content_mutex);
+      content_hashes = state->content_hashes;
+    }
+    std::sort(content_hashes.begin(), content_hashes.end());
+    std::size_t duplicate_content_frames = 0;
+    std::unordered_set<std::uint64_t> distinct_content;
+    for (std::size_t index = 0; index < content_hashes.size(); ++index) {
+      distinct_content.insert(content_hashes[index].second);
+      if (index > 0 && content_hashes[index].second == content_hashes[index - 1U].second)
+        ++duplicate_content_frames;
+    }
 
     std::cout << "{\"available\":true,\"serverFound\":true,\"framesSeen\":"
               << state->frames_seen.load() << ",\"markers\":" << captured.size()
+              << ",\"plainFrames\":" << plain_frames
+              << ",\"plainFps\":" << plain_fps
+              << ",\"plainContentFrames\":" << content_hashes.size()
+              << ",\"duplicateContentFrames\":" << duplicate_content_frames
+              << ",\"contentDistinct\":" << distinct_content.size()
               << ",\"duplicateMarkers\":" << duplicate_markers
               << ",\"probeDropped\":" << state->probe_dropped.load()
               << ",\"invalidMarkers\":" << state->invalid_markers.load()
@@ -417,7 +534,17 @@ int main(int argc, char** argv) {
               << ",\"missedSequences\":" << missed_sequences
               << ",\"firstSequence\":" << (captured.empty() ? 0 : captured.front().sequence)
               << ",\"lastSequence\":" << (captured.empty() ? 0 : captured.back().sequence)
-              << ",\"latencyUs\":{\"min\":" << min_latency
+              << ",\"gapAfter\":[";
+    for (std::size_t index = 0; index < gap_after.size(); ++index) {
+      if (index) std::cout << ',';
+      std::cout << gap_after[index];
+    }
+    std::cout << "],\"duplicateSequenceIds\":[";
+    for (std::size_t index = 0; index < duplicate_sequence_ids.size(); ++index) {
+      if (index) std::cout << ',';
+      std::cout << duplicate_sequence_ids[index];
+    }
+    std::cout << "],\"latencyUs\":{\"min\":" << min_latency
               << ",\"p50\":" << percentile(latencies, 0.50)
               << ",\"p95\":" << percentile(latencies, 0.95)
               << ",\"p99\":" << percentile(latencies, 0.99)
@@ -431,9 +558,10 @@ int main(int argc, char** argv) {
               << ",\"p95\":" << percentile(transport_latencies, 0.95)
               << ",\"p99\":" << percentile(transport_latencies, 0.99)
               << "}}\n";
-    return captured.empty() || state->dimension_mismatches.load() != 0 ||
+    return ((options.plain_video ? plain_frames == 0 : captured.empty()) ||
+                   state->dimension_mismatches.load() != 0 ||
                    state->command_errors.load() != 0
-               ? 1
+               ) ? 1
                : 0;
   }
 }

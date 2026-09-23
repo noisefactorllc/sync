@@ -7,6 +7,8 @@ const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 export const PIXEL_FORMAT = Object.freeze({
   RGBA8_UNORM: 1,
+  NV12: 2,
+  H264_ANNEXB: 3,
 });
 
 export const COLOR_SPACE = Object.freeze({
@@ -52,26 +54,45 @@ function validateSafeInteger(value, name) {
   }
 }
 
-function expectedPayloadBytes(width, height, rowStride) {
-  const minimumStride = width * 4;
-  if (rowStride < minimumStride) {
-    throw new RangeError('row stride must be at least width * 4');
+function expectedPayloadBytes(width, height, rowStride, pixelFormat) {
+  const nv12 = pixelFormat === PIXEL_FORMAT.NV12;
+  if (nv12 && ((width | height | rowStride) & 1)) {
+    throw new RangeError('NV12 dimensions and row stride must be even');
   }
-  const payloadBytes = rowStride * height;
+  const minimumStride = nv12 ? width : width * 4;
+  if (rowStride < minimumStride) {
+    throw new RangeError(`row stride must be at least width${nv12 ? '' : ' * 4'}`);
+  }
+  const payloadBytes = rowStride * (nv12 ? height + height / 2 : height);
   if (!Number.isSafeInteger(payloadBytes) || payloadBytes > MAX_UINT32) {
     throw new RangeError('payload size exceeds protocol v1 limits');
   }
   return payloadBytes;
 }
 
-function validateFrameFields({ width, height, rowStride, pixelFormat, colorSpace, alphaMode }) {
+function validateFrameFields({ width, height, rowStride, pixelFormat, colorSpace, alphaMode }, payloadBytes) {
   validateEnum(pixelFormat, PIXEL_FORMAT_VALUES, 'pixel format');
   validateEnum(colorSpace, COLOR_SPACE_VALUES, 'color space');
+  if (pixelFormat === PIXEL_FORMAT.H264_ANNEXB && colorSpace !== COLOR_SPACE.SRGB) {
+    throw new RangeError('H.264 requires sRGB color space');
+  }
   validateEnum(alphaMode, ALPHA_MODE_VALUES, 'alpha mode');
+  if ((pixelFormat === PIXEL_FORMAT.NV12 || pixelFormat === PIXEL_FORMAT.H264_ANNEXB) &&
+      alphaMode !== ALPHA_MODE.OPAQUE) {
+    throw new RangeError('NV12 and H.264 require opaque alpha mode');
+  }
   validateUint32(width, 'width', { positive: true });
   validateUint32(height, 'height', { positive: true });
-  validateUint32(rowStride, 'row stride', { positive: true });
-  return expectedPayloadBytes(width, height, rowStride);
+  validateUint32(rowStride, 'row stride');
+  if (pixelFormat === PIXEL_FORMAT.H264_ANNEXB) {
+    if ((width | height) & 1) throw new RangeError('H.264 dimensions must be even');
+    if (rowStride !== 0) throw new RangeError('H.264 row stride must be zero');
+    if (!Number.isSafeInteger(payloadBytes) || payloadBytes < 1 || payloadBytes > 8 * 1024 * 1024) {
+      throw new RangeError('H.264 payload must contain 1 to 8388608 bytes');
+    }
+    return payloadBytes;
+  }
+  return expectedPayloadBytes(width, height, rowStride, pixelFormat);
 }
 
 // Encodes one v1 frame. With no `into`, returns a fresh ArrayBuffer holding
@@ -79,9 +100,9 @@ function validateFrameFields({ width, height, rowStride, pixelFormat, colorSpace
 // bytes), writes the frame at offset 0 and returns a Uint8Array view of it, so
 // a caller sending sixty frames a second can keep one staging buffer for the
 // life of a stream instead of allocating and zero-filling megabytes per frame.
-// A WebSocket copies the bytes out of a view synchronously in send(), so the
-// staging buffer is free to reuse the moment send() returns.
-export function encodeFrameV1(metadata, rgbaBytes, into = undefined) {
+// A WebSocket copies the bytes in send(); a WebSocketStream caller must await
+// write() before reusing the staging buffer.
+export function encodeFrameV1(metadata, payloadBytesInput, into = undefined) {
   const {
     width,
     height,
@@ -92,7 +113,7 @@ export function encodeFrameV1(metadata, rgbaBytes, into = undefined) {
     colorSpace,
     alphaMode,
   } = metadata ?? {};
-  const payload = bytesFrom(rgbaBytes, 'rgbaBytes');
+  const payload = bytesFrom(payloadBytesInput, 'payloadBytesInput');
   const payloadBytes = validateFrameFields({
     width,
     height,
@@ -100,7 +121,7 @@ export function encodeFrameV1(metadata, rgbaBytes, into = undefined) {
     pixelFormat,
     colorSpace,
     alphaMode,
-  });
+  }, payload.byteLength);
   validateSafeInteger(sequence, 'sequence');
   validateSafeInteger(presentationTimeUs, 'presentation time');
   if (payload.byteLength !== payloadBytes) {
@@ -137,7 +158,9 @@ export function encodeFrameV1(metadata, rgbaBytes, into = undefined) {
   view.setUint32(52, 0, true);
   view.setUint32(56, 0, true);
   view.setUint32(60, 0, true);
-  new Uint8Array(frame, HEADER_BYTES, payloadBytes).set(payload);
+  if (payload.buffer !== frame || payload.byteOffset !== HEADER_BYTES) {
+    new Uint8Array(frame, HEADER_BYTES, payloadBytes).set(payload);
+  }
   return into === undefined ? frame : new Uint8Array(frame, 0, frameBytes);
 }
 
@@ -188,7 +211,7 @@ export function decodeFrameHeaderV1(bytes) {
     pixelFormat,
     colorSpace,
     alphaMode,
-  });
+  }, payloadBytes);
   if (payloadBytes !== expectedBytes) {
     throw new RangeError('Payload length does not match dimensions and row stride');
   }

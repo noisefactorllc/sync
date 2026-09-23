@@ -21,7 +21,7 @@
   <key>CFBundleVersion</key>
   <string>@SYNC_PRODUCT_VERSION@</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>@SYNC_MACOS_MINIMUM_SYSTEM_VERSION@</string>
   <key>CMIOExtension</key>
   <dict>
     <key>CMIOExtensionMachServiceName</key>

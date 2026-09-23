@@ -1,5 +1,6 @@
 #include "test_harness.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -36,6 +37,8 @@ struct PublishedFrame {
   std::uint64_t presentation_time_us = 0;
   bool top_down = false;
   std::uint32_t payload_checksum = 0;
+  std::array<std::uint8_t, 4> first_pixel{};
+  std::array<std::uint8_t, 4> second_pixel{};
 };
 
 class RecordingPublisher final : public FramePublisher {
@@ -65,6 +68,18 @@ class RecordingPublisher final : public FramePublisher {
         .presentation_time_us = frame.presentation_time_us,
         .top_down = frame.top_down,
         .payload_checksum = checksum,
+        .first_pixel = {
+            std::to_integer<std::uint8_t>(frame.payload[0]),
+            std::to_integer<std::uint8_t>(frame.payload[1]),
+            std::to_integer<std::uint8_t>(frame.payload[2]),
+            std::to_integer<std::uint8_t>(frame.payload[3]),
+        },
+        .second_pixel = {
+            std::to_integer<std::uint8_t>(frame.payload[4]),
+            std::to_integer<std::uint8_t>(frame.payload[5]),
+            std::to_integer<std::uint8_t>(frame.payload[6]),
+            std::to_integer<std::uint8_t>(frame.payload[7]),
+        },
     });
 
     if (next_result_ < results_.size()) {
@@ -92,6 +107,11 @@ std::vector<std::byte> load_golden_frame() {
   return frame;
 }
 
+void write_u16(std::vector<std::byte>& frame, std::size_t offset, std::uint16_t value) {
+  frame[offset] = static_cast<std::byte>(value & 0xffU);
+  frame[offset + 1] = static_cast<std::byte>((value >> 8U) & 0xffU);
+}
+
 void write_u32(std::vector<std::byte>& frame, std::size_t offset, std::uint32_t value) {
   for (std::size_t index = 0; index < 4; ++index) {
     frame[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
@@ -104,7 +124,106 @@ void write_u64(std::vector<std::byte>& frame, std::size_t offset, std::uint64_t 
   }
 }
 
+std::vector<std::byte> h264_frame(std::size_t offset, std::size_t packet_bytes,
+                                  std::uint64_t sequence) {
+  const auto path = std::filesystem::path(SYNC_SOURCE_DIR) /
+                    "test/fixtures/h264-annexb-red-2frames.bin";
+  std::ifstream input(path, std::ios::binary);
+  SYNC_REQUIRE(input.good());
+  auto frame = load_golden_frame();
+  write_u16(frame, 12, 3);
+  write_u16(frame, 16, 1);
+  write_u32(frame, 20, 64);
+  write_u32(frame, 24, 64);
+  write_u32(frame, 28, 0);
+  write_u32(frame, 32, static_cast<std::uint32_t>(packet_bytes));
+  write_u64(frame, 36, sequence);
+  frame.resize(64 + packet_bytes);
+  input.seekg(static_cast<std::streamoff>(offset));
+  input.read(reinterpret_cast<char*>(frame.data() + 64),
+             static_cast<std::streamsize>(packet_bytes));
+  SYNC_REQUIRE(input.gcount() == static_cast<std::streamsize>(packet_bytes));
+  return frame;
+}
+
 }  // namespace
+
+#if defined(__APPLE__)
+SYNC_TEST(receiver_decodes_h264_keyframe_and_delta_to_rgba) {
+  RecordingPublisher publisher;
+  FrameReceiver receiver(publisher);
+  const auto delta = h264_frame(143, 27, 1);
+  const auto key = h264_frame(0, 143, 2);
+  const auto next_delta = h264_frame(143, 27, 3);
+
+  SYNC_REQUIRE(receiver.receive("h264", delta).status == ReceiveStatus::PublishFailed);
+  SYNC_REQUIRE(receiver.receive("h264", key).status == ReceiveStatus::Accepted);
+  SYNC_REQUIRE(receiver.receive("h264", next_delta).status == ReceiveStatus::Accepted);
+  SYNC_REQUIRE(publisher.records.size() == 2);
+  for (const auto& published : publisher.records) {
+    SYNC_REQUIRE(published.pixel_format == 1);
+    SYNC_REQUIRE(published.row_stride == 64 * 4);
+    SYNC_REQUIRE(published.payload_bytes == 64 * 64 * 4);
+    SYNC_REQUIRE(published.first_pixel[0] > 220);
+    SYNC_REQUIRE(published.first_pixel[1] < 30);
+    SYNC_REQUIRE(published.first_pixel[2] < 30);
+    SYNC_REQUIRE(published.first_pixel[3] == 255);
+  }
+  SYNC_REQUIRE(receiver.remove_sender("h264"));
+  SYNC_REQUIRE(receiver.receive("h264", next_delta).status == ReceiveStatus::PublishFailed);
+}
+#endif
+
+SYNC_TEST(receiver_converts_nv12_to_rgba_before_publishing) {
+  RecordingPublisher publisher;
+  FrameReceiver receiver(publisher);
+  auto frame = load_golden_frame();
+  write_u16(frame, 12, 2);
+  write_u16(frame, 16, 1);
+  write_u32(frame, 28, 2);
+  write_u32(frame, 32, 6);
+  frame.resize(70);
+  const std::array<std::byte, 6> nv12 = {
+      std::byte{16}, std::byte{235}, std::byte{81},
+      std::byte{145}, std::byte{128}, std::byte{128},
+  };
+  for (std::size_t index = 0; index < nv12.size(); ++index) frame[64 + index] = nv12[index];
+
+  const auto result = receiver.receive("nv12-sender", frame);
+
+  SYNC_REQUIRE(result.status == ReceiveStatus::Accepted);
+  SYNC_REQUIRE(publisher.records.size() == 1);
+  const auto& published = publisher.records.front();
+  SYNC_REQUIRE(published.pixel_format == 1);
+  SYNC_REQUIRE(published.alpha_mode == 1);
+  SYNC_REQUIRE(published.row_stride == 8);
+  SYNC_REQUIRE(published.payload_bytes == 16);
+  SYNC_REQUIRE(published.first_pixel == (std::array<std::uint8_t, 4>{0, 0, 0, 255}));
+  SYNC_REQUIRE(published.second_pixel == (std::array<std::uint8_t, 4>{255, 255, 255, 255}));
+}
+
+SYNC_TEST(receiver_preserves_nv12_red_channel_order) {
+  RecordingPublisher publisher;
+  FrameReceiver receiver(publisher);
+  auto frame = load_golden_frame();
+  write_u16(frame, 12, 2);
+  write_u16(frame, 16, 1);
+  write_u32(frame, 28, 2);
+  write_u32(frame, 32, 6);
+  frame.resize(70);
+  const std::array<std::byte, 6> red = {
+      std::byte{63}, std::byte{63}, std::byte{63},
+      std::byte{63}, std::byte{102}, std::byte{240},
+  };
+  for (std::size_t index = 0; index < red.size(); ++index) frame[64 + index] = red[index];
+
+  SYNC_REQUIRE(receiver.receive("nv12-red", frame).status == ReceiveStatus::Accepted);
+  const auto& pixel = publisher.records.front().first_pixel;
+  SYNC_REQUIRE(pixel[0] >= 245);
+  SYNC_REQUIRE(pixel[1] <= 15);
+  SYNC_REQUIRE(pixel[2] <= 15);
+  SYNC_REQUIRE(pixel[3] == 255);
+}
 
 SYNC_TEST(receiver_publishes_the_golden_frame_and_records_literal_metadata) {
   RecordingPublisher publisher;

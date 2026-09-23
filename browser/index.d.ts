@@ -1,4 +1,4 @@
-export const SYNC_SDK_VERSION: '0.3.0';
+export const SYNC_SDK_VERSION: '0.3.3';
 export const SYNC_DEFAULT_ENDPOINT: 'http://127.0.0.1:53979';
 export type ColorSpace = 'srgb' | 'display-p3';
 export type AlphaMode = 'opaque' | 'straight' | 'premultiplied';
@@ -142,6 +142,11 @@ export interface ClientOptions {
   token?: string;
   fetch?: typeof globalThis.fetch;
   WebSocket?: typeof globalThis.WebSocket;
+  WebSocketStream?: new (url: string, options: { protocols: string[] }) => {
+    opened: Promise<{ protocol: string; writable: WritableStream<ArrayBuffer | ArrayBufferView> }>;
+    closed: Promise<{ closeCode: number; reason: string }>;
+    close(): void;
+  };
   permissions?: PermissionsLike;
   timeoutMs?: number;
   pairingTimeoutMs?: number;
@@ -161,8 +166,23 @@ export class SyncBridgeClient {
   connect(): Promise<Welcome>;
   createSender<Source>(name: string, options: SenderOptions<Source>): Promise<Sender<Source>>;
   createRgbaSender(name: string, options?: RgbaSenderOptions): Promise<Sender<RgbaSource>>;
+  createNv12StreamSender(name: string): Promise<Nv12StreamSender>;
+  createH264StreamSender(name: string): Promise<H264StreamSender>;
   close(): void;
 }
+
+export interface Nv12StreamSender {
+  readonly id: string;
+  readonly stats: { accepted: number; sent: number; failed: number };
+  readonly closed: Promise<{ type: 'senderClosed'; id: string }>;
+  /** Awaits browser stream backpressure. By default copies the frame before writing.
+   * With copy: false, keep the frame bytes unchanged until this promise resolves. */
+  writeFrame(frame: ArrayBuffer | ArrayBufferView, options?: { copy?: boolean }): Promise<void>;
+  getStats(): Promise<NativeStats>;
+  close(): void;
+}
+
+export interface H264StreamSender extends Nv12StreamSender {}
 
 export interface AudioSourceFormat { channelCount: number; sampleRate: number; }
 export interface AudioSource extends AudioSourceFormat { id: string; name: string; }
@@ -208,7 +228,7 @@ export class SyncSenderLostError extends SyncBridgeError {
   readonly closeCode: number | null;
   readonly closeReason: string;
 }
-export const PIXEL_FORMAT: Readonly<{ RGBA8_UNORM: 1 }>;
+export const PIXEL_FORMAT: Readonly<{ RGBA8_UNORM: 1; NV12: 2; H264_ANNEXB: 3 }>;
 export const COLOR_SPACE: Readonly<{ SRGB: 1; DISPLAY_P3: 2 }>;
 export const ALPHA_MODE: Readonly<{ OPAQUE: 1; STRAIGHT: 2; PREMULTIPLIED: 3 }>;
 export interface FrameMetadata {
@@ -217,7 +237,7 @@ export interface FrameMetadata {
   rowStride: number;
   sequence: number;
   presentationTimeUs: number;
-  pixelFormat: 1;
+  pixelFormat: 1 | 2 | 3;
   colorSpace: 1 | 2;
   alphaMode: 1 | 2 | 3;
 }

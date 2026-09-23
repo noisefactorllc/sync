@@ -3,11 +3,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
 
 #include <sync/protocol.hpp>
+#include <sync/h264_decoder.hpp>
 
 namespace noisefactor::sync {
 
@@ -132,6 +134,7 @@ class FrameReceiver {
     std::size_t sender_id_length = 0;
     std::array<char, kMaximumSenderIdBytes> sender_id{};
     SenderStats stats;
+    std::unique_ptr<H264Decoder> h264_decoder;
   };
 
   [[nodiscard]] auto find_sender(std::string_view sender_id) noexcept -> SenderEntry*;
@@ -142,6 +145,10 @@ class FrameReceiver {
   FramePublisher& publisher_;
   protocol::Limits limits_;
   std::array<SenderEntry, kMaximumSenderEntries> sender_entries_{};
+  // receive() runs on the daemon's event loop; publishers copy borrowed pixels
+  // before returning, so one bounded conversion buffer serves every sender.
+  std::unique_ptr<std::byte[]> rgba_conversion_buffer_;
+  std::size_t rgba_conversion_capacity_ = 0;
 };
 
 }  // namespace noisefactor::sync

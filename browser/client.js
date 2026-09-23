@@ -1,6 +1,7 @@
 import { SyncFrameSink } from './frame-sink.js';
 import { decodeSenderStats } from './stats.js';
 import { RgbaExportQueue } from './adapters/rgba.js';
+import { decodeFrameHeaderV1, PIXEL_FORMAT } from './protocol.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_HEALTH_BYTES = 65_536;
@@ -718,12 +719,102 @@ class SyncSenderSink {
   }
 }
 
+class SyncPackedStreamSender {
+  constructor(client, session, id, stream, writer, pixelFormat, label) {
+    this.id = id;
+    this._client = client;
+    this._session = session;
+    this._stream = stream;
+    this._writer = writer;
+    this._pixelFormat = pixelFormat;
+    this._label = label;
+    this._closed = false;
+    this._completion = deferred();
+    this.closed = this._completion.promise;
+    this.stats = { accepted: 0, sent: 0, failed: 0 };
+    stream.closed.then(
+      (event) => this._remoteEnd(event),
+      (error) => this._remoteEnd({ cause: error }),
+    );
+  }
+
+  async writeFrame(value, { copy = true } = {}) {
+    if (this._closed) throw new SyncLifecycleError('sender is closed');
+    const frame = value instanceof ArrayBuffer ? new Uint8Array(value)
+      : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+        : null;
+    if (frame === null) throw new SyncConfigurationError('frame must be an ArrayBuffer or typed array');
+    let header;
+    try { header = decodeFrameHeaderV1(frame); }
+    catch (cause) { throw new SyncConfigurationError(`${this._label} frame is invalid`, { cause }); }
+    if (header.pixelFormat !== this._pixelFormat ||
+        frame.byteLength !== header.headerBytes + header.payloadBytes) {
+      throw new SyncConfigurationError(`frame must contain a complete ${this._label} payload`);
+    }
+    // Default to owning the bytes so a caller can reuse a GPU readback buffer.
+    // With copy: false, the caller keeps these bytes unchanged until write resolves.
+    const ownedFrame = copy ? frame.slice() : frame;
+    this.stats.accepted += 1;
+    try {
+      await this._writer.write(ownedFrame);
+      if (this._closed) throw new SyncLifecycleError('sender is closed');
+      this.stats.sent += 1;
+    } catch (cause) {
+      this.stats.failed += 1;
+      if (this._closed) throw new SyncLifecycleError('sender is closed', { cause });
+      throw new SyncSenderLostError(`${this._label} stream write failed`, { cause });
+    }
+  }
+
+  getStats() {
+    if (this._closed) return Promise.reject(new SyncLifecycleError('sender is closed'));
+    return this._client._scheduleControl(this._session, () => {
+      if (this._closed) throw new SyncLifecycleError('sender is closed');
+      return this._client._exchange(
+        { type: 'getStats', senderId: this.id },
+        (_value, raw) => decodeSenderStats(raw, this.id),
+        this._session,
+      );
+    });
+  }
+
+  close() {
+    if (this._closed) return;
+    this._closed = true;
+    try { this._stream.close(); } catch {}
+    this._client._requestSenderClose(this).then(
+      (value) => this._completion.resolve(value),
+      (error) => this._completion.reject(error),
+    );
+  }
+
+  _abort(error) {
+    if (this._closed) return;
+    this._closed = true;
+    try { this._stream.close(); } catch {}
+    this._completion.reject(error);
+  }
+
+  _remoteEnd(event) {
+    if (this._closed) return;
+    this._closed = true;
+    const error = new SyncSenderLostError(undefined, {
+      closeCode: event?.closeCode,
+      closeReason: event?.reason,
+      cause: event?.cause,
+    });
+    this._completion.reject(error);
+    this._client._requestSenderClose(this).catch(() => {});
+  }
+}
+
 export class SyncBridgeClient {
   constructor({
     endpoint = SYNC_DEFAULT_ENDPOINT,
     token,
     fetch: fetchImplementation = globalThis.fetch,
     WebSocket: WebSocketImplementation = globalThis.WebSocket,
+    WebSocketStream: WebSocketStreamImplementation = globalThis.WebSocketStream,
     permissions = globalThis.navigator?.permissions,
     timeoutMs = 3_000,
     pairingTimeoutMs = 35_000,
@@ -744,6 +835,7 @@ export class SyncBridgeClient {
     this._token = token;
     this._fetch = fetchImplementation;
     this._WebSocket = WebSocketImplementation;
+    this._WebSocketStream = WebSocketStreamImplementation;
     this._permissions = permissions;
     this._timeoutMs = timeoutMs;
     this._pairingTimeoutMs = pairingTimeoutMs;
@@ -907,6 +999,80 @@ export class SyncBridgeClient {
       exportQueue.close();
       throw error;
     }
+  }
+
+  createNv12StreamSender(name) {
+    return this._createPackedStreamSender(name, PIXEL_FORMAT.NV12, 'NV12');
+  }
+
+  createH264StreamSender(name) {
+    return this._createPackedStreamSender(name, PIXEL_FORMAT.H264_ANNEXB, 'H.264');
+  }
+
+  _createPackedStreamSender(name, pixelFormat, label) {
+    validateSenderName(name);
+    if (this._closed) return Promise.reject(new SyncLifecycleError());
+    if (typeof this._WebSocketStream !== 'function') {
+      return Promise.reject(new SyncCapabilityError('WebSocketStream is unavailable'));
+    }
+    if (this._senders.size + this._senderReservations >= MAX_SENDERS) {
+      return Promise.reject(new SyncCapabilityError(`Sync protocol v1 permits at most ${MAX_SENDERS} senders`));
+    }
+    this._senderReservations += 1;
+    return (async () => {
+      if (!this._welcome) await this.connect();
+      const session = this._controlSession;
+      this._assertSession(session);
+      if (!session.welcome.capabilities.send) {
+        throw new SyncCapabilityError('daemon has no selected send provider');
+      }
+      const created = await this._scheduleControl(
+        session,
+        () => this._exchange(
+          { type: 'createSender', name },
+          (message) => validateSenderCreated(message, name),
+          session,
+        ),
+      );
+      let stream;
+      try {
+        const dataProtocol = `sync.sender.${created.ticket}`;
+        stream = new this._WebSocketStream(
+          `${this._endpoint.wsOrigin}${created.path}`,
+          { protocols: [dataProtocol] },
+        );
+        const opened = await runWithTimeout(
+          stream.opened, this._timeoutMs, 'sender data connection',
+          () => stream.close(),
+        );
+        if (opened.protocol !== dataProtocol || !opened.writable?.getWriter) {
+          throw new SyncProtocolError('sender data stream was not negotiated');
+        }
+        this._assertSession(session);
+        const sender = new SyncPackedStreamSender(
+          this, session, created.id, stream, opened.writable.getWriter(), pixelFormat, label,
+        );
+        this._senders.add(sender);
+        return sender;
+      } catch (error) {
+        try { stream?.close(); } catch {}
+        if (this._isSessionActive(session)) {
+          try {
+            await this._scheduleControl(
+              session,
+              () => this._exchange(
+                { type: 'closeSender', senderId: created.id },
+                (message) => validateSenderClosed(message, created.id),
+                session,
+              ),
+            );
+          } catch {}
+        }
+        throw error;
+      }
+    })().finally(() => {
+      this._senderReservations -= 1;
+    });
   }
 
   createSender(name, options) {

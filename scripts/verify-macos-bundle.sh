@@ -101,4 +101,19 @@ if (( mach_count < 4 )); then
   exit 1
 fi
 
+while IFS= read -r dependency; do
+  case "$dependency" in
+    @executable_path/../Frameworks/*)
+      if [[ ! -f "$contents/Frameworks/${dependency##*/}" ]]; then
+        echo "verify-macos-bundle: syncd dependency is not bundled: $dependency" >&2
+        exit 1
+      fi
+      ;;
+    @rpath/libuv*|@rpath/libcrypto*)
+      echo "verify-macos-bundle: syncd dependency has unresolved rpath: $dependency" >&2
+      exit 1
+      ;;
+  esac
+done < <(otool -L "$contents/MacOS/syncd" | awk 'NR > 1 { print $1 }')
+
 echo "verified $bundle ($version, $mach_count Mach-O files)"
