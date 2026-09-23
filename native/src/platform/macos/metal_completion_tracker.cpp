@@ -38,29 +38,27 @@ MetalCompletionTracker::MetalCompletionTracker(
   }
 }
 
-bool MetalCompletionTracker::try_begin(
-    std::uint64_t submitted_at_ms) noexcept {
+bool MetalCompletionTracker::try_begin() noexcept {
   State observed = state_.load(std::memory_order_acquire);
   while (observed == State::Idle || observed == State::Succeeded) {
     if (state_.compare_exchange_weak(observed, State::Preparing,
                                      std::memory_order_acq_rel,
                                      std::memory_order_acquire)) {
-      submitted_at_ms_ = submitted_at_ms;
-      state_.store(State::InFlight, std::memory_order_release);
       return true;
     }
   }
   return false;
 }
 
+void MetalCompletionTracker::mark_submitted(
+    std::uint64_t submitted_at_ms) noexcept {
+  if (state_.load(std::memory_order_acquire) != State::Preparing) return;
+  submitted_at_ms_ = submitted_at_ms;
+  state_.store(State::InFlight, std::memory_order_release);
+}
+
 void MetalCompletionTracker::cancel_before_commit() noexcept {
-  State expected = State::InFlight;
-  if (state_.compare_exchange_strong(expected, State::Idle,
-                                     std::memory_order_acq_rel,
-                                     std::memory_order_acquire)) {
-    return;
-  }
-  expected = State::Preparing;
+  State expected = State::Preparing;
   (void)state_.compare_exchange_strong(expected, State::Idle,
                                        std::memory_order_acq_rel,
                                        std::memory_order_acquire);
@@ -92,6 +90,9 @@ void MetalCompletionTracker::complete_failure(
 auto MetalCompletionTracker::poll_watchdog(
     std::uint64_t now_ms, std::uint64_t timeout_ms) noexcept
     -> std::optional<ProviderFailure> {
+  if (state_.load(std::memory_order_acquire) != State::InFlight) {
+    return failure_latch_->failure();
+  }
   State expected = State::InFlight;
   if (timeout_ms != 0 && now_ms >= submitted_at_ms_ &&
       now_ms - submitted_at_ms_ >= timeout_ms &&

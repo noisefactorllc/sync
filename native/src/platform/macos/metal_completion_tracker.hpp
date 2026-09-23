@@ -32,7 +32,8 @@ class MetalCompletionTracker final {
   explicit MetalCompletionTracker(
       std::shared_ptr<MetalFailureLatch> failure_latch);
 
-  [[nodiscard]] bool try_begin(std::uint64_t submitted_at_ms) noexcept;
+  [[nodiscard]] bool try_begin() noexcept;
+  void mark_submitted(std::uint64_t submitted_at_ms) noexcept;
   void cancel_before_commit() noexcept;
   void complete_success() noexcept;
   void complete_failure(std::uint32_t native_status,

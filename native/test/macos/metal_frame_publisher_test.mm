@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -473,19 +474,19 @@ SYNC_TEST(metal_publisher_saturates_three_slots_and_reuses_after_gpu_completion)
   }));
 }
 
-SYNC_TEST(metal_publisher_reports_a_gated_command_at_the_watchdog_boundary) {
+SYNC_TEST(metal_publisher_reports_a_gated_committed_command_after_watchdog_window) {
   GateConsumer gate;
   std::array<MetalFrameConsumer*, 1> consumers{&gate};
   MetalFramePublisher publisher(consumers);
   SYNC_REQUIRE(publisher.open_sender("watchdog", "Watchdog"));
   auto frame = make_frame(2, 2, 8);
 
-  SYNC_REQUIRE(!publisher.poll_failure(10'000).has_value());
+  SYNC_REQUIRE(!publisher.poll_failure(0).has_value());
   SYNC_REQUIRE(publisher.publish("watchdog", frame.view) ==
                PublishResult::Accepted);
-  SYNC_REQUIRE(!publisher.poll_failure(10'999).has_value());
+  SYNC_REQUIRE(!publisher.poll_failure(0).has_value());
 
-  const auto failure = publisher.poll_failure(11'000);
+  const auto failure = publisher.poll_failure(std::numeric_limits<std::uint64_t>::max());
   SYNC_REQUIRE(failure.has_value());
   SYNC_REQUIRE(failure->kind ==
                ProviderFailureKind::MetalWatchdogTimeout);

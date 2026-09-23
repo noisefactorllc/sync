@@ -17,6 +17,7 @@
 #include <span>
 #include <string_view>
 #include <utility>
+#include <uv.h>
 
 namespace noisefactor::sync {
 namespace {
@@ -161,7 +162,6 @@ struct MetalFramePublisher::Impl {
   bool configuration_valid = true;
   std::shared_ptr<detail::MetalFailureLatch> failure_latch =
       std::make_shared<detail::MetalFailureLatch>();
-  std::uint64_t observed_now_ms = 0;
   std::array<SenderEntry, MetalFramePublisher::kMaximumSenderEntries> senders{};
 
   void reap_drained() noexcept {
@@ -478,7 +478,7 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
 
     Impl::Slot* claimed_slot = nullptr;
     for (Impl::Slot& slot : entry->ring.slots) {
-      if (slot.completion->try_begin(impl_->observed_now_ms)) {
+      if (slot.completion->try_begin()) {
         claimed_slot = &slot;
         break;
       }
@@ -567,6 +567,9 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
         }
       }];
       completion_installed = true;
+      // The watchdog measures committed GPU work, not CPU staging or a cached
+      // libuv loop time from before this frame began.
+      claimed_slot->completion->mark_submitted(uv_hrtime() / 1'000'000U);
       [command_buffer commit];
     } @catch (NSException*) {
       if (completion_installed) {
@@ -583,7 +586,6 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
 auto MetalFramePublisher::poll_failure(std::uint64_t now_ms) noexcept
     -> std::optional<ProviderFailure> {
   if (impl_ == nullptr) return std::nullopt;
-  impl_->observed_now_ms = now_ms;
   for (Impl::SenderEntry& entry : impl_->senders) {
     if (!entry.ring.allocated) continue;
     for (Impl::Slot& slot : entry.ring.slots) {

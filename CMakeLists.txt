@@ -731,7 +731,7 @@ if(APPLE)
   )
   target_link_libraries(sync_metal_publisher
     PUBLIC sync_protocol
-    PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+    PRIVATE ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK} ${SYNC_LIBUV_TARGET}
   )
 
   add_executable(sync_metal_publisher_tests
