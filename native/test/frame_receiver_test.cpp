@@ -124,6 +124,7 @@ void write_u64(std::vector<std::byte>& frame, std::size_t offset, std::uint64_t 
   }
 }
 
+#if defined(__APPLE__)
 std::vector<std::byte> h264_frame(std::size_t offset, std::size_t packet_bytes,
                                   std::uint64_t sequence) {
   const auto path = std::filesystem::path(SYNC_SOURCE_DIR) /
@@ -145,6 +146,7 @@ std::vector<std::byte> h264_frame(std::size_t offset, std::size_t packet_bytes,
   SYNC_REQUIRE(input.gcount() == static_cast<std::streamsize>(packet_bytes));
   return frame;
 }
+#endif
 
 }  // namespace
 
