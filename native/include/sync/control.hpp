@@ -74,10 +74,27 @@ std::string encode_capabilities(std::span<const ProviderCapability> providers);
 std::string encode_health(std::string_view product_version,
                           std::string_view instance_id,
                           std::span<const ProviderCapability> providers);
+// The render path's counters, reported by /status while syncd supervises a
+// render helper: whether the helper runs and is attached, and what the ring
+// reader did with the frames it wrote.
+struct RenderStatus {
+  bool running = false;
+  bool attached = false;
+  bool given_up = false;
+  std::uint64_t launches = 0;
+  std::uint64_t exits = 0;
+  std::uint64_t published = 0;
+  std::uint64_t repeats = 0;
+  std::uint64_t skipped_frames = 0;
+  std::uint64_t backpressured = 0;
+  std::uint64_t failed = 0;
+  std::uint64_t lease_misses = 0;
+};
 std::string encode_status(std::string_view product_version,
                           std::string_view instance_id,
                           std::span<const ProviderCapability> providers,
-                          std::size_t active_senders);
+                          std::size_t active_senders,
+                          const RenderStatus* render = nullptr);
 std::string encode_welcome(std::uint16_t protocol_version,
                            std::string_view product_version,
                            std::string_view instance_id,

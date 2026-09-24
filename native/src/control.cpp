@@ -854,11 +854,39 @@ std::string encode_health(std::string_view product_version,
 std::string encode_status(std::string_view product_version,
                           std::string_view instance_id,
                           std::span<const ProviderCapability> providers,
-                          std::size_t active_senders) {
+                          std::size_t active_senders,
+                          const RenderStatus* render) {
   std::string output = encode_health(product_version, instance_id, providers);
   output.pop_back();
   output.append(",\"activeSenders\":");
   append_number(output, active_senders);
+  if (render != nullptr) {
+    const auto flag = [&output](std::string_view key, bool value, bool first = false) {
+      if (!first) output.push_back(',');
+      output.push_back('"');
+      output.append(key);
+      output.append(value ? "\":true" : "\":false");
+    };
+    const auto count = [&output](std::string_view key, std::uint64_t value) {
+      output.append(",\"");
+      output.append(key);
+      output.append("\":");
+      append_number(output, value);
+    };
+    output.append(",\"render\":{");
+    flag("running", render->running, true);
+    flag("attached", render->attached);
+    flag("givenUp", render->given_up);
+    count("launches", render->launches);
+    count("exits", render->exits);
+    count("published", render->published);
+    count("repeats", render->repeats);
+    count("skippedFrames", render->skipped_frames);
+    count("backpressured", render->backpressured);
+    count("failed", render->failed);
+    count("leaseMisses", render->lease_misses);
+    output.push_back('}');
+  }
   output.push_back('}');
   return output;
 }

@@ -362,6 +362,24 @@ SYNC_TEST(control_response_encoders_emit_exact_plain_json) {
       "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[{"
       "\"id\":\"test\",\"direction\":\"send\",\"available\":true,"
       "\"selected\":true}]},\"activeSenders\":3}");
+  {
+    const control::RenderStatus render{
+        .running = true, .attached = true, .given_up = false, .launches = 2,
+        .exits = 1, .published = 3601, .repeats = 17, .skipped_frames = 4,
+        .backpressured = 5, .failed = 0, .lease_misses = 1};
+    SYNC_REQUIRE(
+        control::encode_status(noisefactor::sync::kProductVersion, "instance-a",
+                               providers, 0, &render) ==
+        "{\"product\":\"Sync\",\"status\":\"ok\",\"version\":\"" + version +
+        "\","
+        "\"protocolVersions\":[1],\"instanceId\":\"instance-a\","
+        "\"capabilities\":{\"send\":true,\"receive\":false,\"providers\":[{"
+        "\"id\":\"test\",\"direction\":\"send\",\"available\":true,"
+        "\"selected\":true}]},\"activeSenders\":0,"
+        "\"render\":{\"running\":true,\"attached\":true,\"givenUp\":false,"
+        "\"launches\":2,\"exits\":1,\"published\":3601,\"repeats\":17,"
+        "\"skippedFrames\":4,\"backpressured\":5,\"failed\":0,\"leaseMisses\":1}}");
+  }
   SYNC_REQUIRE(
       control::encode_sender_created("sender-1", "Camera", "/senders/sender-1",
                                      "ticket-1") ==

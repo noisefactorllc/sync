@@ -1428,9 +1428,27 @@ class Server {
                   "{\"error\":\"method_not_allowed\"}");
         return;
       }
+      std::optional<control::RenderStatus> render;
+      if (render_supervisor_ != nullptr) {
+        const auto& supervisor = render_supervisor_->status();
+        const auto& reader = render_supervisor_->source().stats();
+        render = control::RenderStatus{
+            .running = supervisor.running,
+            .attached = supervisor.attached,
+            .given_up = supervisor.given_up,
+            .launches = supervisor.launches,
+            .exits = supervisor.exits,
+            .published = reader.published,
+            .repeats = reader.repeats,
+            .skipped_frames = reader.skipped_frames,
+            .backpressured = reader.backpressured,
+            .failed = reader.failed,
+            .lease_misses = reader.lease_misses,
+        };
+      }
       const std::string status_body = control::encode_status(
           kProductVersion, instance_id_, provider_capabilities(),
-          active_sender_count());
+          active_sender_count(), render ? &*render : nullptr);
       send_http(connection, 200, "OK", status_body);
       return;
     }
