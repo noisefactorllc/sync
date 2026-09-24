@@ -11,7 +11,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Multimedia OpenGL Network WebSocke
 #   -DFETCHCONTENT_SOURCE_DIR_NOISEMAKER_QT=/path/to/noisemaker-for-qt
 FetchContent_Declare(noisemaker_qt
   GIT_REPOSITORY https://github.com/noisefactorllc/noisemaker-for-qt.git
-  GIT_TAG 49131bdd37fd3f658844ba0c7563f6ea82230ec0
+  GIT_TAG 12c1d1c6f160e5fe30f482e6376f220b3ec982c4
   SOURCE_SUBDIR qt
 )
 FetchContent_MakeAvailable(noisemaker_qt)
