@@ -489,6 +489,35 @@ SYNC_TEST(cli_render_settings_need_a_session_and_valid_values) {
   SYNC_REQUIRE(parse({"--render-join", "a", "--render-size", "4096x4096"}).ok());
 }
 
+SYNC_TEST(cli_render_inputs_pass_audio_and_media_in_step_order) {
+  const auto joined = parse({"--render-join", "Ab12Cd", "--render-audio", "MacBook Air Microphone",
+                             "--render-media", "camera:FaceTime HD Camera",
+                             "--render-media", "file:/Users/me/My Clips/loop.mov"});
+  SYNC_REQUIRE(joined.ok());
+  SYNC_REQUIRE(joined.options.render_audio == "MacBook Air Microphone");
+  SYNC_REQUIRE(joined.options.render_media.size() == 2);
+  SYNC_REQUIRE(joined.options.render_media[0] == "camera:FaceTime HD Camera");
+  SYNC_REQUIRE(joined.options.render_media[1] == "file:/Users/me/My Clips/loop.mov");
+  // Nothing is opened unless asked for.
+  const auto bare = parse({"--render-join", "Ab12Cd"});
+  SYNC_REQUIRE(bare.options.render_audio.empty());
+  SYNC_REQUIRE(bare.options.render_media.empty());
+}
+
+SYNC_TEST(cli_render_inputs_need_a_session_and_safe_values) {
+  SYNC_REQUIRE(!parse({"--render-audio", "default"}).ok());
+  SYNC_REQUIRE(!parse({"--render-media", "camera"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-audio", ""}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-audio", "--frames"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-audio", "a", "--render-audio", "b"}).ok());
+  // Control characters cannot reach the helper's command line.
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-media", "file:/tmp/a\nb"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-audio", "WING\x7f"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-media", "file:C:\\a\" b.mov"}).ok());
+  SYNC_REQUIRE(parse({"--render-join", "a", "--render-media", "file:C:\\My Clips\\a.mov"}).ok());
+  SYNC_REQUIRE(parse({"--render-join", "a", "--render-audio", "WING"}).ok());
+}
+
 SYNC_TEST(cli_render_flags_are_not_part_of_management_or_camera_commands) {
   SYNC_REQUIRE(!parse({"--list-pairings", "--render-join", "a"}).ok());
   SYNC_REQUIRE(!parse({"--register-camera", "--render-join", "a"}).ok());

@@ -551,6 +551,14 @@ int run_production(nfsync::ServerOptions &options,
     render.helper_arguments.push_back("--height");
     render.helper_arguments.push_back(std::to_string(command.render_height));
   }
+  if (!command.render_audio.empty()) {
+    render.helper_arguments.push_back("--audio");
+    render.helper_arguments.push_back(command.render_audio);
+  }
+  for (const std::string& media : command.render_media) {
+    render.helper_arguments.push_back("--media");
+    render.helper_arguments.push_back(media);
+  }
   render.ring_name = nfsync::render::default_render_ring_name();
   return render;
 }

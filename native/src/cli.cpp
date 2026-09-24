@@ -69,6 +69,23 @@ bool valid_render_text(std::string_view value) noexcept {
   return true;
 }
 
+// An audio source name or a media spec (camera, camera:<name>, file:<path>)
+// for sync-render. Device names and paths contain spaces, which is safe: the
+// helper is spawned with an argument vector, never through a shell. Control
+// characters and a leading dash are refused, so the value cannot read as a
+// flag or carry a terminal sequence. So is a double quote: on Windows libuv
+// joins the vector into one command line, and a quote is the character whose
+// round trip through that quoting depends most on getting every rule right.
+bool valid_render_input(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 2048 || value.front() == '-') return false;
+  for (const unsigned char byte : value) {
+    if (byte < 0x20U || byte == 0x7fU || byte == '"') return false;
+  }
+  return true;
+}
+
+constexpr std::size_t kMaxRenderMedia = 16;
+
 bool valid_render_url(std::string_view value) noexcept {
   return valid_render_text(value) &&
          (value.starts_with("https://") || value.starts_with("http://"));
@@ -141,6 +158,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   bool saw_render_helper = false;
   bool saw_render_url = false;
   bool saw_render_size = false;
+  bool saw_render_audio = false;
 
   for (std::size_t index = 0; index < arguments.size(); ++index) {
     const std::string_view argument = arguments[index];
@@ -171,7 +189,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
         argument != "--ndi-runtime" && argument != "--camera-device" &&
         argument != "--revoke-origin" && argument != "--render-join" &&
         argument != "--render-helper" && argument != "--render-seance-url" &&
-        argument != "--render-size") {
+        argument != "--render-size" && argument != "--render-audio" &&
+        argument != "--render-media") {
       return result;
     }
     if (++index >= arguments.size()) return result;
@@ -218,6 +237,13 @@ ParseResult parse(std::span<const std::string_view> arguments) {
                valid_render_url(value)) {
       saw_render_url = true;
       options.render_seance_url.assign(value);
+    } else if (argument == "--render-audio" && !saw_render_audio &&
+               valid_render_input(value)) {
+      saw_render_audio = true;
+      options.render_audio.assign(value);
+    } else if (argument == "--render-media" &&
+               options.render_media.size() < kMaxRenderMedia && valid_render_input(value)) {
+      options.render_media.emplace_back(value);
     } else if (argument == "--render-size" && !saw_render_size &&
                parse_render_size(value, options.render_width, options.render_height)) {
       saw_render_size = true;
@@ -247,7 +273,8 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   // The helper, server and size only configure a render session; naming
   // them without one is a usage error, like a runtime path without its
   // provider.
-  const bool saw_render = saw_render_join || saw_render_helper || saw_render_url || saw_render_size;
+  const bool saw_render = saw_render_join || saw_render_helper || saw_render_url ||
+                          saw_render_size || saw_render_audio || !options.render_media.empty();
   const bool render_settings_without_join = saw_render && !saw_render_join;
 
   // Each camera command is the whole command line. Combining them with each

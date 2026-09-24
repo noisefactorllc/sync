@@ -6,6 +6,7 @@
 #include <iosfwd>
 #include <span>
 #include <string>
+#include <vector>
 #include <string_view>
 
 #include <sync/origin.hpp>
@@ -64,6 +65,11 @@ struct Options {
   std::string render_seance_url;
   std::uint32_t render_width = 0;   // 0 leaves the helper's default
   std::uint32_t render_height = 0;
+  // Inputs for the program's audio() and media() steps, passed to sync-render
+  // as --audio and --media (in step order). Empty means none: opening audio
+  // asks the OS for microphone access, so it happens only when asked for.
+  std::string render_audio;
+  std::vector<std::string> render_media;
 
   [[nodiscard]] bool selects_publisher(std::string_view id) const noexcept;
 };
