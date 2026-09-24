@@ -361,34 +361,24 @@ int main(int argc, char** argv) {
                                              {QStringLiteral("reason"), change.reason}});
       return;
     }
-    const auto& source = capture->source();
-    audio_device = nm::AudioDevice{QString::fromStdString(source.id),
-                                   QString::fromStdString(source.name),
-                                   static_cast<int>(source.channels), true};
     events.write(QStringLiteral("audio"),
                  {{QStringLiteral("state"), QStringLiteral("live")},
-                  {QStringLiteral("source"), audio_device.name},
-                  {QStringLiteral("id"), audio_device.id},
-                  {QStringLiteral("channels"), audio_device.channelCount},
-                  {QStringLiteral("sample_rate"), static_cast<int>(source.sample_rate)}});
+                  {QStringLiteral("source"), QString::fromStdString(change.source.name)},
+                  {QStringLiteral("id"), QString::fromStdString(change.source.id)},
+                  {QStringLiteral("channels"), static_cast<int>(change.source.channels)},
+                  {QStringLiteral("sample_rate"), static_cast<int>(change.source.sample_rate)}});
   };
   if (parser.isSet(audio_opt)) {
     capture = std::make_unique<AudioCapture>(parser.value(audio_opt));
     capture->start();
-    if (const auto change = capture->take_change()) report_audio(*change);
+    // Reported now rather than at the first frame, which waits for a program.
+    for (const auto& change : feed_audio(*capture, audio_input, audio_device)) report_audio(change);
   }
 
   engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
     media.apply(backend, graph, generation, compiler.registry());
     if (capture) {
-      const audio::Packet packet = capture->read();
-      // Before the samples: a source heard again may not be the one lost.
-      if (const auto change = capture->take_change()) report_audio(*change);
-      if (packet.channels > 0 && !packet.samples.empty()) {
-        const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
-        audio_input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
-        audio_input.pushDevice(audio_device, packet.samples.data(), frames);
-      }
+      for (const auto& change : feed_audio(*capture, audio_input, audio_device)) report_audio(change);
       // The reference pump advances once per rendered frame, sound or not,
       // so levels fall away in silence exactly as they do in the browser.
       audio_input.update();

@@ -51,12 +51,13 @@ const QString kAudioRotation = QStringLiteral(
 [[nodiscard]] auto data_root() -> QString { return QStringLiteral(SYNC_RENDER_TEST_DATA_ROOT); }
 
 // A two-channel interface that can be unplugged, broken and plugged back in
-// from the test, standing in for RtAudio.
+// from the test, standing in for RtAudio. It plays a quiet 60 Hz tone.
 struct Interface {
   std::atomic<bool> present{true};
   std::atomic<bool> broken{false};
   std::atomic<int> opens{0};
   std::atomic<bool> closed{false};
+  std::thread::id opened_on;
   std::thread::id closed_on;
   std::chrono::steady_clock::time_point closed_at;
 };
@@ -69,16 +70,26 @@ class InterfaceCapture final : public audio::Capture {
     device_->closed_at = std::chrono::steady_clock::now();
     device_->closed = true;
   }
+  // One 60 fps frame of audio a read, as the render thread reads.
   auto read() -> audio::Packet override {
     if (device_->broken) {
       throw std::runtime_error(
           "Native audio capture stopped: driver error (5): the stream device was disconnected");
     }
-    return {48000, 2, 0, 0, {0.25f, -0.25f, 0.5f, -0.5f}};
+    audio::Packet packet{48000, 2, frame_, 0, std::vector<float>(1600)};
+    for (std::size_t i = 0; i < 800; ++i) {
+      const double t = static_cast<double>(frame_ + i) / 48000.0;
+      const auto sample = static_cast<float>(0.05 * std::sin(2.0 * 3.14159265358979323846 * 60.0 * t));
+      packet.samples[2 * i] = sample;
+      packet.samples[2 * i + 1] = sample;
+    }
+    frame_ += 800;
+    return packet;
   }
 
  private:
   std::shared_ptr<Interface> device_;
+  std::uint64_t frame_ = 0;
 };
 
 class InterfaceBackend final : public audio::InputBackend {
@@ -91,6 +102,7 @@ class InterfaceBackend final : public audio::InputBackend {
   auto open(const std::string& id) -> std::unique_ptr<audio::Capture> override {
     if (!device_->present || id != "core:9") throw std::runtime_error("no such source");
     ++device_->opens;
+    device_->opened_on = std::this_thread::get_id();
     return std::make_unique<InterfaceCapture>(device_);
   }
 
@@ -123,9 +135,10 @@ SYNC_TEST(an_unplugged_source_is_silence_until_it_is_plugged_back_in) {
   auto device = std::make_shared<Interface>();
   AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
   capture.start();
-  const auto started = capture.take_change();
-  SYNC_REQUIRE(started.has_value() && started->live);
-  SYNC_REQUIRE(capture.read().samples.size() == 4);
+  const auto started = capture.take_changes();
+  SYNC_REQUIRE(started.size() == 1 && started[0].live);
+  SYNC_REQUIRE(started[0].source.name == "Stage Interface");
+  SYNC_REQUIRE(capture.read().samples.size() == 1600);
 
   // The driver reports the unplug through the next read. That read is
   // silence, not an exception that would stop the picture.
@@ -133,9 +146,9 @@ SYNC_TEST(an_unplugged_source_is_silence_until_it_is_plugged_back_in) {
   device->present = false;
   const auto unplugged = std::chrono::steady_clock::now();
   SYNC_REQUIRE(capture.read().samples.empty());
-  const auto lost = capture.take_change();
-  SYNC_REQUIRE(lost.has_value() && !lost->live);
-  SYNC_REQUIRE(lost->reason.contains(QStringLiteral("disconnected")));
+  const auto lost = capture.take_changes();
+  SYNC_REQUIRE(lost.size() == 1 && !lost[0].live);
+  SYNC_REQUIRE(lost[0].reason.contains(QStringLiteral("disconnected")));
 
   // While it is gone, every frame reads silence and nothing more is reported.
   QElapsedTimer gone;
@@ -144,19 +157,21 @@ SYNC_TEST(an_unplugged_source_is_silence_until_it_is_plugged_back_in) {
     SYNC_REQUIRE(capture.read().samples.empty());
     QThread::msleep(16);
   }
-  SYNC_REQUIRE(!capture.take_change().has_value());
-  // The dead stream was closed off the render thread, and not at once:
-  // RtAudio is still finishing its own close when it reports an unplug.
+  SYNC_REQUIRE(capture.take_changes().empty());
+  // The dead stream was closed where it was opened, on the capture's own
+  // thread, and not at once: RtAudio is still finishing its own close when it
+  // reports an unplug.
   SYNC_REQUIRE(device->closed);
+  SYNC_REQUIRE(device->closed_on == device->opened_on);
   SYNC_REQUIRE(device->closed_on != std::this_thread::get_id());
   SYNC_REQUIRE(device->closed_at - unplugged >= std::chrono::milliseconds(400));
 
   device->broken = false;
   device->present = true;
-  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 4);
-  const auto back = capture.take_change();
-  SYNC_REQUIRE(back.has_value() && back->live);
-  SYNC_REQUIRE(capture.source().name == "Stage Interface");
+  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 1600);
+  const auto back = capture.take_changes();
+  SYNC_REQUIRE(back.size() == 1 && back[0].live);
+  SYNC_REQUIRE(back[0].source.name == "Stage Interface");
   SYNC_REQUIRE(device->opens == 2);
 }
 
@@ -165,15 +180,48 @@ SYNC_TEST(a_source_missing_at_start_is_waited_for) {
   device->present = false;
   AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
   capture.start();
-  const auto waiting = capture.take_change();
-  SYNC_REQUIRE(waiting.has_value() && !waiting->live);
-  SYNC_REQUIRE(waiting->reason == QStringLiteral("no audio input matches stage"));
+  const auto waiting = capture.take_changes();
+  SYNC_REQUIRE(waiting.size() == 1 && !waiting[0].live);
+  SYNC_REQUIRE(waiting[0].reason == QStringLiteral("no audio input matches stage"));
   SYNC_REQUIRE(capture.read().samples.empty());
 
   device->present = true;
-  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 4);
-  const auto heard = capture.take_change();
-  SYNC_REQUIRE(heard.has_value() && heard->live);
+  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 1600);
+  const auto heard = capture.take_changes();
+  SYNC_REQUIRE(heard.size() == 1 && heard[0].live);
+}
+
+SYNC_TEST(a_source_that_fails_at_once_reports_both_changes) {
+  auto device = std::make_shared<Interface>();
+  device->present = false;
+  AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
+  capture.start();
+  SYNC_REQUIRE(capture.take_changes().size() == 1);
+  // It comes back broken: heard, then lost on its first read.
+  device->broken = true;
+  device->present = true;
+  std::vector<AudioCapture::Change> changes;
+  QElapsedTimer waited;
+  waited.start();
+  while (changes.size() < 2 && waited.elapsed() < 3000) {
+    SYNC_REQUIRE(capture.read().samples.empty());
+    for (auto& change : capture.take_changes()) changes.push_back(std::move(change));
+    QThread::msleep(16);
+  }
+  SYNC_REQUIRE(changes.size() >= 2);
+  SYNC_REQUIRE(changes[0].live && !changes[1].live);
+}
+
+SYNC_TEST(the_live_stream_is_closed_on_the_capture_thread) {
+  auto device = std::make_shared<Interface>();
+  {
+    AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
+    capture.start();
+    SYNC_REQUIRE(capture.read().samples.size() == 1600);
+  }
+  SYNC_REQUIRE(device->closed);
+  SYNC_REQUIRE(device->closed_on == device->opened_on);
+  SYNC_REQUIRE(device->closed_on != std::this_thread::get_id());
 }
 
 SYNC_TEST(a_capture_waiting_for_its_source_stops_promptly) {
@@ -189,16 +237,53 @@ SYNC_TEST(a_capture_waiting_for_its_source_stops_promptly) {
   SYNC_REQUIRE(stopped.elapsed() < 250);
 }
 
+SYNC_TEST(levels_fall_to_zero_while_the_source_is_gone) {
+  auto device = std::make_shared<Interface>();
+  AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
+  capture.start();
+  nm::AudioInput input;
+  nm::AudioDevice heard;
+  const auto frame = [&] {
+    auto changes = feed_audio(capture, input, heard);
+    input.update();
+    return changes;
+  };
+  SYNC_REQUIRE(frame().size() == 1);
+  SYNC_REQUIRE(heard.name == QStringLiteral("Stage Interface"));
+  for (int i = 0; i < 30; ++i) (void)frame();
+  SYNC_REQUIRE(input.state().low > 0.1);
+
+  // Unplugged: the analysers do not hold the last sound heard.
+  device->broken = true;
+  device->present = false;
+  const auto lost = frame();
+  SYNC_REQUIRE(lost.size() == 1 && !lost[0].live);
+  SYNC_REQUIRE(input.state().low == 0.0 && input.state().vol == 0.0);
+  for (int i = 0; i < 10; ++i) (void)frame();
+  SYNC_REQUIRE(input.state().low == 0.0 && input.state().vol == 0.0);
+
+  device->broken = false;
+  device->present = true;
+  QElapsedTimer waited;
+  waited.start();
+  while (input.state().low <= 0.1 && waited.elapsed() < 3000) {
+    (void)frame();
+    QThread::msleep(16);
+  }
+  SYNC_REQUIRE(input.state().low > 0.1);
+}
+
+
 SYNC_TEST(a_fixture_source_delivers_interleaved_samples) {
   // Sync's backend serves synthetic 32-channel sources under this switch, so
   // the capture path runs with no microphone and no permission prompt.
   qputenv("SYNC_AUDIO_TEST_FIXTURE", "1");
   AudioCapture capture(QStringLiteral("audio_32_tones"));
   capture.start();
-  const auto started = capture.take_change();
-  SYNC_REQUIRE(started.has_value() && started->live);
-  SYNC_REQUIRE(capture.source().channels == 32);
-  SYNC_REQUIRE(capture.source().sample_rate == 48000);
+  const auto started = capture.take_changes();
+  SYNC_REQUIRE(started.size() == 1 && started[0].live);
+  SYNC_REQUIRE(started[0].source.channels == 32);
+  SYNC_REQUIRE(started[0].source.sample_rate == 48000);
   audio::Packet packet;
   QElapsedTimer waited;
   waited.start();
