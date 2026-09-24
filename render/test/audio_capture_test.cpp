@@ -110,6 +110,31 @@ class InterfaceBackend final : public audio::InputBackend {
   std::shared_ptr<Interface> device_;
 };
 
+// A capture over Sync's own capture ring, which hands out at most
+// kMaximumPacketFrames a read, filled by the test as a driver would fill it.
+class RingCapture final : public audio::Capture {
+ public:
+  explicit RingCapture(std::shared_ptr<audio::CaptureBuffer> ring) : ring_(std::move(ring)) {}
+  auto read() -> audio::Packet override { return ring_->read(); }
+
+ private:
+  std::shared_ptr<audio::CaptureBuffer> ring_;
+};
+
+class RingBackend final : public audio::InputBackend {
+ public:
+  explicit RingBackend(std::shared_ptr<audio::CaptureBuffer> ring) : ring_(std::move(ring)) {}
+  auto sources() -> std::vector<audio::Source> override {
+    return {{"core:3", "Driver Ring", 1, 48000}};
+  }
+  auto open(const std::string&) -> std::unique_ptr<audio::Capture> override {
+    return std::make_unique<RingCapture>(ring_);
+  }
+
+ private:
+  std::shared_ptr<audio::CaptureBuffer> ring_;
+};
+
 // Reads as the render thread does, once a frame, until samples arrive.
 [[nodiscard]] auto read_until_heard(AudioCapture& capture, int milliseconds) -> audio::Packet {
   QElapsedTimer waited;
@@ -234,7 +259,59 @@ SYNC_TEST(a_capture_waiting_for_its_source_stops_promptly) {
     QThread::msleep(50);
     stopped.start();
   }
-  SYNC_REQUIRE(stopped.elapsed() < 250);
+  // Not the 500 ms to its next search.
+  SYNC_REQUIRE(stopped.elapsed() < 400);
+}
+
+SYNC_TEST(a_stream_unplugged_just_before_shutdown_is_closed_late) {
+  auto device = std::make_shared<Interface>();
+  QElapsedTimer stopped;
+  std::chrono::steady_clock::time_point unplugged;
+  {
+    AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
+    capture.start();
+    SYNC_REQUIRE(capture.read().samples.size() == 1600);
+    // Unplugged, and the helper stops before the render thread reads again.
+    device->broken = true;
+    unplugged = std::chrono::steady_clock::now();
+    stopped.start();
+  }
+  SYNC_REQUIRE(device->closed);
+  SYNC_REQUIRE(device->closed_on == device->opened_on);
+  SYNC_REQUIRE(device->closed_at - unplugged >= std::chrono::milliseconds(400));
+  SYNC_REQUIRE(stopped.elapsed() < 3000);
+}
+
+SYNC_TEST(the_analysers_hear_the_newest_sound_every_frame) {
+  // A driver delivers 800 frames of 48 kHz audio per 60 fps frame, more than
+  // one read returns. Five seconds of silence, then a loud 60 Hz tone: the
+  // bass band must rise within a few frames, not once a backlog of old
+  // silence has been worked through.
+  auto ring = std::make_shared<audio::CaptureBuffer>(48000, 1);
+  AudioCapture capture(QStringLiteral("ring"), std::make_unique<RingBackend>(ring));
+  capture.start();
+  nm::AudioInput input;
+  nm::AudioDevice heard;
+  std::uint64_t sample = 0;
+  const auto frame = [&](bool tone) {
+    std::vector<float> samples(800);
+    for (float& value : samples) {
+      const double t = static_cast<double>(sample++) / 48000.0;
+      value = tone ? static_cast<float>(0.5 * std::sin(2.0 * 3.14159265358979323846 * 60.0 * t))
+                   : 0.0f;
+    }
+    ring->push(samples);
+    (void)feed_audio(capture, input, heard);
+    input.update();
+  };
+  for (int i = 0; i < 300; ++i) frame(false);
+  SYNC_REQUIRE(input.state().low == 0.0);
+  int frames_to_hear = 0;
+  while (input.state().low <= 0.1 && frames_to_hear < 60) {
+    frame(true);
+    ++frames_to_hear;
+  }
+  SYNC_REQUIRE(frames_to_hear <= 5);
 }
 
 SYNC_TEST(levels_fall_to_zero_while_the_source_is_gone) {

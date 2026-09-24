@@ -15,6 +15,13 @@ namespace {
 // the HAL's thread, and finishes that close after the report returns.
 constexpr auto kSearchInterval = std::chrono::milliseconds(500);
 
+// A 60 fps frame brings 735 to 800 frames of audio, and one read returns at
+// most kMaximumPacketFrames (480, the browser protocol's packet). Reading
+// once a frame let the backlog fill the capture ring within seconds, after
+// which the analysers heard sound 1.4 s late. The bound only guarantees the
+// loop ends: 256 reads is more than a full ring.
+constexpr int kMaximumReadsPerFrame = 256;
+
 }  // namespace
 
 auto choose_audio_source(const std::vector<audio::Source>& sources, const QString& wanted)
@@ -38,10 +45,19 @@ AudioCapture::AudioCapture(QString wanted, std::unique_ptr<audio::InputBackend> 
     : wanted_(std::move(wanted)), backend_(std::move(backend)) {}
 
 AudioCapture::~AudioCapture() {
+  // The live stream is closed where it was opened: at once, unless it has
+  // just failed and RtAudio may still be inside its own close.
+  auto close_at = Clock::now();
+  if (capture_) {
+    try {
+      (void)capture_->read();
+    } catch (...) {
+      close_at += kSearchInterval;
+    }
+  }
   {
     std::lock_guard lock(mutex_);
-    // The live stream is closed where it was opened, and at once.
-    if (capture_) retired_.push_back({std::move(capture_), Clock::now()});
+    if (capture_) retired_.push_back({std::move(capture_), close_at});
     stopping_ = true;
   }
   wake_.notify_all();
@@ -168,18 +184,22 @@ auto audio_device_for(const audio::Source& source) -> nm::AudioDevice {
 
 auto feed_audio(AudioCapture& capture, nm::AudioInput& input, nm::AudioDevice& device)
     -> std::vector<AudioCapture::Change> {
-  const audio::Packet packet = capture.read();
-  // Before the samples: a source heard again may not be the one lost.
-  std::vector<AudioCapture::Change> changes = capture.take_changes();
-  for (const AudioCapture::Change& change : changes) {
-    if (change.live) {
-      device = audio_device_for(change.source);
-      continue;
+  std::vector<AudioCapture::Change> changes;
+  for (int reads = 0; reads < kMaximumReadsPerFrame; ++reads) {
+    const audio::Packet packet = capture.read();
+    // In the order they happened: a source heard again (before its first
+    // samples, and it may not be the one lost), or a source lost (after
+    // its last).
+    for (AudioCapture::Change& change : capture.take_changes()) {
+      if (change.live) {
+        device = audio_device_for(change.source);
+      } else {
+        input.disconnectDefault();
+        if (!device.id.isEmpty()) input.disconnectDevice(device.id);
+      }
+      changes.push_back(std::move(change));
     }
-    input.disconnectDefault();
-    if (!device.id.isEmpty()) input.disconnectDevice(device.id);
-  }
-  if (packet.channels > 0 && !packet.samples.empty()) {
+    if (packet.channels == 0 || packet.samples.empty()) break;
     const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
     input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
     input.pushDevice(device, packet.samples.data(), frames);

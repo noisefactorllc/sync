@@ -54,8 +54,9 @@ class AudioCapture {
   // Starts the audio thread and waits for its first attempt to open the
   // wanted source; if that fails, the thread keeps looking.
   void start();
-  // Samples captured since the last call, interleaved float32; empty when
-  // nothing new has arrived or the source is unavailable. Never throws.
+  // Samples captured since the last call, interleaved float32, at most
+  // audio::kMaximumPacketFrames of them (read again for the rest); empty
+  // when nothing new has arrived or the source is unavailable. Never throws.
   [[nodiscard]] auto read() -> audio::Packet;
   // The changes since the last call, oldest first.
   [[nodiscard]] auto take_changes() -> std::vector<Change>;
@@ -97,8 +98,9 @@ class AudioCapture {
 // The engine's name for a source: audio(name: "...") resolves against it.
 [[nodiscard]] auto audio_device_for(const audio::Source& source) -> nm::AudioDevice;
 
-// One rendered frame's audio. Samples captured since the last frame go to
-// the engine's input, as the default input and as the source's own device.
+// One rendered frame's audio. Every sample captured since the last frame
+// goes to the engine's input, as the default input and as the source's own
+// device.
 // While the source is unavailable both are disconnected, so levels read zero
 // rather than holding the last sound heard. Returns the frame's changes, for
 // the event log; `device` follows the source being heard.
