@@ -17,11 +17,13 @@ namespace {
 
 using namespace noisefactor::sync::render_helper;
 
-// The gradient's rotation follows CC 7 on channel 1 across its whole range
+// The gradient's rotation follows CC 7 on channel 1 over a quarter turn
 // (mode 5 is 7-bit control change; the default mode reads note velocity).
+// Not -180..180: those ends are the same angle, which only float rounding
+// on some GPUs would tell apart.
 const QString kMidiRotation = QStringLiteral(
     "search synth\n"
-    "let angle = midi(channel: 1, mode: 5, cc: 7, min: -180, max: 180)\n"
+    "let angle = midi(channel: 1, mode: 5, cc: 7, min: 0, max: 90)\n"
     "gradient(seed: 1, rotation: angle).write(o0)\n"
     "render(o0)\n");
 

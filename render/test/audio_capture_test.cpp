@@ -21,10 +21,11 @@ namespace {
 using namespace noisefactor::sync;
 using namespace noisefactor::sync::render_helper;
 
-// The gradient's rotation follows the bass band (band 0) across its range.
+// The gradient's rotation follows the bass band (band 0) over a quarter
+// turn. Not -180..180: those ends are the same angle.
 const QString kAudioRotation = QStringLiteral(
     "search synth\n"
-    "let angle = audio(band: 0, min: -180, max: 180)\n"
+    "let angle = audio(band: 0, min: 0, max: 90)\n"
     "gradient(seed: 1, rotation: angle).write(o0)\n"
     "render(o0)\n");
 
