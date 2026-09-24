@@ -62,6 +62,12 @@ struct Sample {
   std::int64_t latency_us = 0;
   std::int64_t browser_age_us = 0;
   std::int64_t transport_latency_us = 0;
+  // The browser stamps wall time as timeOrigin + performance.now(), fixed at
+  // page load; this probe reads the system clock. When the system clock is
+  // slewed during a long run the two drift apart and a fast frame can read as
+  // a negative latency. Such a frame still arrived: count it, but keep it out
+  // of the latency statistics.
+  bool clock_skewed = false;
 };
 
 struct ReadbackSlot {
@@ -212,8 +218,9 @@ auto decode_marker(const void* raw_bytes, Sample& sample,
                           static_cast<std::int64_t>(sample.presentation_time_us);
   sample.transport_latency_us =
       received_time_us - static_cast<std::int64_t>(sample.browser_send_time_us);
-  return sample.latency_us >= 0 && sample.browser_age_us >= 0 &&
-         sample.transport_latency_us >= 0;
+  if (sample.browser_age_us < 0) return false;
+  sample.clock_skewed = sample.latency_us < 0 || sample.transport_latency_us < 0;
+  return true;
 }
 
 auto percentile(std::vector<std::int64_t> sorted, double fraction) -> std::int64_t {
@@ -516,7 +523,12 @@ int main(int argc, char** argv) {
     latencies.reserve(captured.size());
     browser_ages.reserve(captured.size());
     transport_latencies.reserve(captured.size());
+    std::size_t clock_skewed_markers = 0;
     for (const Sample& sample : captured) {
+      if (sample.clock_skewed) {
+        ++clock_skewed_markers;
+        continue;
+      }
       latencies.push_back(sample.latency_us);
       browser_ages.push_back(sample.browser_age_us);
       transport_latencies.push_back(sample.transport_latency_us);
@@ -563,6 +575,7 @@ int main(int argc, char** argv) {
               << state->dimension_mismatches.load()
               << ",\"commandErrors\":" << state->command_errors.load()
               << ",\"missedSequences\":" << missed_sequences
+              << ",\"clockSkewedMarkers\":" << clock_skewed_markers
               << ",\"firstSequence\":" << (captured.empty() ? 0 : captured.front().sequence)
               << ",\"lastSequence\":" << (captured.empty() ? 0 : captured.back().sequence)
               << ",\"gapAfter\":[";
