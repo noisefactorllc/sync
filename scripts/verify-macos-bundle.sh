@@ -47,11 +47,13 @@ if [[ -n "$expected_version" && "$version" != "$expected_version" ]]; then
   exit 1
 fi
 
+# One file(1) call classifies every file in the bundle. Running it once per
+# file cost a process per shader and effect definition after the render
+# helper's data joined the bundle (626 files), and pushed the verifier past
+# its test's time limit on a hosted runner.
 mach_count=0
-while IFS= read -r -d '' candidate; do
-  if [[ ! -f "$candidate" ]] || ! file -b "$candidate" | grep -q 'Mach-O'; then
-    continue
-  fi
+while IFS= read -r candidate; do
+  [[ -f "$candidate" ]] || continue
   mach_count=$((mach_count + 1))
   if ! lipo -archs "$candidate" | tr ' ' '\n' | grep -qx arm64; then
     echo "verify-macos-bundle: $candidate does not contain arm64" >&2
@@ -94,7 +96,8 @@ while IFS= read -r -d '' candidate; do
         ;;
     esac
   done < <(otool -L "$candidate" | tail -n +2)
-done < <(find "$contents" -type f -print0)
+done < <(find "$contents" -type f -print0 | xargs -0 file -N -F $'\t' |
+          awk -F '\t' '$2 ~ /Mach-O/ { print $1 }')
 
 if (( mach_count < 4 )); then
   echo "verify-macos-bundle: expected app, helper, camera extension, and framework Mach-O files" >&2

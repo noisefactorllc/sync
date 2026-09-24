@@ -133,7 +133,10 @@ test("macOS bundle verifier accepts Mach-O targets below the advertised minimum"
     const result = spawnSync(path.join(sourceDirectory, "scripts/verify-macos-bundle.sh"), [
       copiedApp,
       plist("CFBundleShortVersionString"),
-    ], { encoding: "utf8", timeout: 10_000 });
+    // The limit catches a hung verifier. A bundle with the render helper has
+    // 34 Mach-O files to check, and hosted runners are several times slower
+    // than a developer Mac; 10 s was sized for a four-binary bundle.
+    ], { encoding: "utf8", timeout: 60_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally {
