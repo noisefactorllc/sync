@@ -7,6 +7,7 @@
 #include <sync/protocol.hpp>
 
 #include "../../src/platform/macos/metal_device_selection.hpp"
+#include "../../src/platform/macos/metal_tsan.hpp"
 
 #include <algorithm>
 #include <array>
@@ -140,7 +141,8 @@ class RecordingConsumer final : public MetalFrameConsumer {
     pending_outputs.push_back(output);
     const std::uint32_t width = metadata.width;
     const std::uint32_t height = metadata.height;
-    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+      detail::metal_handler_started((__bridge const void*)completed);
       std::vector<std::byte> packed(static_cast<std::size_t>(width) * height * 4U);
       const auto* source = static_cast<const std::byte*>(output.contents);
       for (std::uint32_t y = 0; y < height; ++y) {
@@ -154,6 +156,7 @@ class RecordingConsumer final : public MetalFrameConsumer {
       }
       completion_count.fetch_add(1, std::memory_order_release);
     }];
+    detail::metal_handler_added((__bridge const void*)command_buffer);
     return true;
   }
 
@@ -224,9 +227,11 @@ class GateConsumer final : public MetalFrameConsumer {
                     const MetalFrameMetadata&) noexcept -> bool override {
     [command_buffer encodeWaitForEvent:event value:gate_value];
     const auto proof = completion_proof;
-    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+      detail::metal_handler_started((__bridge const void*)completed);
       proof->fetch_add(1, std::memory_order_release);
     }];
+    detail::metal_handler_added((__bridge const void*)command_buffer);
     ++encode_calls;
     return true;
   }

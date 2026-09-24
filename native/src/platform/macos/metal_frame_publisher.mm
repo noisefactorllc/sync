@@ -6,6 +6,7 @@
 
 #include "metal_completion_tracker.hpp"
 #include "metal_device_selection.hpp"
+#include "metal_tsan.hpp"
 
 #include <array>
 #include <cstddef>
@@ -553,6 +554,7 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
 
       auto completion = claimed_slot->completion;
       [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        detail::metal_handler_started((__bridge const void*)completed);
         @autoreleasepool {
           if (completed.status == MTLCommandBufferStatusCompleted) {
             completion->complete_success();
@@ -566,6 +568,7 @@ auto MetalFramePublisher::publish(std::string_view sender_id,
           }
         }
       }];
+      detail::metal_handler_added((__bridge const void*)command_buffer);
       completion_installed = true;
       // The watchdog measures committed GPU work, not CPU staging or a cached
       // libuv loop time from before this frame began.

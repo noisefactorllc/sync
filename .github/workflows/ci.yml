@@ -120,6 +120,44 @@ jobs:
       - name: Run real-daemon loopback tests
         run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
 
+  # ThreadSanitizer over the tests that exercise cross-thread handoffs: the
+  # Metal publisher's completion handlers, the render ring's seqlocked slots
+  # and leases, and the render supervisor. Metal is not instrumented, so the
+  # publisher annotates the handler handoff (metal_tsan.hpp); anything TSan
+  # reports beyond that is a real race.
+  thread-sanitizer:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
+    name: macOS thread sanitizer
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: brew install cmake pkg-config openssl@3 libuv
+
+      - name: Build the threaded tests with TSan
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLAGS='-fsanitize=thread -fno-omit-frame-pointer'
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_OBJCXX_FLAGS="$FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+          cmake --build build-tsan --parallel 4 \
+            --target sync_metal_publisher_tests sync_render_ring_tests sync_render_supervisor_tests
+
+      - name: Run the threaded tests under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          build-tsan/sync_metal_publisher_tests
+          build-tsan/sync_render_ring_tests
+          build-tsan/sync_render_supervisor_tests
+
   linux:
     needs: changes
     if: needs.changes.outputs.product == 'true'
