@@ -3,6 +3,8 @@
 #include <sync/pairing.hpp>
 #include <sync/pairing_store.hpp>
 #include <sync/publisher_hub.hpp>
+#include <sync/render/render_ring.hpp>
+#include <sync/render/render_supervisor.hpp>
 #include <sync/server.hpp>
 #include <sync/audio_capture.hpp>
 
@@ -43,6 +45,7 @@
 #endif
 
 #include <array>
+#include <uv.h>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
@@ -514,6 +517,43 @@ int run_production(nfsync::ServerOptions &options,
 
 }  // namespace
 
+// sync-render ships beside syncd; --render-helper overrides that for
+// development builds, where the two live in different build trees.
+[[nodiscard]] std::string default_render_helper_path() {
+  std::array<char, 4096> path{};
+  std::size_t length = path.size();
+  if (uv_exepath(path.data(), &length) != 0) return {};
+  std::string directory(path.data(), length);
+  const std::size_t slash = directory.find_last_of("/\\");
+  if (slash == std::string::npos) return {};
+  directory.resize(slash + 1);
+#if defined(_WIN32)
+  return directory + "sync-render.exe";
+#else
+  return directory + "sync-render";
+#endif
+}
+
+[[nodiscard]] nfsync::render::RenderSupervisorOptions render_options_for(
+    const nfsync::cli::Options& command) {
+  nfsync::render::RenderSupervisorOptions render;
+  render.helper_path = command.render_helper_path.empty() ? default_render_helper_path()
+                                                          : command.render_helper_path;
+  render.helper_arguments = {"--join", command.render_join};
+  if (!command.render_seance_url.empty()) {
+    render.helper_arguments.push_back("--seance-url");
+    render.helper_arguments.push_back(command.render_seance_url);
+  }
+  if (command.render_width != 0) {
+    render.helper_arguments.push_back("--width");
+    render.helper_arguments.push_back(std::to_string(command.render_width));
+    render.helper_arguments.push_back("--height");
+    render.helper_arguments.push_back(std::to_string(command.render_height));
+  }
+  render.ring_name = nfsync::render::default_render_ring_name();
+  return render;
+}
+
 int main(int argc, char** argv) {
   try {
 #if defined(__APPLE__)
@@ -563,6 +603,11 @@ int main(int argc, char** argv) {
 
     nfsync::ServerOptions options;
     options.port = command.port;
+    nfsync::render::RenderSupervisorOptions render_options;
+    if (!command.render_join.empty()) {
+      render_options = render_options_for(command);
+      options.render = &render_options;
+    }
     if (command.mode == nfsync::cli::Mode::StaticTest) {
       options.allowed_origin = command.allowed_origin;
       options.test_token = command.test_token;

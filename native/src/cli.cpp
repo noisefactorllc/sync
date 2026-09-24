@@ -58,6 +58,40 @@ bool valid_camera_device_path(std::string_view value) noexcept {
   return true;
 }
 
+// A session id or share link, or a server URL, handed to sync-render as one
+// argv entry. Bounded and printable, with no spaces, so it cannot smuggle a
+// second argument or a control sequence into the helper's command line.
+bool valid_render_text(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 2048) return false;
+  for (const unsigned char byte : value) {
+    if (byte <= 0x20U || byte >= 0x7fU) return false;
+  }
+  return true;
+}
+
+bool valid_render_url(std::string_view value) noexcept {
+  return valid_render_text(value) &&
+         (value.starts_with("https://") || value.starts_with("http://"));
+}
+
+bool parse_dimension(std::string_view value, std::uint32_t& output) noexcept {
+  if (value.empty() || value.front() == '0') return false;
+  std::uint32_t parsed = 0;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (error != std::errc{} || end != value.data() + value.size() || parsed > 4096U) return false;
+  output = parsed;
+  return true;
+}
+
+// WIDTHxHEIGHT, each 1..4096: the render ring's and the wire protocol's limit.
+bool parse_render_size(std::string_view value, std::uint32_t& width,
+                       std::uint32_t& height) noexcept {
+  const std::size_t x = value.find('x');
+  if (x == std::string_view::npos) return false;
+  return parse_dimension(value.substr(0, x), width) &&
+         parse_dimension(value.substr(x + 1), height);
+}
+
 bool parse_port(std::string_view value, std::uint16_t& output) noexcept {
   if (value.empty() || (value.size() > 1 && value.front() == '0')) return false;
   unsigned int parsed = 0;
@@ -103,6 +137,10 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   bool saw_revoke = false;
   bool saw_register_camera = false;
   bool saw_unregister_camera = false;
+  bool saw_render_join = false;
+  bool saw_render_helper = false;
+  bool saw_render_url = false;
+  bool saw_render_size = false;
 
   for (std::size_t index = 0; index < arguments.size(); ++index) {
     const std::string_view argument = arguments[index];
@@ -131,7 +169,9 @@ ParseResult parse(std::span<const std::string_view> arguments) {
         argument != "--test-token" && argument != "--publisher" &&
         argument != "--syphon-framework" && argument != "--spout-library" &&
         argument != "--ndi-runtime" && argument != "--camera-device" &&
-        argument != "--revoke-origin") {
+        argument != "--revoke-origin" && argument != "--render-join" &&
+        argument != "--render-helper" && argument != "--render-seance-url" &&
+        argument != "--render-size") {
       return result;
     }
     if (++index >= arguments.size()) return result;
@@ -167,6 +207,20 @@ ParseResult parse(std::span<const std::string_view> arguments) {
                valid_camera_device_path(value)) {
       saw_camera_device = true;
       options.camera_device_path.assign(value);
+    } else if (argument == "--render-join" && !saw_render_join && valid_render_text(value)) {
+      saw_render_join = true;
+      options.render_join.assign(value);
+    } else if (argument == "--render-helper" && !saw_render_helper &&
+               valid_runtime_path(value)) {
+      saw_render_helper = true;
+      options.render_helper_path.assign(value);
+    } else if (argument == "--render-seance-url" && !saw_render_url &&
+               valid_render_url(value)) {
+      saw_render_url = true;
+      options.render_seance_url.assign(value);
+    } else if (argument == "--render-size" && !saw_render_size &&
+               parse_render_size(value, options.render_width, options.render_height)) {
+      saw_render_size = true;
     } else if (argument == "--revoke-origin" && !saw_revoke) {
       const auto normalized = normalize_origin(value);
       if (!normalized.ok()) return result;
@@ -190,6 +244,11 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   const bool camera_device_without_publisher =
       saw_camera_device && saw_publisher &&
       !options.selects_publisher("camera");
+  // The helper, server and size only configure a render session; naming
+  // them without one is a usage error, like a runtime path without its
+  // provider.
+  const bool saw_render = saw_render_join || saw_render_helper || saw_render_url || saw_render_size;
+  const bool render_settings_without_join = saw_render && !saw_render_join;
 
   // Each camera command is the whole command line. Combining them with each
   // other, with pairing management, or with any server argument is a usage
@@ -198,7 +257,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   if (camera_management) {
     if (saw_register_camera == saw_unregister_camera || saw_list || saw_revoke || saw_port ||
         saw_origin || saw_token || saw_test_receiver || saw_publisher ||
-        saw_runtime_path || saw_camera_device) {
+        saw_runtime_path || saw_camera_device || saw_render) {
       return result;
     }
     options.mode = saw_register_camera ? Mode::RegisterCamera : Mode::UnregisterCamera;
@@ -210,7 +269,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   const bool test_shape = saw_origin || saw_token || saw_test_receiver;
   if (management) {
     if (saw_list == saw_revoke || saw_port || test_shape || saw_publisher ||
-        saw_runtime_path || saw_camera_device) {
+        saw_runtime_path || saw_camera_device || saw_render) {
       return result;
     }
     options.mode = saw_list ? Mode::ListPairings : Mode::RevokeOrigin;
@@ -221,7 +280,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   if (test_shape) {
     if (!saw_port || !saw_origin || !saw_token ||
         saw_test_receiver == saw_publisher || runtime_path_without_publisher ||
-        camera_device_without_publisher ||
+        camera_device_without_publisher || render_settings_without_join ||
         (saw_test_receiver && saw_camera_device)) {
       return result;
     }
@@ -231,7 +290,7 @@ ParseResult parse(std::span<const std::string_view> arguments) {
   }
 
   if (runtime_path_without_publisher || camera_device_without_publisher ||
-      options.port == 0) {
+      render_settings_without_join || options.port == 0) {
     return result;
   }
   options.mode = Mode::Production;
@@ -243,6 +302,8 @@ void print_usage(std::ostream& error) {
            " [--publisher <syphon|spout|ndi|camera>]..."
            " [--syphon-framework <path>] [--spout-library <path>]"
            " [--ndi-runtime <path>] [--camera-device /dev/videoN]\n"
+           "             [--render-join <session-id-or-link> [--render-helper <path>]"
+           " [--render-seance-url <url>] [--render-size <WxH>]]\n"
            "       syncd --port <0-65535> --test-origin <origin>"
            " --test-token <token>"
            " (--test-receiver | --publisher <syphon|spout|ndi|camera>...)\n"

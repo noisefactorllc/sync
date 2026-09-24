@@ -181,7 +181,7 @@ add_executable(sync_protocol_tests
   native/src/server.cpp
 )
 target_compile_features(sync_protocol_tests PRIVATE cxx_std_20)
-target_link_libraries(sync_protocol_tests PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
+target_link_libraries(sync_protocol_tests PRIVATE sync_protocol sync_render_supervisor ${SYNC_LIBUV_TARGET})
 target_compile_definitions(sync_protocol_tests PRIVATE SYNC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(syncd
@@ -195,12 +195,12 @@ target_compile_features(sync_audio_native_probe PRIVATE cxx_std_20)
 target_link_libraries(sync_audio_native_probe PRIVATE sync_audio_native)
 target_link_libraries(syncd PRIVATE sync_audio_native)
 target_compile_features(syncd PRIVATE cxx_std_20)
-target_link_libraries(syncd PRIVATE sync_cli sync_ndi_publisher ${SYNC_LIBUV_TARGET})
+target_link_libraries(syncd PRIVATE sync_cli sync_ndi_publisher sync_render_supervisor ${SYNC_LIBUV_TARGET})
 
 enable_testing()
 add_executable(sync_audio_test_server native/test/audio_test_server.cpp native/src/server.cpp)
 target_compile_features(sync_audio_test_server PRIVATE cxx_std_20)
-target_link_libraries(sync_audio_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
+target_link_libraries(sync_audio_test_server PRIVATE sync_protocol sync_render_supervisor ${SYNC_LIBUV_TARGET})
 add_test(NAME sync_protocol_tests COMMAND sync_protocol_tests)
 
 add_executable(sync_pairing_store_tests
@@ -443,7 +443,7 @@ target_compile_definitions(sync_pairing_test_server PRIVATE
   # timeout cases would otherwise trip instead.
   SYNC_PAIRING_PROMPT_DEADLINE_MS=1500
 )
-target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol ${SYNC_LIBUV_TARGET})
+target_link_libraries(sync_pairing_test_server PRIVATE sync_protocol sync_render_supervisor ${SYNC_LIBUV_TARGET})
 
 # The companion model is platform-neutral policy — supervision, recovery
 # backoff, and health reporting — shared by the macOS menu-bar app and the
@@ -550,7 +550,9 @@ add_library(sync_render_source
   native/src/render/render_source.cpp
 )
 target_compile_features(sync_render_source PUBLIC cxx_std_20)
-target_link_libraries(sync_render_source PUBLIC sync_render_ring sync_protocol)
+# FramePublisher and FrameView are header-only types; the source needs the
+# protocol headers but none of sync_protocol's code.
+target_link_libraries(sync_render_source PUBLIC sync_render_ring)
 
 add_executable(sync_render_ring_tests
   native/test/render/render_ring_test.cpp
@@ -561,6 +563,31 @@ target_compile_features(sync_render_ring_tests PRIVATE cxx_std_20)
 target_include_directories(sync_render_ring_tests PRIVATE native/test)
 target_link_libraries(sync_render_ring_tests PRIVATE sync_render_source Threads::Threads)
 add_test(NAME sync_render_ring_tests COMMAND sync_render_ring_tests)
+
+add_library(sync_render_supervisor
+  native/src/render/render_supervisor.cpp
+)
+target_compile_features(sync_render_supervisor PUBLIC cxx_std_20)
+target_link_libraries(sync_render_supervisor PUBLIC sync_render_source ${SYNC_LIBUV_TARGET})
+
+# Stands in for sync-render in the supervisor tests: same ring, same event
+# lines, same stdin contract, no GPU.
+add_executable(sync_fake_render_helper native/test/render/fake_render_helper.cpp)
+target_compile_features(sync_fake_render_helper PRIVATE cxx_std_20)
+target_link_libraries(sync_fake_render_helper PRIVATE sync_render_ring Threads::Threads)
+
+add_executable(sync_render_supervisor_tests
+  native/test/render/render_supervisor_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_render_supervisor_tests PRIVATE cxx_std_20)
+target_include_directories(sync_render_supervisor_tests PRIVATE native/test)
+target_compile_definitions(sync_render_supervisor_tests PRIVATE
+  SYNC_FAKE_RENDER_HELPER="$<TARGET_FILE:sync_fake_render_helper>"
+)
+target_link_libraries(sync_render_supervisor_tests PRIVATE sync_render_supervisor)
+add_dependencies(sync_render_supervisor_tests sync_fake_render_helper)
+add_test(NAME sync_render_supervisor_tests COMMAND sync_render_supervisor_tests)
 
 option(SYNC_BUILD_RENDER "Build the Qt render helper (sync-render)" OFF)
 if(SYNC_BUILD_RENDER)

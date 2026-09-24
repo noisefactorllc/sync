@@ -6,6 +6,7 @@
 #include <sync/frame_receiver.hpp>
 #include <sync/origin.hpp>
 #include <sync/pairing.hpp>
+#include <sync/render/render_supervisor.hpp>
 #include <sync/websocket.hpp>
 
 #include <openssl/crypto.h>
@@ -899,6 +900,17 @@ class Server {
                        kDeadlineSweepIntervalMs) != 0) {
       return false;
     }
+    // Last, so every handle the render path shares the loop with exists. A
+    // render supervisor that cannot start costs the render sender only:
+    // browser senders are served either way.
+    if (options_.render != nullptr) {
+      render_supervisor_ =
+          std::make_unique<render::RenderSupervisor>(&loop_, publisher_, *options_.render);
+      if (!render_supervisor_->start()) {
+        std::cerr << "syncd: render supervisor failed to start\n";
+        render_supervisor_->stop();
+      }
+    }
     return true;
   }
 
@@ -933,6 +945,9 @@ class Server {
       uv_timer_stop(&deadline_timer_);
       close_handle(reinterpret_cast<uv_handle_t*>(&deadline_timer_));
     }
+    // Closes the render sender, asks the helper to exit, and closes the
+    // supervisor's handles, which the shutdown loop then runs to completion.
+    if (render_supervisor_ != nullptr) render_supervisor_->stop();
   }
 
   bool valid_host(std::string_view host) const {
@@ -2237,6 +2252,7 @@ class Server {
   FramePublisher &publisher_;
   FrameReceiver receiver_;
   std::unique_ptr<pairing::AuthorityWorker> authority_worker_;
+  std::unique_ptr<render::RenderSupervisor> render_supervisor_;
   bool can_send_ = false;
   std::string welcome_body_;
   std::string health_body_;

@@ -444,3 +444,55 @@ SYNC_TEST(cli_accepts_camera_as_a_publisher_on_every_platform) {
   SYNC_REQUIRE(cli::is_known_publisher("camera"));
   SYNC_REQUIRE(!parse({"--publisher", "camera", "--publisher", "camera"}).ok());
 }
+
+namespace {
+
+SYNC_TEST(cli_render_join_configures_the_render_helper) {
+  const auto joined = parse({"--render-join", "https://noisedeck.app/?seance=Ab12Cd",
+                             "--render-helper", "/opt/sync/sync-render",
+                             "--render-seance-url", "http://127.0.0.1:8765",
+                             "--render-size", "1280x720"});
+  SYNC_REQUIRE(joined.ok());
+  SYNC_REQUIRE(joined.options.mode == cli::Mode::Production);
+  SYNC_REQUIRE(joined.options.render_join == "https://noisedeck.app/?seance=Ab12Cd");
+  SYNC_REQUIRE(joined.options.render_helper_path == "/opt/sync/sync-render");
+  SYNC_REQUIRE(joined.options.render_seance_url == "http://127.0.0.1:8765");
+  SYNC_REQUIRE(joined.options.render_width == 1280);
+  SYNC_REQUIRE(joined.options.render_height == 720);
+
+  const auto bare = parse({"--render-join", "Ab12Cd"});
+  SYNC_REQUIRE(bare.ok());
+  SYNC_REQUIRE(bare.options.render_width == 0);
+  SYNC_REQUIRE(bare.options.render_helper_path.empty());
+
+  // The static test shape can render too, so a render session can be
+  // exercised against the test receiver.
+  SYNC_REQUIRE(parse({"--port", "0", "--test-origin", "http://localhost:3000", "--test-token",
+                      "token", "--test-receiver", "--render-join", "Ab12Cd"})
+                   .ok());
+}
+
+SYNC_TEST(cli_render_settings_need_a_session_and_valid_values) {
+  SYNC_REQUIRE(!parse({"--render-helper", "/opt/sync/sync-render"}).ok());
+  SYNC_REQUIRE(!parse({"--render-size", "1920x1080"}).ok());
+  SYNC_REQUIRE(!parse({"--render-seance-url", "https://seance.noisefactor.io"}).ok());
+  // One argv entry each: no spaces or control characters can reach the
+  // helper's command line.
+  SYNC_REQUIRE(!parse({"--render-join", "Ab12Cd --frames 1"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", ""}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-join", "b"}).ok());
+  SYNC_REQUIRE(!parse({"--render-join", "a", "--render-seance-url", "seance.noisefactor.io"}).ok());
+  for (const std::string_view size : {"1920", "0x1080", "1920x0", "4097x10", "10x4097",
+                                      "01920x1080", "1920x1080x2", "x1080", "1920x"}) {
+    SYNC_REQUIRE(!parse({"--render-join", "a", "--render-size", size}).ok());
+  }
+  SYNC_REQUIRE(parse({"--render-join", "a", "--render-size", "4096x4096"}).ok());
+}
+
+SYNC_TEST(cli_render_flags_are_not_part_of_management_or_camera_commands) {
+  SYNC_REQUIRE(!parse({"--list-pairings", "--render-join", "a"}).ok());
+  SYNC_REQUIRE(!parse({"--register-camera", "--render-join", "a"}).ok());
+  SYNC_REQUIRE(!parse({"--revoke-origin", "https://noisedeck.app", "--render-join", "a"}).ok());
+}
+
+}  // namespace

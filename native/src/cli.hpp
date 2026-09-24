@@ -57,6 +57,13 @@ struct Options {
   std::string ndi_runtime_path;
   std::string camera_device_path;
   NormalizedOrigin revoke_origin{};
+  // Render path: sync-render joins this seance session (id or share link)
+  // and syncd publishes what it renders. Empty means no render helper.
+  std::string render_join;
+  std::string render_helper_path;
+  std::string render_seance_url;
+  std::uint32_t render_width = 0;   // 0 leaves the helper's default
+  std::uint32_t render_height = 0;
 
   [[nodiscard]] bool selects_publisher(std::string_view id) const noexcept;
 };

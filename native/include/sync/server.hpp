@@ -16,6 +16,8 @@ class PairingAuthority;
 class PairingPrompt;
 } // namespace pairing
 
+namespace render { struct RenderSupervisorOptions; }
+
 #ifndef SYNC_PRODUCT_VERSION
 #define SYNC_PRODUCT_VERSION "0.2.0"
 #endif
@@ -49,6 +51,9 @@ struct ServerOptions {
   audio::InputBackend *audio_backend = nullptr;
   void (*platform_event_pump)(void *context) noexcept = nullptr;
   void *platform_event_pump_context = nullptr;
+  // When set, syncd runs sync-render and publishes what it renders as one
+  // more sender. The options must outlive run_server().
+  const render::RenderSupervisorOptions *render = nullptr;
 };
 
 class FramePublisher;
