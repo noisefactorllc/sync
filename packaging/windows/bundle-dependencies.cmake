@@ -28,6 +28,11 @@ foreach(_executable IN LISTS _executables)
     message(FATAL_ERROR "bundle-dependencies: missing ${_executable}")
   endif()
 endforeach()
+# The render helper is staged only by a build with SYNC_BUILD_RENDER. Its Qt
+# DLLs are already beside it (windeployqt); this finds anything else it links.
+if(EXISTS "${SYNC_BUNDLE_DIR}/sync-render.exe")
+  list(APPEND _executables "${SYNC_BUNDLE_DIR}/sync-render.exe")
+endif()
 
 set(_search_directories "${SYNC_BUNDLE_DIR}")
 if(DEFINED SYNC_SEARCH_PATH AND NOT SYNC_SEARCH_PATH STREQUAL "")

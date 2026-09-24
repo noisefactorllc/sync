@@ -139,6 +139,28 @@ if (-not [string]::IsNullOrWhiteSpace($DependencySearchPath)) {
   $DependencySearchPath = Resolve-AbsoluteDirectory $DependencySearchPath 'dependency search path'
 }
 
+# The render helper is optional: a build without SYNC_BUILD_RENDER packages
+# no sync-render and no Qt. When CMake supplies it, all three paths must be
+# real, so a half-configured build cannot ship an installer that cannot render.
+$renderBinary = [string]$env:SYNC_RENDER_BINARY
+$renderData = [string]$env:SYNC_RENDER_DATA
+$windeployqt = [string]$env:SYNC_WINDEPLOYQT
+if ($renderBinary -or $renderData -or $windeployqt) {
+  if (-not [System.IO.Path]::IsPathRooted($renderBinary) -or
+      -not (Test-Path -LiteralPath $renderBinary -PathType Leaf)) {
+    Fail "SYNC_RENDER_BINARY must be an absolute path to sync-render.exe: $renderBinary"
+  }
+  if (-not [System.IO.Path]::IsPathRooted($renderData) -or
+      -not (Test-Path -LiteralPath (Join-Path $renderData 'effects') -PathType Container) -or
+      -not (Test-Path -LiteralPath (Join-Path $renderData 'shaders') -PathType Container)) {
+    Fail "SYNC_RENDER_DATA must hold effects/ and shaders/: $renderData"
+  }
+  if (-not [System.IO.Path]::IsPathRooted($windeployqt) -or
+      -not (Test-Path -LiteralPath $windeployqt -PathType Leaf)) {
+    Fail "SYNC_WINDEPLOYQT must be an absolute path to windeployqt: $windeployqt"
+  }
+}
+
 if (Test-Path -LiteralPath $bundleDir) { Remove-Item -LiteralPath $bundleDir -Recurse -Force }
 New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
 
@@ -153,6 +175,19 @@ Copy-Item -LiteralPath $cameraSource -Destination (Join-Path $bundleDir 'SyncCam
 # It sits beside the executables because that is the only non-user-writable
 # directory the provider's discovery search trusts.
 Copy-Item -LiteralPath $SpoutLibrary -Destination (Join-Path $bundleDir 'SpoutLibrary.dll')
+# sync-render sits beside syncd.exe, which finds it there, with its effect and
+# shader data in noisemaker\, the helper's own first data-root candidate.
+# windeployqt copies the Qt DLLs and plugins it links. The MSVC runtime is left
+# to the resolver below, as for the other executables.
+if ($renderBinary) {
+  Copy-Item -LiteralPath $renderBinary -Destination (Join-Path $bundleDir 'sync-render.exe')
+  $bundleData = Join-Path $bundleDir 'noisemaker'
+  New-Item -ItemType Directory -Path $bundleData -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $renderData 'effects') -Destination $bundleData -Recurse
+  Copy-Item -LiteralPath (Join-Path $renderData 'shaders') -Destination $bundleData -Recurse
+  & $windeployqt --no-compiler-runtime --no-translations (Join-Path $bundleDir 'sync-render.exe')
+  if ($LASTEXITCODE -ne 0) { Fail "windeployqt failed with exit code $LASTEXITCODE" }
+}
 Copy-Item -LiteralPath (Join-Path $SourceDir 'LICENSE') `
   -Destination (Join-Path $bundleDir 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $SourceDir 'packaging/windows/Third-Party-Notices.txt') `

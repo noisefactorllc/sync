@@ -587,10 +587,24 @@ jobs:
     name: Windows package
     runs-on: windows-latest
     timeout-minutes: 60
+    # The package carries the render helper, so the bundle verifier and the
+    # packaging tests require it and its Qt.
+    env:
+      SYNC_EXPECT_RENDER: '1'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
+
+      # 6.10.3 for the same reason as the Render helper job: aqtinstall cannot
+      # read Qt 6.11's Windows layout.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.10.3'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtwebsockets qtmultimedia'
+          cache: true
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -641,7 +655,8 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DCMAKE_BUILD_TYPE=Release `
             -DSYNC_SPOUT_LIBRARY_PATH="$env:RUNNER_TEMP\spout\SpoutLibrary.dll" `
-            -DSYNC_WINDOWS_DEPENDENCY_PATH="$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+            -DSYNC_WINDOWS_DEPENDENCY_PATH="$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" `
+            -DSYNC_BUILD_RENDER=ON
           if ($LASTEXITCODE -ne 0) { throw "configure failed" }
           cmake --build build-package --config Release --target sync_windows_installer --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
@@ -658,6 +673,20 @@ jobs:
         run: |
           ./scripts/smoke-windows-app.ps1 -Bundle "$PWD/build-package/package/Sync"
           if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
+      # The helper creates its Qt GUI application before it parses arguments,
+      # so --help from the staged bundle proves its Qt DLLs and the Windows
+      # platform plugin load from there, not from the Qt install on this runner.
+      - name: Smoke the packaged render helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*Qt*' }) -join ';'
+          Remove-Item Env:QT_PLUGIN_PATH, Env:QML2_IMPORT_PATH -ErrorAction SilentlyContinue
+          $output = & "$PWD/build-package/package/Sync/sync-render.exe" --help 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "sync-render --help exited $LASTEXITCODE`n$output" }
+          if ($output -notmatch 'seance') { throw "unexpected sync-render --help output:`n$output" }
+          Write-Output $output
 
   scripts:
     needs: changes

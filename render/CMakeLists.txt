@@ -75,6 +75,12 @@ if(APPLE)
   find_program(SYNC_MACDEPLOYQT macdeployqt
     HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" REQUIRED)
 endif()
+if(WIN32)
+  # The installer carries the Qt this helper links; windeployqt copies it in
+  # (scripts/package-windows.ps1). Cached, like SYNC_MACDEPLOYQT above.
+  find_program(SYNC_WINDEPLOYQT windeployqt
+    HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" REQUIRED)
+endif()
 
 # The helper loads effect definitions and shaders from disk at run time. The
 # build places them next to the binary, where the helper looks first after

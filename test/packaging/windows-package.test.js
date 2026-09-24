@@ -63,6 +63,19 @@ test("the NDI runtime is never redistributed", () => {
   assert.match(notices, /not\s+affiliated with, endorsed by, or sponsored by/);
 });
 
+// A build with SYNC_BUILD_RENDER sets SYNC_EXPECT_RENDER=1 for this suite.
+test("packaged Sync bundle carries the render helper, its data and its Qt", {
+  skip: stagedOnWindows.skip || process.env.SYNC_EXPECT_RENDER !== "1",
+}, () => {
+  for (const relative of [
+    "sync-render.exe", "Qt6Core.dll", "Qt6Gui.dll", "Qt6OpenGL.dll",
+    "Qt6WebSockets.dll", "Qt6Multimedia.dll", "platforms/qwindows.dll",
+    "noisemaker/effects", "noisemaker/shaders",
+  ]) {
+    assert.equal(existsSync(path.join(bundle, relative)), true, `missing ${relative}`);
+  }
+});
+
 test("staged bundle never contains the NDI runtime", stagedOnWindows, () => {
   for (const entry of readdirSync(bundle)) {
     assert.doesNotMatch(entry, /^Processing\.NDI\./i, `${entry} must not be redistributed`);

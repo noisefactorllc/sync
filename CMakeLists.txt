@@ -1500,9 +1500,21 @@ elseif(WIN32)
   set(SYNC_INSTALLER_PATH
       ${SYNC_PACKAGE_DIRECTORY}/Sync-${SYNC_PRODUCT_VERSION}-x64-Setup.exe)
   find_program(SYNC_POWERSHELL NAMES pwsh powershell REQUIRED)
+  # As on macOS: with the render helper built, the installer also carries
+  # sync-render, its noisemaker data and the Qt it links.
+  set(SYNC_BUNDLE_RENDER_ENVIRONMENT)
+  set(SYNC_BUNDLE_RENDER_TARGET)
+  if(SYNC_BUILD_RENDER)
+    set(SYNC_BUNDLE_RENDER_ENVIRONMENT
+      SYNC_RENDER_BINARY=$<TARGET_FILE:sync-render>
+      SYNC_RENDER_DATA=$<TARGET_FILE_DIR:sync-render>/noisemaker
+      SYNC_WINDEPLOYQT=${SYNC_WINDEPLOYQT})
+    set(SYNC_BUNDLE_RENDER_TARGET sync-render)
+  endif()
   add_custom_command(
     OUTPUT ${SYNC_BUNDLE_STAMP}
-    COMMAND ${SYNC_POWERSHELL} -NoProfile -ExecutionPolicy Bypass -File
+    COMMAND ${CMAKE_COMMAND} -E env ${SYNC_BUNDLE_RENDER_ENVIRONMENT}
+      ${SYNC_POWERSHELL} -NoProfile -ExecutionPolicy Bypass -File
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-windows.ps1
       -Mode bundle
       -BuildDir ${CMAKE_CURRENT_BINARY_DIR}
@@ -1516,7 +1528,7 @@ elseif(WIN32)
       # package-windows.ps1 refuses to stage a bundle without SyncCamera.dll,
       # so a packaging run that did not build it fails late, inside the script,
       # rather than simply building what it needs first.
-      sync_menu syncd sync_camera_source
+      sync_menu syncd sync_camera_source ${SYNC_BUNDLE_RENDER_TARGET}
       LICENSE
       packaging/Sync.svg
       packaging/windows/Third-Party-Notices.txt
