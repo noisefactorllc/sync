@@ -182,6 +182,11 @@ Copy-Item -LiteralPath $cameraSource -Destination (Join-Path $bundleDir 'SyncCam
 # It sits beside the executables because that is the only non-user-writable
 # directory the provider's discovery search trusts.
 Copy-Item -LiteralPath $SpoutLibrary -Destination (Join-Path $bundleDir 'SpoutLibrary.dll')
+Copy-Item -LiteralPath (Join-Path $SourceDir 'LICENSE') `
+  -Destination (Join-Path $bundleDir 'LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $SourceDir 'packaging/windows/Third-Party-Notices.txt') `
+  -Destination (Join-Path $bundleDir 'Third-Party-Notices.txt')
+
 # sync-render sits beside syncd.exe, which finds it there, with its effect and
 # shader data in noisemaker\, the helper's own first data-root candidate.
 # windeployqt copies the Qt DLLs and plugins it links. The MSVC runtime is left
@@ -209,10 +214,6 @@ if ($renderBinary) {
   Add-Content -LiteralPath (Join-Path $bundleDir 'Third-Party-Notices.txt') `
     -Value (@('') + $notices) -Encoding utf8
 }
-Copy-Item -LiteralPath (Join-Path $SourceDir 'LICENSE') `
-  -Destination (Join-Path $bundleDir 'LICENSE.txt')
-Copy-Item -LiteralPath (Join-Path $SourceDir 'packaging/windows/Third-Party-Notices.txt') `
-  -Destination (Join-Path $bundleDir 'Third-Party-Notices.txt')
 
 # The build already rasterised the icon from packaging/Sync.svg and embedded
 # it in both executables, so the bundle copies that exact file rather than
