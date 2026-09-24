@@ -264,15 +264,23 @@ jobs:
           # comes from Mesa llvmpipe under Xvfb, as in noisemaker-for-qt's CI.
           - name: Ubuntu 24.04 llvmpipe
             os: ubuntu-24.04
+          # No GPU on hosted Windows runners either: Qt loads Mesa llvmpipe as
+          # opengl32sw.dll under QT_OPENGL=software, as in noisemaker-for-qt's CI.
+          - name: Windows llvmpipe
+            os: windows-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
 
+      # aqtinstall 3.3.0 cannot read Qt 6.11's per-architecture Windows
+      # layout (windows_x86/desktop/qt6_6111/...), so Windows stays on 6.10.3,
+      # the version noisemaker-for-qt's Windows CI qualifies.
       - name: Install Qt
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
-          version: '6.11.1'
+          version: ${{ runner.os == 'Windows' && '6.10.3' || '6.11.1' }}
+          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || '' }}
           modules: 'qtwebsockets qtmultimedia'
           cache: true
 
@@ -293,7 +301,16 @@ jobs:
             libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-randr0 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-image0
 
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vcpkg install libuv:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
       - name: Configure and build
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -301,6 +318,23 @@ jobs:
             -DCMAKE_CXX_FLAGS='-Wall -Wextra -Wpedantic -Werror'
           cmake --build build --parallel 4 \
             --target sync-render sync_render_helper_tests sync_render_ring_tests sync_render_supervisor_tests
+
+      # The same gate as the native Windows job: /W4 /WX /permissive-, with
+      # /EHsc and the other defaults restated because setting
+      # CMAKE_CXX_FLAGS replaces them.
+      - name: Configure and build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows -DSYNC_BUILD_RENDER=ON `
+            "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /W4 /WX /permissive-"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build build --config Debug --parallel 4 `
+            --target sync-render sync_render_helper_tests sync_render_ring_tests sync_render_supervisor_tests
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
       - name: Run render tests (macOS)
         if: runner.os == 'macOS'
@@ -319,6 +353,44 @@ jobs:
           build/sync_render_supervisor_tests
           xvfb-run -a -s "-screen 0 1280x1024x24" glxinfo -B
           xvfb-run -a -s "-screen 0 1280x1024x24" build/render/sync_render_helper_tests
+
+      # Qt loads desktop opengl32.dll from System32 only, and the GDI renderer
+      # there fails the GL 4.1 core check. With QT_OPENGL=software Qt loads
+      # opengl32sw.dll from the executable's directory instead, so Mesa's
+      # checksum-pinned llvmpipe opengl32.dll goes there under that name too.
+      - name: Install Mesa llvmpipe opengl32.dll (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MESA_WIN_URL: https://github.com/pal1000/mesa-dist-win/releases/download/26.2.1/mesa3d-26.2.1-release-msvc.7z
+          MESA_WIN_SHA256: 78a0305844074535e73dfb6dcb5eb2a65f1d9dc445102e1f4c3c3e97dace19bf
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri $env:MESA_WIN_URL -OutFile mesa.7z
+          $hash = (Get-FileHash mesa.7z -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:MESA_WIN_SHA256) { throw "Mesa archive SHA-256 mismatch: $hash" }
+          7z x mesa.7z -omesa | Out-Null
+          $dirs = Get-ChildItem build -Recurse -Filter sync-render.exe | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
+          if (-not $dirs) { throw "sync-render.exe not found under build" }
+          foreach ($dir in $dirs) {
+            Copy-Item mesa/x64/*.dll $dir
+            Copy-Item mesa/x64/opengl32.dll (Join-Path $dir "opengl32sw.dll")
+            Write-Output "Mesa installed beside $dir"
+          }
+
+      - name: Run render tests (Windows, llvmpipe)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GALLIUM_DRIVER: llvmpipe
+          QT_OPENGL: software
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($test in @('build/Debug/sync_render_ring_tests.exe', 'build/Debug/sync_render_supervisor_tests.exe',
+                              'build/render/Debug/sync_render_helper_tests.exe')) {
+            & $test
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with $LASTEXITCODE" }
+          }
 
   windows:
     needs: changes
