@@ -1,6 +1,7 @@
 #include "audio_capture.h"
 
 #include <algorithm>
+#include <deque>
 #include <exception>
 #include <utility>
 
@@ -21,6 +22,13 @@ constexpr auto kSearchInterval = std::chrono::milliseconds(500);
 // which the analysers heard sound 1.4 s late. The bound only guarantees the
 // loop ends: 256 reads is more than a full ring.
 constexpr int kMaximumReadsPerFrame = 256;
+
+// The newest packets a frame hands the engine. Its analysers read the newest
+// 256 samples and 128-frame quanta, as a browser AnalyserNode does, so older
+// sound is past. Before the first program, or after a stall, the whole ring
+// (65,536 frames) is waiting; pushing all of it cost 21.5 ms at 32 channels.
+// Ten packets is 100 ms at 48 kHz.
+constexpr std::size_t kNewestPackets = 10;
 
 }  // namespace
 
@@ -185,12 +193,24 @@ auto audio_device_for(const audio::Source& source) -> nm::AudioDevice {
 auto feed_audio(AudioCapture& capture, nm::AudioInput& input, nm::AudioDevice& device)
     -> std::vector<AudioCapture::Change> {
   std::vector<AudioCapture::Change> changes;
+  std::deque<audio::Packet> newest;
+  const auto push_newest = [&] {
+    for (const audio::Packet& packet : newest) {
+      const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
+      input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
+      input.pushDevice(device, packet.samples.data(), frames);
+    }
+    newest.clear();
+  };
   for (int reads = 0; reads < kMaximumReadsPerFrame; ++reads) {
-    const audio::Packet packet = capture.read();
+    audio::Packet packet = capture.read();
     // In the order they happened: a source heard again (before its first
     // samples, and it may not be the one lost), or a source lost (after
-    // its last).
-    for (AudioCapture::Change& change : capture.take_changes()) {
+    // its last). The samples before a change go to the device they came
+    // from.
+    std::vector<AudioCapture::Change> read_changes = capture.take_changes();
+    if (!read_changes.empty()) push_newest();
+    for (AudioCapture::Change& change : read_changes) {
       if (change.live) {
         device = audio_device_for(change.source);
       } else {
@@ -200,10 +220,10 @@ auto feed_audio(AudioCapture& capture, nm::AudioInput& input, nm::AudioDevice& d
       changes.push_back(std::move(change));
     }
     if (packet.channels == 0 || packet.samples.empty()) break;
-    const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
-    input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
-    input.pushDevice(device, packet.samples.data(), frames);
+    newest.push_back(std::move(packet));
+    if (newest.size() > kNewestPackets) newest.pop_front();
   }
+  push_newest();
   return changes;
 }
 

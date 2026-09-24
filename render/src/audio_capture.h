@@ -98,8 +98,8 @@ class AudioCapture {
 // The engine's name for a source: audio(name: "...") resolves against it.
 [[nodiscard]] auto audio_device_for(const audio::Source& source) -> nm::AudioDevice;
 
-// One rendered frame's audio. Every sample captured since the last frame
-// goes to the engine's input, as the default input and as the source's own
+// One rendered frame's audio. The capture is drained, and its newest samples
+// go to the engine's input, as the default input and as the source's own
 // device.
 // While the source is unavailable both are disconnected, so levels read zero
 // rather than holding the last sound heard. Returns the frame's changes, for

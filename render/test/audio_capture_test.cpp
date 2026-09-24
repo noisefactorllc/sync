@@ -70,12 +70,15 @@ class InterfaceCapture final : public audio::Capture {
     device_->closed_at = std::chrono::steady_clock::now();
     device_->closed = true;
   }
-  // One 60 fps frame of audio a read, as the render thread reads.
+  // One 60 fps frame of audio, then drained: the next read finds nothing,
+  // and the one after it the next frame's worth.
   auto read() -> audio::Packet override {
     if (device_->broken) {
       throw std::runtime_error(
           "Native audio capture stopped: driver error (5): the stream device was disconnected");
     }
+    drained_ = !drained_;
+    if (!drained_) return {48000, 2, frame_, 0, {}};
     audio::Packet packet{48000, 2, frame_, 0, std::vector<float>(1600)};
     for (std::size_t i = 0; i < 800; ++i) {
       const double t = static_cast<double>(frame_ + i) / 48000.0;
@@ -90,6 +93,7 @@ class InterfaceCapture final : public audio::Capture {
  private:
   std::shared_ptr<Interface> device_;
   std::uint64_t frame_ = 0;
+  bool drained_ = false;
 };
 
 class InterfaceBackend final : public audio::InputBackend {
@@ -306,12 +310,35 @@ SYNC_TEST(the_analysers_hear_the_newest_sound_every_frame) {
   };
   for (int i = 0; i < 300; ++i) frame(false);
   SYNC_REQUIRE(input.state().low == 0.0);
+  SYNC_REQUIRE(ring->read().samples.empty());
   int frames_to_hear = 0;
   while (input.state().low <= 0.1 && frames_to_hear < 60) {
     frame(true);
     ++frames_to_hear;
   }
   SYNC_REQUIRE(frames_to_hear <= 5);
+}
+
+SYNC_TEST(a_full_ring_is_heard_at_its_newest_on_the_first_frame) {
+  // Before the first program nothing reads the capture, so the ring is full
+  // of old sound by the first frame. That frame hears the end of it.
+  auto ring = std::make_shared<audio::CaptureBuffer>(48000, 1);
+  AudioCapture capture(QStringLiteral("ring"), std::make_unique<RingBackend>(ring));
+  capture.start();
+  std::vector<float> samples(65536);
+  for (std::size_t i = 0; i < samples.size(); ++i) {
+    const bool tone = i + 4800 >= samples.size();  // only the last 100 ms
+    samples[i] = tone ? static_cast<float>(0.5 * std::sin(2.0 * 3.14159265358979323846 * 60.0 *
+                                                          static_cast<double>(i) / 48000.0))
+                      : 0.0f;
+  }
+  ring->push(samples);
+  nm::AudioInput input;
+  nm::AudioDevice heard;
+  (void)feed_audio(capture, input, heard);
+  input.update();
+  SYNC_REQUIRE(ring->read().samples.empty());
+  SYNC_REQUIRE(input.state().low > 0.1);
 }
 
 SYNC_TEST(levels_fall_to_zero_while_the_source_is_gone) {
