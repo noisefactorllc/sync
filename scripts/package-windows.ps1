@@ -193,10 +193,13 @@ Copy-Item -LiteralPath (Join-Path $SourceDir 'packaging/windows/Third-Party-Noti
 # to the resolver below, as for the other executables.
 if ($renderBinary) {
   Copy-Item -LiteralPath $renderBinary -Destination (Join-Path $bundleDir 'sync-render.exe')
+  # The whole data tree the build placed beside the helper: effects and
+  # shaders, and the font and meshes where the pinned port provides them.
   $bundleData = Join-Path $bundleDir 'noisemaker'
   New-Item -ItemType Directory -Path $bundleData -Force | Out-Null
-  Copy-Item -LiteralPath (Join-Path $renderData 'effects') -Destination $bundleData -Recurse
-  Copy-Item -LiteralPath (Join-Path $renderData 'shaders') -Destination $bundleData -Recurse
+  foreach ($entry in Get-ChildItem -LiteralPath $renderData) {
+    Copy-Item -LiteralPath $entry.FullName -Destination $bundleData -Recurse
+  }
   & $windeployqt --no-compiler-runtime --no-translations (Join-Path $bundleDir 'sync-render.exe')
   if ($LASTEXITCODE -ne 0) { Fail "windeployqt failed with exit code $LASTEXITCODE" }
   # The helper's dependencies and every component of the shipped Qt, from

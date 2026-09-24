@@ -172,9 +172,9 @@ done
 if [[ -n "$render_binary" ]]; then
   cp "$render_binary" "$bundle/Contents/MacOS/sync-render"
   chmod 0755 "$bundle/Contents/MacOS/sync-render"
-  mkdir -p "$bundle/Contents/Resources/noisemaker"
-  ditto "$render_data/effects" "$bundle/Contents/Resources/noisemaker/effects"
-  ditto "$render_data/shaders" "$bundle/Contents/Resources/noisemaker/shaders"
+  # The whole data tree the build placed beside the helper: effects and
+  # shaders, and the font and meshes where the pinned port provides them.
+  ditto "$render_data" "$bundle/Contents/Resources/noisemaker"
   "$macdeployqt" "$bundle" \
     "-executable=$bundle/Contents/MacOS/sync-render" -verbose=1
   # Qt's own packages are universal (x86_64 and arm64). Sync ships for Apple

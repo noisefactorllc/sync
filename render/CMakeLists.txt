@@ -37,8 +37,21 @@ FetchContent_MakeAvailable(rtmidi)
 # scripts/render-notices.mjs: the helper's own dependencies and every
 # component in Qt's software bill of materials for the modules that ship.
 # Cached so the bundle targets in the top-level CMakeLists.txt see them.
-set(SYNC_RENDER_NOTICE_COMPONENTS
-  "noisemaker-for-qt=https://github.com/noisefactorllc/noisemaker-for-qt=${noisemaker_qt_SOURCE_DIR}/LICENSE|RtMidi=https://github.com/thestk/rtmidi=${rtmidi_SOURCE_DIR}/LICENSE"
+# Newer noisemaker-for-qt also carries acorn's notice (its JavaScript syntax
+# check is ported from acorn) and the bundled Nunito font's SIL OFL.
+set(sync_render_notice_components
+  "noisemaker-for-qt=https://github.com/noisefactorllc/noisemaker-for-qt=${noisemaker_qt_SOURCE_DIR}/LICENSE"
+  "RtMidi=https://github.com/thestk/rtmidi=${rtmidi_SOURCE_DIR}/LICENSE")
+if(EXISTS "${noisemaker_qt_SOURCE_DIR}/qt/noisemaker/compiler/acorn-LICENSE.txt")
+  list(APPEND sync_render_notice_components
+    "acorn (JavaScript syntax check in noisemaker-for-qt)=https://github.com/acornjs/acorn=${noisemaker_qt_SOURCE_DIR}/qt/noisemaker/compiler/acorn-LICENSE.txt")
+endif()
+if(EXISTS "${noisemaker_qt_SOURCE_DIR}/qt/noisemaker/fonts/Nunito/OFL.txt")
+  list(APPEND sync_render_notice_components
+    "Nunito font (bundled with noisemaker-for-qt)=https://github.com/googlefonts/nunito=${noisemaker_qt_SOURCE_DIR}/qt/noisemaker/fonts/Nunito/OFL.txt")
+endif()
+list(JOIN sync_render_notice_components "|" sync_render_notice_components)
+set(SYNC_RENDER_NOTICE_COMPONENTS "${sync_render_notice_components}"
   CACHE INTERNAL "License files of the render helper's own dependencies")
 set(SYNC_RENDER_QT_SBOM_DIR "${QT6_INSTALL_PREFIX}/sbom"
   CACHE INTERNAL "Qt's SPDX software bill of materials")
@@ -99,16 +112,21 @@ if(WIN32)
     HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" REQUIRED)
 endif()
 
-# The helper loads effect definitions and shaders from disk at run time. The
-# build places them next to the binary, where the helper looks first after
-# its flag and environment variable, so a built tree runs as it is.
-add_custom_command(TARGET sync-render POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${NOISEMAKER_QT_DATA_ROOT}/effects" "$<TARGET_FILE_DIR:sync-render>/noisemaker/effects"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${NOISEMAKER_QT_DATA_ROOT}/shaders" "$<TARGET_FILE_DIR:sync-render>/noisemaker/shaders"
-  VERBATIM
-)
+# The helper loads its runtime data from disk: effect definitions and
+# shaders, and in newer noisemaker-for-qt the bundled font (fonts/) and the
+# built-in meshes (share/). The build places every data directory the pinned
+# port provides next to the binary, where the helper looks first after its
+# flag and environment variable, so a built tree runs as it is. The packagers
+# copy this whole tree.
+set(SYNC_RENDER_DATA_COPY)
+foreach(data_directory IN ITEMS effects shaders fonts share)
+  if(IS_DIRECTORY "${NOISEMAKER_QT_DATA_ROOT}/${data_directory}")
+    list(APPEND SYNC_RENDER_DATA_COPY COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${NOISEMAKER_QT_DATA_ROOT}/${data_directory}"
+      "$<TARGET_FILE_DIR:sync-render>/noisemaker/${data_directory}")
+  endif()
+endforeach()
+add_custom_command(TARGET sync-render POST_BUILD ${SYNC_RENDER_DATA_COPY} VERBATIM)
 
 add_executable(sync_render_helper_tests
   test/audio_capture_test.cpp
