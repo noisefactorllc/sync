@@ -60,6 +60,11 @@ auto RenderEngine::start(QString& error) -> bool {
 
   try {
     backend_.setup(nullptr, options_.data_root, options_.size);
+    // A live host. The overlays of fibers, scratches and strayHair are
+    // traced on the backend's worker thread, and a node keeps its previous
+    // overlay until the new trace is done; traced in render() they stopped
+    // the picture, 1.5 s at 1080p on an M2 for a switch to all three.
+    backend_.setOverlayTraceMode(nm::OverlayTraceMode::Background);
     nm::FrameExportOptions export_options;
     export_options.slotCount = 3;
     export_options.onFrame = [this](const nm::ExportFrame& frame, double timestamp_ms) {
@@ -168,6 +173,12 @@ void RenderEngine::tick() {
     }
   }
 }
+
+auto RenderEngine::overlay_traces_pending() const -> bool {
+  return backend_.overlayTracesPending();
+}
+
+void RenderEngine::wait_for_overlay_traces() { backend_.waitForOverlayTraces(); }
 
 void RenderEngine::drain() {
   if (!queue_) return;

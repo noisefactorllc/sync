@@ -84,6 +84,10 @@ class RenderEngine final : public QObject {
   [[nodiscard]] auto read_surface() const -> QImage;
   // Pins the clock: every tick renders at this normalized time. For tests.
   void freeze_time(double normalized);
+  // Whether an overlay trace is running or waiting for the next tick; and a
+  // wait for the running ones. For tests.
+  [[nodiscard]] auto overlay_traces_pending() const -> bool;
+  void wait_for_overlay_traces();
 
  signals:
   void render_failed(const QString& message);

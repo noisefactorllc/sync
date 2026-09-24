@@ -119,6 +119,30 @@ SYNC_TEST(swapping_programs_changes_the_output) {
   SYNC_REQUIRE(gradient != perlin);
 }
 
+SYNC_TEST(an_overlay_trace_does_not_stop_the_picture) {
+  // fibers traces its overlay on the CPU: about 0.4 s at this size, seconds
+  // at 1080p. The tick that meets the new program returns while the trace
+  // still runs, and a later tick shows the finished overlay.
+  ProgramCompiler compiler(data_root());
+  RenderEngine::Options options = engine_options("overlay");
+  options.size = QSize(640, 360);
+  RenderEngine engine(options);
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+  engine.freeze_time(0.5);
+  const auto fibers = compiler.compile(QStringLiteral(
+      "search classicNoisedeck, filter\nnoise(seed: 1).fibers().write(o0)\nrender(o0)\n"));
+  SYNC_REQUIRE(fibers.graph != nullptr);
+  engine.set_program(fibers.graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.overlay_traces_pending());
+  const QImage before = engine.read_surface();
+  engine.wait_for_overlay_traces();
+  engine.tick();
+  SYNC_REQUIRE(!engine.overlay_traces_pending());
+  SYNC_REQUIRE(engine.read_surface() != before);
+}
+
 SYNC_TEST(no_program_writes_nothing_but_keeps_the_ring_alive) {
   RenderEngine engine(engine_options("idle"));
   QString error;
