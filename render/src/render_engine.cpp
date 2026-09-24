@@ -26,6 +26,10 @@ RenderEngine::RenderEngine(Options options, QObject* parent)
     tick();
     schedule_next();
   });
+  readback_timer_.setTimerType(Qt::PreciseTimer);
+  connect(&readback_timer_, &QTimer::timeout, this, [this] {
+    if (started_ && queue_) queue_->poll();
+  });
 }
 
 RenderEngine::~RenderEngine() { stop(); }
@@ -99,10 +103,18 @@ void RenderEngine::run() {
   if (!started_) return;
   next_tick_ns_ = clock_.nsecsElapsed();
   timer_.start(0);
+  // A frame goes into the ring when the GPU finishes it, not at the next
+  // tick. Polled only at ticks, a readback that finished just after one
+  // waited a whole tick and then landed together with the next frame, and
+  // syncd's reader, which keeps the newest frame, never saw the first: a
+  // heavier program lost about 2% of its frames (68 of 3,604 in a minute) to
+  // that bunching on 2026-09-24.
+  readback_timer_.start(2);
 }
 
 void RenderEngine::stop() {
   timer_.stop();
+  readback_timer_.stop();
   if (!started_) return;
   started_ = false;
   drain();

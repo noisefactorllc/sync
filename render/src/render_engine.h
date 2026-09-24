@@ -109,6 +109,8 @@ class RenderEngine final : public QObject {
   std::optional<double> frozen_time_;
 
   QTimer timer_;
+  // Collects finished readbacks between ticks; see RenderEngine::run().
+  QTimer readback_timer_;
   QElapsedTimer clock_;
   qint64 next_tick_ns_ = 0;
   qint64 interval_ns_ = 0;
