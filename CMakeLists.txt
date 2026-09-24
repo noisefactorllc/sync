@@ -535,6 +535,38 @@ target_include_directories(sync_camera_frame_ring_tests PRIVATE native/test)
 target_link_libraries(sync_camera_frame_ring_tests PRIVATE sync_camera_frame_ring)
 add_test(NAME sync_camera_frame_ring_tests COMMAND sync_camera_frame_ring_tests)
 
+# The render ring: shared memory between the render helper (render/, built
+# only with SYNC_BUILD_RENDER because it needs Qt) and syncd. The contract and
+# syncd's reading half have no dependencies beyond the protocol types, so they
+# build and test everywhere, and a helper built separately still agrees with
+# the syncd it talks to by construction.
+add_library(sync_render_ring
+  native/src/render/render_ring.cpp
+)
+target_compile_features(sync_render_ring PUBLIC cxx_std_20)
+target_include_directories(sync_render_ring PUBLIC native/include)
+
+add_library(sync_render_source
+  native/src/render/render_source.cpp
+)
+target_compile_features(sync_render_source PUBLIC cxx_std_20)
+target_link_libraries(sync_render_source PUBLIC sync_render_ring sync_protocol)
+
+add_executable(sync_render_ring_tests
+  native/test/render/render_ring_test.cpp
+  native/test/render/render_source_test.cpp
+  native/test/test_main.cpp
+)
+target_compile_features(sync_render_ring_tests PRIVATE cxx_std_20)
+target_include_directories(sync_render_ring_tests PRIVATE native/test)
+target_link_libraries(sync_render_ring_tests PRIVATE sync_render_source Threads::Threads)
+add_test(NAME sync_render_ring_tests COMMAND sync_render_ring_tests)
+
+option(SYNC_BUILD_RENDER "Build the Qt render helper (sync-render)" OFF)
+if(SYNC_BUILD_RENDER)
+  add_subdirectory(render)
+endif()
+
 add_library(sync_companion_model
   native/src/companion_management.cpp
   native/src/companion_model.cpp
