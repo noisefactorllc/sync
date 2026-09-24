@@ -11,14 +11,34 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Multimedia OpenGL Network WebSocke
 #   -DFETCHCONTENT_SOURCE_DIR_NOISEMAKER_QT=/path/to/noisemaker-for-qt
 FetchContent_Declare(noisemaker_qt
   GIT_REPOSITORY https://github.com/noisefactorllc/noisemaker-for-qt.git
-  GIT_TAG c0f064460ee6d95981fe6a1956b6753e912054f1
+  GIT_TAG 3a4f421e351e76e28e4bdb58e19f38a96c8d9c7d
   SOURCE_SUBDIR qt
 )
 FetchContent_MakeAvailable(noisemaker_qt)
 
+# MIDI input for midi() steps: RtMidi, the sibling of the RtAudio syncd pins,
+# pinned the same way by commit tarball and hash (tag 6.0.0).
+set(RTMIDI_BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+set(RTMIDI_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# RtAudio already defines "uninstall"; RtMidi names its own through a cache
+# variable, which is all that stands between the two.
+set(RTMIDI_TARGETNAME_UNINSTALL "rtmidi-uninstall" CACHE STRING "" FORCE)
+FetchContent_Declare(rtmidi
+  URL https://codeload.github.com/thestk/rtmidi/tar.gz/1e5b49925aa60065db52de44c366d446a902547b
+  URL_HASH SHA256=c5090c14edb3e3f82dd63589041f516bb24b78091aa82574fdc17d33ee62361e
+)
+FetchContent_MakeAvailable(rtmidi)
+# Keep the warnings-as-errors gate off pinned upstream code, as for RtAudio.
+if(MSVC)
+  target_compile_options(rtmidi PRIVATE /WX-)
+else()
+  target_compile_options(rtmidi PRIVATE -Wno-error)
+endif()
+
 add_library(sync_render_helper STATIC
   src/event_log.cpp
   src/media_inputs.cpp
+  src/midi_input.cpp
   src/program_compiler.cpp
   src/render_engine.cpp
   src/seance_client.cpp
@@ -33,6 +53,7 @@ target_link_libraries(sync_render_helper PUBLIC
   Qt6::Multimedia
   Qt6::Network
   Qt6::WebSockets
+  rtmidi
   sync_render_ring
 )
 
@@ -61,6 +82,7 @@ add_custom_command(TARGET sync-render POST_BUILD
 
 add_executable(sync_render_helper_tests
   test/media_inputs_test.cpp
+  test/midi_input_test.cpp
   test/qt_test_main.cpp
   test/render_engine_test.cpp
   test/seance_client_test.cpp

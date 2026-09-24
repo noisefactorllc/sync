@@ -11,6 +11,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMutex>
 #include <QMutexLocker>
@@ -26,10 +27,12 @@
 
 #include "event_log.h"
 #include "media_inputs.h"
+#include "midi_input.h"
 #include "program_compiler.h"
 #include "render_engine.h"
 #include "seance_client.h"
 
+#include <runtime/midi_state.h>
 #include <sync/render/render_ring.hpp>
 
 namespace {
@@ -200,12 +203,19 @@ int main(int argc, char** argv) {
       QStringLiteral("Source for media() steps, repeatable, in step order: camera, "
                      "camera:<name-or-index>, or file:<image-or-video>."),
       QStringLiteral("spec"));
+  const QCommandLineOption midi_opt(
+      QStringLiteral("midi"),
+      QStringLiteral("Only open MIDI inputs whose name contains this text; repeatable. "
+                     "Without it every input is opened."),
+      QStringLiteral("name"));
+  const QCommandLineOption no_midi_opt(QStringLiteral("no-midi"),
+                                       QStringLiteral("Open no MIDI inputs."));
   const QCommandLineOption stdin_opt(
       QStringLiteral("exit-on-stdin-eof"),
       QStringLiteral("Exit when stdin closes (the supervising process went away)."));
   parser.addOptions({session_opt, server_opt, origin_opt, token_opt, program_opt, width_opt,
                      height_opt, fps_opt, loop_opt, ring_opt, data_opt, frames_opt, media_opt,
-                     stdin_opt});
+                     midi_opt, no_midi_opt, stdin_opt});
   parser.process(app);
 
   EventLog events;
@@ -285,9 +295,32 @@ int main(int argc, char** argv) {
                                    {QStringLiteral("detail"), detail}});
                    });
   if (!media.start(error)) return fatal(error, kExitStartup);
-  engine.set_before_render([&media, &compiler](nm::Backend& backend, nm::Graph& graph,
-                                               quint64 generation) {
+  // MIDI: every input by default (reading a port is harmless), feeding the
+  // engine's own MidiState so midi() behaves exactly as in the reference.
+  nm::MidiState midi_state;
+  bool midi_dirty = true;
+  std::unique_ptr<MidiInput> midi;
+  if (!parser.isSet(no_midi_opt)) {
+    midi = std::make_unique<MidiInput>(parser.values(midi_opt));
+    QObject::connect(midi.get(), &MidiInput::ports_changed, &app,
+                     [&](const QStringList& names) {
+                       sync_midi_ports(midi_state, midi->open_ports());
+                       midi_dirty = true;
+                       events.write(QStringLiteral("midi"),
+                                    {{QStringLiteral("ports"), QJsonArray::fromStringList(names)}});
+                     });
+    midi->start();
+  }
+
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
     media.apply(backend, graph, generation, compiler.registry());
+    if (midi && feed_midi(midi_state, midi->drain())) midi_dirty = true;
+    // A snapshot costs about a millisecond with a few ports, so it is taken
+    // only when a message or a port change has made the last one stale.
+    if (midi_dirty) {
+      backend.setMidiState(midi_state.snapshot());
+      midi_dirty = false;
+    }
   });
 
   // Edits can arrive faster than a compile (a slider drag on the controller).
