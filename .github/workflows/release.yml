@@ -68,6 +68,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The render helper under render/ ships inside the macOS app, so it
+          # is product code like native/.
           # A docs-only commit must not mint a new signed build, burn a
           # notarization round trip, or advance the public preview version.
           if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
@@ -76,7 +78,7 @@ jobs:
             CHANGED=$(git ls-tree -r --name-only HEAD)
           fi
           echo "$CHANGED"
-          if grep -qE '^(native/|browser/|packaging/|scripts/|test/|CMakeLists\.txt$|package\.json$)' <<<"$CHANGED"; then
+          if grep -qE '^(native/|browser/|packaging/|scripts/|test/|render/|CMakeLists\.txt$|package\.json$)' <<<"$CHANGED"; then
             echo "release=true" >> "$GITHUB_OUTPUT"
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
