@@ -15,6 +15,7 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QStandardPaths>
 #include <QTimer>
 
 #include <atomic>
@@ -137,8 +138,26 @@ extern "C" void request_stop(int) { g_stop_requested.store(true); }
   return QString::fromUtf8(file.readAll()).trimmed();
 }
 
+// Where the Seance identity is kept when --anon-token-file is not given: the
+// helper's own data directory. Seance mints at most ten anonymous identities
+// an hour per address and charges nothing for one that comes back, so a
+// helper that minted afresh at every launch could be refused for the rest of
+// the hour after a few restarts, or beside a few other machines on one
+// network, and render nothing.
+[[nodiscard]] auto default_token_path() -> QString {
+  const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+  if (directory.isEmpty()) return {};
+  return QDir(directory).filePath(QStringLiteral("seance-identity"));
+}
+
 void write_token(const QString& path, const QString& token) {
   if (path.isEmpty()) return;
+  const QString directory = QFileInfo(path).absolutePath();
+  if (!QFileInfo::exists(directory)) {
+    if (!QDir().mkpath(directory)) return;
+    QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                         QFileDevice::ExeOwner);
+  }
   QFile file(path);
   // Owner-only before the token is written, so it is never readable by
   // anyone else even for an instant.
@@ -203,7 +222,8 @@ int main(int argc, char** argv) {
       QStringLiteral("origin"), QStringLiteral("https://sync.noisedeck.app"));
   const QCommandLineOption token_opt(
       QStringLiteral("anon-token-file"),
-      QStringLiteral("Keep the seance identity in this owner-only file across runs."),
+      QStringLiteral("Keep the seance identity in this owner-only file across runs "
+                     "(default: seance-identity in the helper's data directory)."),
       QStringLiteral("path"));
   const QCommandLineOption program_opt(
       QStringLiteral("program-file"),
@@ -438,7 +458,8 @@ int main(int argc, char** argv) {
     }
     submit_program(QString::fromUtf8(file.readAll()), 0, QStringLiteral("file"));
   } else {
-    const QString token_path = parser.value(token_opt);
+    const QString token_path =
+        parser.isSet(token_opt) ? parser.value(token_opt) : default_token_path();
     SeanceClient::Options client_options;
     client_options.server = QUrl(parser.value(server_opt));
     client_options.session_id = *session_id;
