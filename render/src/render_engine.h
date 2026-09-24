@@ -60,7 +60,13 @@ class RenderEngine final : public QObject {
 
   // Swaps the program. Surfaces are keyed by texture id in the backend, so a
   // recompiled program with the same structure keeps its feedback state.
-  void set_program(std::shared_ptr<const nm::Graph> graph);
+  void set_program(std::shared_ptr<nm::Graph> graph);
+
+  // Runs before each render with the GL context current: the place to feed
+  // external inputs (media frames, live parameters) into the program. The
+  // generation changes with every set_program().
+  using BeforeRender = std::function<void(nm::Backend&, nm::Graph&, quint64 generation)>;
+  void set_before_render(BeforeRender hook) { before_render_ = std::move(hook); }
 
   // One frame at the current clock time, then any readbacks that finished.
   void tick();
@@ -95,7 +101,9 @@ class RenderEngine final : public QObject {
   std::function<void()> remove_sink_;
   std::optional<render::RenderRingSection> section_;
   std::optional<render::RenderRingWriter> writer_;
-  std::shared_ptr<const nm::Graph> graph_;
+  std::shared_ptr<nm::Graph> graph_;
+  quint64 generation_ = 0;
+  BeforeRender before_render_;
   bool reported_render_error_ = false;
   bool started_ = false;
   std::optional<double> frozen_time_;

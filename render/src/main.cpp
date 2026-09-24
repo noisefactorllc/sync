@@ -10,17 +10,22 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHash>
 #include <QJsonObject>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QTimer>
 
 #include <atomic>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <thread>
 
 #include "event_log.h"
+#include "media_inputs.h"
 #include "program_compiler.h"
 #include "render_engine.h"
 #include "seance_client.h"
@@ -37,6 +42,41 @@ constexpr int kExitStartup = 3;
 constexpr int kExitSessionEnded = 4;
 
 std::atomic<bool> g_stop_requested{false};
+
+// The helper's stderr is syncd's log. Qt's media backends can repeat one
+// warning per decoded frame (macOS: "cannot create texture, Metal texture
+// cache was released?" for every video frame, harmless there), which would
+// bury everything else. Each distinct line prints once, then at most once
+// every ten seconds with the number of repeats it stands for.
+void rate_limited_message(QtMsgType type, const QMessageLogContext& context,
+                          const QString& message) {
+  static QMutex mutex;
+  struct Seen {
+    qint64 last_printed_ms = 0;
+    quint64 suppressed = 0;
+  };
+  static QHash<QString, Seen> seen;
+  static QElapsedTimer clock;
+  QMutexLocker lock(&mutex);
+  if (!clock.isValid()) clock.start();
+  const qint64 now = clock.elapsed();
+  const auto it = seen.find(message);
+  if (it != seen.end() && now - it->last_printed_ms < 10'000) {
+    ++it->suppressed;
+    return;
+  }
+  const quint64 repeats = it != seen.end() ? it->suppressed : 0;
+  if (seen.size() > 1024) seen.clear();  // bounded, whatever a backend emits
+  seen.insert(message, Seen{now, 0});
+  const QString line = qFormatLogMessage(type, context, message);
+  if (repeats > 0) {
+    std::fprintf(stderr, "%s (repeated %llu times)\n", qPrintable(line),
+                 static_cast<unsigned long long>(repeats));
+  } else {
+    std::fprintf(stderr, "%s\n", qPrintable(line));
+  }
+  if (type == QtFatalMsg) std::abort();
+}
 
 extern "C" void request_stop(int) { g_stop_requested.store(true); }
 
@@ -107,6 +147,7 @@ int main(int argc, char** argv) {
     qputenv("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM", "1");
   }
 #endif
+  qInstallMessageHandler(rate_limited_message);
   // QOffscreenSurface, which the backend renders through, needs a GUI
   // application object even though nothing is ever shown.
   QGuiApplication app(argc, argv);
@@ -154,11 +195,17 @@ int main(int argc, char** argv) {
   const QCommandLineOption frames_opt(QStringLiteral("frames"),
                                       QStringLiteral("Exit after writing this many frames."),
                                       QStringLiteral("count"), QStringLiteral("0"));
+  const QCommandLineOption media_opt(
+      QStringLiteral("media"),
+      QStringLiteral("Source for media() steps, repeatable, in step order: camera, "
+                     "camera:<name-or-index>, or file:<image-or-video>."),
+      QStringLiteral("spec"));
   const QCommandLineOption stdin_opt(
       QStringLiteral("exit-on-stdin-eof"),
       QStringLiteral("Exit when stdin closes (the supervising process went away)."));
   parser.addOptions({session_opt, server_opt, origin_opt, token_opt, program_opt, width_opt,
-                     height_opt, fps_opt, loop_opt, ring_opt, data_opt, frames_opt, stdin_opt});
+                     height_opt, fps_opt, loop_opt, ring_opt, data_opt, frames_opt, media_opt,
+                     stdin_opt});
   parser.process(app);
 
   EventLog events;
@@ -181,6 +228,16 @@ int main(int argc, char** argv) {
   }
   options.ring_name = parser.isSet(ring_opt) ? parser.value(ring_opt).toStdString()
                                              : render::default_render_ring_name();
+
+  QList<MediaSpec> media_specs;
+  for (const QString& text : parser.values(media_opt)) {
+    const auto spec = parse_media_spec(text);
+    if (!spec.has_value()) {
+      return fatal(QStringLiteral("--media %1: expected camera, camera:<name>, or file:<path>").arg(text),
+                   kExitUsage);
+    }
+    media_specs.push_back(*spec);
+  }
 
   const bool from_file = parser.isSet(program_opt);
   std::optional<QString> session_id;
@@ -217,6 +274,20 @@ int main(int argc, char** argv) {
 
   QObject::connect(&engine, &RenderEngine::render_failed, &app, [&events](const QString& message) {
     events.write(QStringLiteral("render_error"), {{QStringLiteral("message"), message}});
+  });
+
+  MediaInputs media(media_specs);
+  QObject::connect(&media, &MediaInputs::status, &app,
+                   [&events](int source, const QString& state, const QString& detail) {
+                     events.write(QStringLiteral("media"),
+                                  {{QStringLiteral("source"), source},
+                                   {QStringLiteral("state"), state},
+                                   {QStringLiteral("detail"), detail}});
+                   });
+  if (!media.start(error)) return fatal(error, kExitStartup);
+  engine.set_before_render([&media, &compiler](nm::Backend& backend, nm::Graph& graph,
+                                               quint64 generation) {
+    media.apply(backend, graph, generation, compiler.registry());
   });
 
   // Edits can arrive faster than a compile (a slider drag on the controller).

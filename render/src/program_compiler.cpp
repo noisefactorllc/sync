@@ -34,7 +34,7 @@ auto ProgramCompiler::effect_count() const -> int { return definitions_; }
 auto ProgramCompiler::compile(const QString& source) -> Result {
   Result result;
   try {
-    result.graph = std::make_shared<const nm::Graph>(nm::compileGraph(source, registry_));
+    result.graph = std::make_shared<nm::Graph>(nm::compileGraph(source, registry_));
   } catch (const nm::DslSyntaxError& error) {
     result.error = QString::fromUtf8(error.what());
     result.diagnostic = error.diagnostic();

@@ -114,8 +114,9 @@ void RenderEngine::stop() {
   section_.reset();
 }
 
-void RenderEngine::set_program(std::shared_ptr<const nm::Graph> graph) {
+void RenderEngine::set_program(std::shared_ptr<nm::Graph> graph) {
   graph_ = std::move(graph);
+  ++generation_;
   reported_render_error_ = false;
 }
 
@@ -144,6 +145,7 @@ void RenderEngine::tick() {
     return;
   }
   try {
+    if (before_render_) before_render_(backend_, *graph_, generation_);
     backend_.render(*graph_, normalized_time(), static_cast<double>(now_us) / 1000.0);
     ++stats_.rendered;
   } catch (const std::exception& e) {

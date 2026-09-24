@@ -16,7 +16,7 @@ namespace noisefactor::sync::render_helper {
 class ProgramCompiler {
  public:
   struct Result {
-    std::shared_ptr<const nm::Graph> graph;  // null on failure
+    std::shared_ptr<nm::Graph> graph;  // null on failure
     QString error;
     QJsonObject diagnostic;  // structured lexer/parser diagnostic, when there is one
   };
@@ -28,6 +28,8 @@ class ProgramCompiler {
   // one unknown effect at a time.
   [[nodiscard]] auto effect_count() const -> int;
   [[nodiscard]] auto compile(const QString& source) -> Result;
+  // The catalogue live parameter updates resolve against.
+  [[nodiscard]] auto registry() const -> const nm::EffectRegistry& { return registry_; }
 
  private:
   int definitions_ = 0;
