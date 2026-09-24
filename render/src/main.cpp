@@ -352,24 +352,38 @@ int main(int argc, char** argv) {
   std::unique_ptr<AudioCapture> capture;
   nm::AudioInput audio_input;
   nm::AudioDevice audio_device;
-  if (parser.isSet(audio_opt)) {
-    capture = std::make_unique<AudioCapture>(parser.value(audio_opt));
-    if (!capture->start(error)) return fatal(error, kExitStartup);
+  // A source that is missing or goes away is silence, not a stopped picture:
+  // the capture looks for it again and the log says when it is heard.
+  const auto report_audio = [&](const AudioCapture::Change& change) {
+    if (!change.live) {
+      events.write(QStringLiteral("audio"), {{QStringLiteral("state"), QStringLiteral("waiting")},
+                                             {QStringLiteral("wanted"), parser.value(audio_opt)},
+                                             {QStringLiteral("reason"), change.reason}});
+      return;
+    }
     const auto& source = capture->source();
     audio_device = nm::AudioDevice{QString::fromStdString(source.id),
                                    QString::fromStdString(source.name),
                                    static_cast<int>(source.channels), true};
     events.write(QStringLiteral("audio"),
-                 {{QStringLiteral("source"), audio_device.name},
+                 {{QStringLiteral("state"), QStringLiteral("live")},
+                  {QStringLiteral("source"), audio_device.name},
                   {QStringLiteral("id"), audio_device.id},
                   {QStringLiteral("channels"), audio_device.channelCount},
                   {QStringLiteral("sample_rate"), static_cast<int>(source.sample_rate)}});
+  };
+  if (parser.isSet(audio_opt)) {
+    capture = std::make_unique<AudioCapture>(parser.value(audio_opt));
+    capture->start();
+    if (const auto change = capture->take_change()) report_audio(*change);
   }
 
   engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
     media.apply(backend, graph, generation, compiler.registry());
     if (capture) {
       const audio::Packet packet = capture->read();
+      // Before the samples: a source heard again may not be the one lost.
+      if (const auto change = capture->take_change()) report_audio(*change);
       if (packet.channels > 0 && !packet.samples.empty()) {
         const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
         audio_input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
