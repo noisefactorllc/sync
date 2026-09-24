@@ -122,7 +122,9 @@ done < <(otool -L "$contents/MacOS/syncd" | awk 'NR > 1 { print $1 }')
 # A release built with the render helper sets SYNC_EXPECT_RENDER=1. The
 # helper, its data and the Qt it links must then all be inside the bundle:
 # syncd starts sync-render from beside itself, and the helper loads the Cocoa
-# platform plugin through Resources/qt.conf.
+# platform plugin through Resources/qt.conf. Its Seance connection is wss://,
+# and Qt has no TLS without a backend plugin: the system's (Secure Transport)
+# needs no OpenSSL.
 if [[ "${SYNC_EXPECT_RENDER:-}" == 1 ]]; then
   render="$contents/MacOS/sync-render"
   for required in \
@@ -131,7 +133,8 @@ if [[ "${SYNC_EXPECT_RENDER:-}" == 1 ]]; then
     "$contents/Resources/noisemaker/shaders" \
     "$contents/Resources/qt.conf" \
     "$contents/Frameworks/QtCore.framework" \
-    "$contents/PlugIns/platforms/libqcocoa.dylib"; do
+    "$contents/PlugIns/platforms/libqcocoa.dylib" \
+    "$contents/PlugIns/tls/libqsecuretransportbackend.dylib"; do
     if [[ ! -e "$required" ]]; then
       echo "verify-macos-bundle: render helper bundle is missing $required" >&2
       exit 1

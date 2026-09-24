@@ -326,6 +326,8 @@ test("packaged Sync app carries the render helper, its data and its Qt", {
                "missing QtCore.framework");
   assert.equal(existsSync(path.join(contents, "PlugIns/platforms/libqcocoa.dylib")), true,
                "missing the Cocoa platform plugin");
+  assert.equal(existsSync(path.join(contents, "PlugIns/tls/libqsecuretransportbackend.dylib")),
+               true, "missing the Secure Transport TLS backend");
 });
 
 test("a half-configured render build is refused before anything is packaged", {

@@ -70,7 +70,7 @@ test("packaged Sync bundle carries the render helper, its data and its Qt", {
   for (const relative of [
     "sync-render.exe", "Qt6Core.dll", "Qt6Gui.dll", "Qt6OpenGL.dll",
     "Qt6WebSockets.dll", "Qt6Multimedia.dll", "platforms/qwindows.dll",
-    "noisemaker/effects", "noisemaker/shaders",
+    "tls/qschannelbackend.dll", "noisemaker/effects", "noisemaker/shaders",
   ]) {
     assert.equal(existsSync(path.join(bundle, relative)), true, `missing ${relative}`);
   }

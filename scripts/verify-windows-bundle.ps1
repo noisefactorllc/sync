@@ -58,9 +58,12 @@ foreach ($forbidden in Get-ChildItem -LiteralPath $Bundle -File -Filter '*.dll')
 # A build with the render helper sets SYNC_EXPECT_RENDER=1. The helper, its
 # data and the Qt it links must then all be in the bundle: syncd starts
 # sync-render from beside itself, and Qt needs its Windows platform plugin.
+# The helper's Seance connection is wss://, and Qt has no TLS without a
+# backend plugin: the system's (Schannel) needs no OpenSSL.
 if ($env:SYNC_EXPECT_RENDER -eq '1') {
   foreach ($required in @('sync-render.exe', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6OpenGL.dll',
-                          'Qt6WebSockets.dll', 'Qt6Multimedia.dll', 'platforms/qwindows.dll')) {
+                          'Qt6WebSockets.dll', 'Qt6Multimedia.dll', 'platforms/qwindows.dll',
+                          'tls/qschannelbackend.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Bundle $required) -PathType Leaf)) {
       Fail "render helper bundle is missing $required"
     }
