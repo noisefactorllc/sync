@@ -71,19 +71,30 @@ struct SyphonMetalConsumer::Impl {
     bool occupied = false;
     std::size_t sender_id_length = 0;
     std::array<char, kMaximumSenderIdBytes> sender_id{};
+    std::size_t name_length = 0;
+    std::array<char, kMaximumSenderNameBytes> name{};
     id<SyncSyphonMetalServer> __strong server = nil;
     id<MTLDevice> __weak device = nil;
+    bool in_standby = false;
+    std::chrono::steady_clock::time_point closed_at{};
 
     [[nodiscard]] auto id_view() const noexcept -> std::string_view {
       return {sender_id.data(), sender_id_length};
     }
+
+    [[nodiscard]] auto name_view() const noexcept -> std::string_view {
+      return {name.data(), name_length};
+    }
   };
 
-  explicit Impl(Options options) : explicit_framework_path(options.framework_path) {
+  explicit Impl(Options options)
+      : explicit_framework_path(options.framework_path),
+        recovery_grace_period(options.recovery_grace_period) {
     discover();
   }
 
   std::string explicit_framework_path;
+  std::chrono::milliseconds recovery_grace_period{0};
   // Only meaningful when discovery failed. unavailable_reason() answers None
   // whenever available() is true, so success never has to clear this and no
   // path can leave the two disagreeing.
@@ -211,6 +222,28 @@ struct SyphonMetalConsumer::Impl {
     }
   }
 
+  void reap_expired_standby(std::chrono::steady_clock::time_point now =
+                                std::chrono::steady_clock::now()) noexcept {
+    for (SenderEntry& entry : senders) {
+      if (entry.in_standby && recovery_grace_period.count() > 0) {
+        if (now - entry.closed_at >= recovery_grace_period) {
+          stop_and_clear(entry);
+        }
+      }
+    }
+  }
+
+  [[nodiscard]] auto find_standby(std::string_view name, id<MTLDevice> device) noexcept
+      -> SenderEntry* {
+    for (SenderEntry& entry : senders) {
+      if (entry.in_standby && entry.name_view() == name && entry.device == device &&
+          entry.server != nil) {
+        return &entry;
+      }
+    }
+    return nullptr;
+  }
+
   [[nodiscard]] auto find_sender(std::string_view sender_id) noexcept -> SenderEntry* {
     for (SenderEntry& entry : senders) {
       if (entry.occupied && entry.sender_id_length == sender_id.size() &&
@@ -222,13 +255,15 @@ struct SyphonMetalConsumer::Impl {
   }
 
   void stop_and_clear(SenderEntry& entry) noexcept {
-    if (!entry.occupied) {
+    if (!entry.occupied && !entry.in_standby) {
       return;
     }
     @autoreleasepool {
       id<SyncSyphonMetalServer> server = entry.server;
       entry.occupied = false;
+      entry.in_standby = false;
       entry.sender_id_length = 0;
+      entry.name_length = 0;
       entry.server = nil;
       entry.device = nil;
       if (server == nil) {
@@ -294,9 +329,20 @@ auto SyphonMetalConsumer::open_sender(std::string_view sender_id,
     return false;
   }
 
+  impl_->reap_expired_standby();
+
+  Impl::SenderEntry* standby_entry = impl_->find_standby(name, device);
+  if (standby_entry != nullptr) {
+    standby_entry->sender_id_length = sender_id.size();
+    std::memcpy(standby_entry->sender_id.data(), sender_id.data(), sender_id.size());
+    standby_entry->in_standby = false;
+    standby_entry->occupied = true;
+    return true;
+  }
+
   Impl::SenderEntry* entry = nullptr;
   for (Impl::SenderEntry& candidate : impl_->senders) {
-    if (!candidate.occupied) {
+    if (!candidate.occupied && !candidate.in_standby) {
       entry = &candidate;
       break;
     }
@@ -319,8 +365,11 @@ auto SyphonMetalConsumer::open_sender(std::string_view sender_id,
       }
       entry->sender_id_length = sender_id.size();
       std::memcpy(entry->sender_id.data(), sender_id.data(), sender_id.size());
+      entry->name_length = name.size();
+      std::memcpy(entry->name.data(), name.data(), name.size());
       entry->server = server;
       entry->device = device;
+      entry->in_standby = false;
       entry->occupied = true;
       return true;
     } @catch (NSException*) {
@@ -333,8 +382,17 @@ void SyphonMetalConsumer::close_sender(std::string_view sender_id) noexcept {
   if (impl_ == nullptr) {
     return;
   }
+  impl_->reap_expired_standby();
   Impl::SenderEntry* entry = impl_->find_sender(sender_id);
-  if (entry != nullptr) {
+  if (entry == nullptr) {
+    return;
+  }
+  if (impl_->recovery_grace_period.count() > 0 && entry->server != nil) {
+    entry->occupied = false;
+    entry->sender_id_length = 0;
+    entry->in_standby = true;
+    entry->closed_at = std::chrono::steady_clock::now();
+  } else {
     impl_->stop_and_clear(*entry);
   }
 }
@@ -347,6 +405,7 @@ auto SyphonMetalConsumer::encode_frame(std::string_view sender_id,
       metadata.width == 0 || metadata.height == 0) {
     return false;
   }
+  impl_->reap_expired_standby();
   Impl::SenderEntry* entry = impl_->find_sender(sender_id);
   if (entry == nullptr || entry->server == nil) {
     return false;

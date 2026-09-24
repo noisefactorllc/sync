@@ -399,6 +399,41 @@ SYNC_TEST(syphon_senders_have_distinct_servers_and_stop_exactly_once) {
   SYNC_REQUIRE(observation_named(@"Throw Stop").stopCount == 1);
 }
 
+SYNC_TEST(syphon_sender_reused_during_recovery_grace_period_preserves_server_instance) {
+  reset_fake();
+  id<MTLDevice> device = test_device();
+  SYNC_REQUIRE(device != nil);
+  {
+    SyphonMetalConsumer consumer(SyphonMetalConsumer::Options{
+        .recovery_grace_period = std::chrono::milliseconds(50),
+    });
+    SYNC_REQUIRE(consumer.open_sender("s1", "PersistentServer", device));
+    SyncSyphonFakeObservation* first_obs = observation_named(@"PersistentServer");
+    SYNC_REQUIRE(first_obs != nil);
+    const auto initial_instance = first_obs.instanceNumber;
+
+    // Close s1. With grace period active, the server must not stop immediately.
+    consumer.close_sender("s1");
+    SYNC_REQUIRE(first_obs.stopCount == 0);
+
+    // Open s2 with the same name. It should adopt the standby server without re-instantiation.
+    SYNC_REQUIRE(consumer.open_sender("s2", "PersistentServer", device));
+    SyncSyphonFakeObservation* second_obs = observation_named(@"PersistentServer");
+    SYNC_REQUIRE(second_obs == first_obs);
+    SYNC_REQUIRE(second_obs.instanceNumber == initial_instance);
+    SYNC_REQUIRE(second_obs.stopCount == 0);
+
+    // Close s2 and wait past the grace period.
+    consumer.close_sender("s2");
+    SYNC_REQUIRE(second_obs.stopCount == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // A call to open_sender triggers reaping of the expired standby.
+    SYNC_REQUIRE(consumer.open_sender("s3", "DifferentServer", device));
+    SYNC_REQUIRE(second_obs.stopCount == 1);
+  }
+}
+
 SYNC_TEST(syphon_encode_forwards_exact_objects_full_region_and_no_flip_without_committing) {
   reset_fake();
   id<MTLDevice> device = test_device();

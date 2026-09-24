@@ -4,6 +4,7 @@
 #error "syphon_consumer.hpp is available only on Apple platforms"
 #endif
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -36,6 +37,7 @@ class SyphonMetalConsumer final : public MetalFrameConsumer {
 
   struct Options {
     std::string_view framework_path{};
+    std::chrono::milliseconds recovery_grace_period{0};
   };
 
   SyphonMetalConsumer();

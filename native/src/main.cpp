@@ -219,6 +219,7 @@ int run_with_providers(nfsync::ServerOptions &options,
 #if defined(__APPLE__)
   nfsync::SyphonMetalConsumer syphon({
       .framework_path = command.syphon_framework_path,
+      .recovery_grace_period = std::chrono::milliseconds(10000),
   });
   const std::array<nfsync::MetalFrameConsumer *, 1> consumers{{&syphon}};
   nfsync::MetalFramePublisher metal(consumers);

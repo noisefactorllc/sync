@@ -32,6 +32,7 @@
                 newFrameHandler:(void (^)(id<SyncSyphonMetalClient> client))handler;
 - (id<MTLTexture>)newFrameImage;
 - (void)stop;
+- (BOOL)isValid;
 @end
 
 namespace {
@@ -322,12 +323,8 @@ int main(int argc, char** argv) {
     state->samples.reserve(state->max_samples);
 
     __block id<SyncSyphonMetalClient> client = nil;
-    id allocated_client = [client_class alloc];
-    client = [(id<SyncSyphonMetalClient>)allocated_client
-        initWithServerDescription:description
-                           device:device
-                          options:nil
-                  newFrameHandler:^(id<SyncSyphonMetalClient> callback_client) {
+    void (^frame_handler)(id<SyncSyphonMetalClient>) =
+        ^(id<SyncSyphonMetalClient> callback_client) {
                     const auto frame_index =
                         state->frames_seen.fetch_add(1, std::memory_order_relaxed) + 1U;
                     ReadbackSlot* claimed = nullptr;
@@ -434,13 +431,37 @@ int main(int argc, char** argv) {
                       if (options.h264_marker || options.plain_content)
                         [command_buffer waitUntilCompleted];
                     }
-                  }];
+                  };
+    id allocated_client = [client_class alloc];
+    client = [(id<SyncSyphonMetalClient>)allocated_client
+        initWithServerDescription:description
+                           device:device
+                          options:nil
+                  newFrameHandler:frame_handler];
     if (client == nil) {
       std::cerr << "sync_syphon_receiver_probe: failed to create Syphon client\n";
       return 1;
     }
 
-    run_loop_for(std::chrono::milliseconds(options.duration_ms));
+    const auto probe_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(options.duration_ms);
+    while (std::chrono::steady_clock::now() < probe_deadline) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          probe_deadline - std::chrono::steady_clock::now());
+      run_loop_for(std::min(remaining, std::chrono::milliseconds(50)));
+      if (client != nil && [client respondsToSelector:@selector(isValid)] && ![client isValid]) {
+        NSArray<NSDictionary<NSString*, id>*>* matches =
+            [directory serversMatchingName:server_name appName:nil];
+        if (matches.count > 0) {
+          [client stop];
+          client = [(id<SyncSyphonMetalClient>)[client_class alloc]
+              initWithServerDescription:matches.firstObject
+                                 device:device
+                                options:nil
+                        newFrameHandler:frame_handler];
+        }
+      }
+    }
     [client stop];
     const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (state->in_flight.load(std::memory_order_acquire) != 0 &&
