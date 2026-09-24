@@ -10,6 +10,7 @@
 //   --fake-stall-after <n>    stop writing and heartbeating after n frames
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -21,10 +22,36 @@
 
 #include <sync/render/render_ring.hpp>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_stop{false};
 extern "C" void on_signal(int) { g_stop.store(true); }
+
+// Raw reads, never stdio: a thread blocked in fgetc(stdin) holds glibc's
+// stdin lock, and exit() flushes every stream under those locks, so the
+// process would deadlock on its way out.
+void wait_for_stdin_eof() {
+#if defined(_WIN32)
+  const HANDLE input = ::GetStdHandle(STD_INPUT_HANDLE);
+  char buffer[256];
+  DWORD count = 0;
+  while (::ReadFile(input, buffer, sizeof(buffer), &count, nullptr) && count > 0) {
+  }
+#else
+  char buffer[256];
+  for (;;) {
+    const ssize_t count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (count > 0 || (count < 0 && errno == EINTR)) continue;
+    break;
+  }
+#endif
+}
 
 }  // namespace
 
@@ -48,8 +75,7 @@ int main(int argc, char** argv) {
   std::signal(SIGTERM, on_signal);
   if (watch_stdin) {
     std::thread([] {
-      while (std::fgetc(stdin) != EOF) {
-      }
+      wait_for_stdin_eof();
       g_stop.store(true);
     }).detach();
   }
