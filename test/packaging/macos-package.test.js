@@ -278,7 +278,7 @@ test("entitlements for the app and the camera extension are committed and valid"
   // plutil exists only on macOS; the content checks below run everywhere
   // this suite does, Windows included.
   if (process.platform === "darwin") {
-    for (const name of ["Sync.entitlements", "SyncCamera.entitlements"]) {
+    for (const name of ["Sync.entitlements", "SyncCamera.entitlements", "SyncRender.entitlements"]) {
       const result = spawnSync("/usr/bin/plutil", ["-lint", entitlement(name)], { encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);
     }
@@ -287,6 +287,11 @@ test("entitlements for the app and the camera extension are committed and valid"
                /com\.apple\.developer\.system-extension\.install/);
   assert.match(readFileSync(entitlement("SyncCamera.entitlements"), "utf8"),
                /com\.apple\.security\.app-sandbox/);
+  // sync-render captures camera and audio input for the programs it renders;
+  // under the hardened runtime each needs its entitlement.
+  const renderEntitlements = readFileSync(entitlement("SyncRender.entitlements"), "utf8");
+  assert.match(renderEntitlements, /com\.apple\.security\.device\.camera/);
+  assert.match(renderEntitlements, /com\.apple\.security\.device\.audio-input/);
   // sysextd's CMIO validator requires the Mach service name to start with
   // an app group from the extension's entitlements.
   const cameraEntitlements = readFileSync(entitlement("SyncCamera.entitlements"), "utf8");
@@ -299,4 +304,53 @@ test("entitlements for the app and the camera extension are committed and valid"
   assert.ok(service, "extension plist must name its Mach service");
   assert.ok(service[1].startsWith(group[1] + "."),
             `Mach service ${service[1]} must be prefixed by app group ${group[1]}`);
+});
+
+// A release built with SYNC_BUILD_RENDER sets SYNC_EXPECT_RENDER=1 before this
+// suite runs against the staged bundle.
+test("packaged Sync app carries the render helper, its data and its Qt", {
+  skip: stagedOnMacos.skip || process.env.SYNC_EXPECT_RENDER !== "1",
+}, () => {
+  const render = path.join(contents, "MacOS/sync-render");
+  assert.equal(existsSync(render), true, "missing sync-render beside syncd");
+  assert.notEqual(statSync(render).mode & 0o111, 0, "sync-render must be executable");
+  for (const directory of ["effects", "shaders"]) {
+    assert.equal(existsSync(path.join(contents, "Resources/noisemaker", directory)), true,
+                 `missing Resources/noisemaker/${directory}`);
+  }
+  assert.equal(existsSync(path.join(contents, "Resources/qt.conf")), true, "missing qt.conf");
+  assert.equal(existsSync(path.join(contents, "Frameworks/QtCore.framework")), true,
+               "missing QtCore.framework");
+  assert.equal(existsSync(path.join(contents, "PlugIns/platforms/libqcocoa.dylib")), true,
+               "missing the Cocoa platform plugin");
+});
+
+test("a half-configured render build is refused before anything is packaged", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-render-package-test-"));
+  try {
+    const buildDirectory = path.join(temporaryDirectory, "build");
+    const framework = path.join(temporaryDirectory, "Syphon.framework");
+    const render = path.join(buildDirectory, "render", "sync-render");
+    mkdirSync(path.join(buildDirectory, "Sync.app"), { recursive: true });
+    mkdirSync(framework, { recursive: true });
+    mkdirSync(path.dirname(render), { recursive: true });
+    writeFileSync(path.join(buildDirectory, "syncd"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(render, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const result = spawnSync(path.join(sourceDirectory, "scripts/package-macos.sh"), [
+      "bundle", buildDirectory, sourceDirectory, "0.2.3", framework,
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, SYNC_RENDER_BINARY: render },
+      timeout: 10_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /SYNC_RENDER_DATA must hold effects\/ and shaders\//);
+    assert.equal(existsSync(path.join(buildDirectory, "package", "Sync.app")), false,
+                 "nothing may be staged when the render inputs are incomplete");
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });

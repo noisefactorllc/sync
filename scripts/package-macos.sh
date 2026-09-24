@@ -63,6 +63,27 @@ if [[ -n "$dylib_search_path" &&
   echo "package-macos: dylib search path must be an absolute directory" >&2
   exit 1
 fi
+# The render helper is optional: a build without SYNC_BUILD_RENDER packages
+# no sync-render and no Qt. When CMake supplies it, all three paths must be
+# real, so a half-configured build cannot ship an app that cannot render.
+render_binary="${SYNC_RENDER_BINARY:-}"
+render_data="${SYNC_RENDER_DATA:-}"
+macdeployqt="${SYNC_MACDEPLOYQT:-}"
+if [[ -n "$render_binary$render_data$macdeployqt" ]]; then
+  if [[ "$render_binary" != /* || ! -x "$render_binary" ]]; then
+    echo "package-macos: SYNC_RENDER_BINARY must be an absolute executable" >&2
+    exit 1
+  fi
+  if [[ "$render_data" != /* || ! -d "$render_data/effects" ||
+        ! -d "$render_data/shaders" ]]; then
+    echo "package-macos: SYNC_RENDER_DATA must hold effects/ and shaders/" >&2
+    exit 1
+  fi
+  if [[ "$macdeployqt" != /* || ! -x "$macdeployqt" ]]; then
+    echo "package-macos: SYNC_MACDEPLOYQT must be an absolute executable" >&2
+    exit 1
+  fi
+fi
 
 rm -rf "$bundle"
 mkdir -p "$package_dir"
@@ -134,6 +155,21 @@ for library in libuv libcrypto; do
     esac
   done < <(otool -L "$bundle/Contents/MacOS/syncd" | awk 'NR > 1 { print $1 }')
 done
+
+# sync-render sits beside syncd, which finds it there. Its effect and shader
+# data goes in Resources, the helper's last data-root candidate. macdeployqt
+# then copies the Qt frameworks into Frameworks, the plugins into PlugIns,
+# and writes Resources/qt.conf; the main executable links no Qt, so only the
+# helper's dependencies are deployed. Signing happens later, in the release.
+if [[ -n "$render_binary" ]]; then
+  cp "$render_binary" "$bundle/Contents/MacOS/sync-render"
+  chmod 0755 "$bundle/Contents/MacOS/sync-render"
+  mkdir -p "$bundle/Contents/Resources/noisemaker"
+  ditto "$render_data/effects" "$bundle/Contents/Resources/noisemaker/effects"
+  ditto "$render_data/shaders" "$bundle/Contents/Resources/noisemaker/shaders"
+  "$macdeployqt" "$bundle" \
+    "-executable=$bundle/Contents/MacOS/sync-render" -verbose=1
+fi
 
 "$source_dir/scripts/verify-macos-bundle.sh" "$bundle" "$version"
 touch "$package_dir/.sync-bundle-complete"

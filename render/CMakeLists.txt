@@ -69,6 +69,11 @@ if(APPLE)
     "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist")
   set_property(TARGET sync-render APPEND PROPERTY LINK_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist")
+  # The app bundle carries the Qt this helper links; macdeployqt copies it in
+  # (scripts/package-macos.sh). find_program caches the path, so the bundle
+  # target in the top-level CMakeLists.txt sees it outside this directory.
+  find_program(SYNC_MACDEPLOYQT macdeployqt
+    HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" REQUIRED)
 endif()
 
 # The helper loads effect definitions and shaders from disk at run time. The

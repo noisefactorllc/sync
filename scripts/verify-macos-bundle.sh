@@ -116,4 +116,39 @@ while IFS= read -r dependency; do
   esac
 done < <(otool -L "$contents/MacOS/syncd" | awk 'NR > 1 { print $1 }')
 
+# A release built with the render helper sets SYNC_EXPECT_RENDER=1. The
+# helper, its data and the Qt it links must then all be inside the bundle:
+# syncd starts sync-render from beside itself, and the helper loads the Cocoa
+# platform plugin through Resources/qt.conf.
+if [[ "${SYNC_EXPECT_RENDER:-}" == 1 ]]; then
+  render="$contents/MacOS/sync-render"
+  for required in \
+    "$render" \
+    "$contents/Resources/noisemaker/effects" \
+    "$contents/Resources/noisemaker/shaders" \
+    "$contents/Resources/qt.conf" \
+    "$contents/Frameworks/QtCore.framework" \
+    "$contents/PlugIns/platforms/libqcocoa.dylib"; do
+    if [[ ! -e "$required" ]]; then
+      echo "verify-macos-bundle: render helper bundle is missing $required" >&2
+      exit 1
+    fi
+  done
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      @rpath/*)
+        if [[ ! -e "$contents/Frameworks/${dependency#@rpath/}" ]]; then
+          echo "verify-macos-bundle: sync-render dependency is not bundled: $dependency" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done < <(otool -L "$render" | awk 'NR > 1 { print $1 }')
+  if ! otool -l "$render" | awk '$1 == "path" { print $2 }' |
+      grep -qx '@executable_path/../Frameworks'; then
+    echo "verify-macos-bundle: sync-render has no @executable_path/../Frameworks rpath" >&2
+    exit 1
+  fi
+fi
+
 echo "verified $bundle ($version, $mach_count Mach-O files)"

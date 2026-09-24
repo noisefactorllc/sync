@@ -714,16 +714,30 @@ if(APPLE)
   set(SYNC_BUNDLE_STAMP ${SYNC_PACKAGE_DIRECTORY}/.sync-bundle-complete)
   set(SYNC_DMG_PATH
       ${SYNC_PACKAGE_DIRECTORY}/Sync-${SYNC_PRODUCT_VERSION}-arm64.dmg)
+  # With the render helper built, the bundle also carries sync-render, its
+  # noisemaker data and the Qt it links. The paths travel in the environment:
+  # an empty SYNC_DYLIB_SEARCH_PATH drops out of the argument list, so any
+  # positional argument after it would shift.
+  set(SYNC_BUNDLE_RENDER_ENVIRONMENT)
+  set(SYNC_BUNDLE_RENDER_TARGET)
+  if(SYNC_BUILD_RENDER)
+    set(SYNC_BUNDLE_RENDER_ENVIRONMENT
+      SYNC_RENDER_BINARY=$<TARGET_FILE:sync-render>
+      SYNC_RENDER_DATA=$<TARGET_FILE_DIR:sync-render>/noisemaker
+      SYNC_MACDEPLOYQT=${SYNC_MACDEPLOYQT})
+    set(SYNC_BUNDLE_RENDER_TARGET sync-render)
+  endif()
   add_custom_command(
     OUTPUT ${SYNC_BUNDLE_STAMP}
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-macos.sh bundle
+    COMMAND ${CMAKE_COMMAND} -E env ${SYNC_BUNDLE_RENDER_ENVIRONMENT}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-macos.sh bundle
       ${CMAKE_CURRENT_BINARY_DIR}
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${SYNC_PRODUCT_VERSION}
       ${SYNC_SYPHON_FRAMEWORK_PATH}
       ${SYNC_DYLIB_SEARCH_PATH}
     DEPENDS
-      sync_menu syncd sync_camera_extension
+      sync_menu syncd sync_camera_extension ${SYNC_BUNDLE_RENDER_TARGET}
       LICENSE
       packaging/Sync.svg
       packaging/macos/SyncCamera-Info.plist.in
