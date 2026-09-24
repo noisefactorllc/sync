@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -462,7 +463,16 @@ int main(int argc, char** argv) {
                   };
     const auto stop_client = [&state](id<SyncSyphonMetalClient> stopping) {
       state->standing_down.store(true);
-      while (state->handlers_running.load() != 0) run_loop_for(std::chrono::milliseconds(1));
+      // A handler waits on at most one GPU copy; one still running after
+      // five seconds means the GPU is stuck, and stopping would hang.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (state->handlers_running.load() != 0) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          std::cerr << "sync_syphon_receiver_probe: a frame handler did not finish within 5 s\n";
+          std::_Exit(1);
+        }
+        run_loop_for(std::chrono::milliseconds(1));
+      }
       @try {
         [stopping stop];
       } @catch (NSException*) {
@@ -491,6 +501,9 @@ int main(int argc, char** argv) {
         if (matches.count > 0) {
           stop_client(client);
           client = nil;
+          // The stopped client has left the frame queue; the new one's
+          // frames count from the first.
+          state->standing_down.store(false);
           @try {
             client = [(id<SyncSyphonMetalClient>)[client_class alloc]
                 initWithServerDescription:matches.firstObject
@@ -500,7 +513,6 @@ int main(int argc, char** argv) {
           } @catch (NSException*) {
             client = nil;
           }
-          state->standing_down.store(false);
         }
       }
     }
