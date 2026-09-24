@@ -38,7 +38,6 @@ namespace {
 
 constexpr std::size_t kMarkerBytes = 28;
 constexpr std::size_t kReadbackBytesPerRow = 1024;
-constexpr std::size_t kMaximumSamples = 60U * 60U * 10U;
 constexpr std::size_t kReadbackSlots = 4;
 constexpr std::array<std::uint8_t, 4> kMarkerSignature{{'S', 'Y', 'N', 'C'}};
 
@@ -84,6 +83,7 @@ struct ProbeState {
   std::vector<std::pair<std::uint64_t, std::uint64_t>> content_hashes;
   std::mutex samples_mutex;
   std::vector<Sample> samples;
+  std::size_t max_samples = 0;
 };
 
 auto parse_u32(std::string_view value, std::uint32_t& output) noexcept -> bool {
@@ -316,8 +316,10 @@ int main(int argc, char** argv) {
       }
     }
 
-    state->samples.reserve(std::min<std::size_t>(
-        kMaximumSamples, static_cast<std::size_t>(options.duration_ms) / 8U + 32U));
+    // Keep a sample for every marked frame of the whole run, at up to 125 fps.
+    // A fixed ten-minute cap made longer runs report at most 36,000 markers.
+    state->max_samples = static_cast<std::size_t>(options.duration_ms) / 8U + 1024U;
+    state->samples.reserve(state->max_samples);
 
     __block id<SyncSyphonMetalClient> client = nil;
     id allocated_client = [client_class alloc];
@@ -415,7 +417,7 @@ int main(int argc, char** argv) {
                                             options.nv12_marker,
                                             options.h264_marker)) {
                             std::lock_guard lock(state->samples_mutex);
-                            if (state->samples.size() < kMaximumSamples) {
+                            if (state->samples.size() < state->max_samples) {
                               state->samples.push_back(sample);
                             }
                           } else {
