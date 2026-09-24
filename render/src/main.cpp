@@ -17,7 +17,9 @@
 #include <QMutexLocker>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <csignal>
@@ -139,30 +141,47 @@ extern "C" void request_stop(int) { g_stop_requested.store(true); }
 }
 
 // Where the Seance identity is kept when --anon-token-file is not given: the
-// helper's own data directory. Seance mints at most ten anonymous identities
-// an hour per address and charges nothing for one that comes back, so a
-// helper that minted afresh at every launch could be refused for the rest of
-// the hour after a few restarts, or beside a few other machines on one
-// network, and render nothing.
-[[nodiscard]] auto default_token_path() -> QString {
+// helper's own data directory, one file per server, so an identity from one
+// Seance is never offered to another. Seance mints at most ten anonymous
+// identities an hour per address and charges nothing for one that comes
+// back, so a helper that minted afresh at every launch could be refused for
+// the rest of the hour after a few restarts, or beside a few other machines
+// on one network, and render nothing.
+[[nodiscard]] auto default_token_path(const QUrl& server) -> QString {
   const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-  if (directory.isEmpty()) return {};
-  return QDir(directory).filePath(QStringLiteral("seance-identity"));
+  QString host = server.host().toLower();
+  const bool plain = !host.isEmpty() && std::all_of(host.begin(), host.end(), [](QChar c) {
+    return (c >= u'a' && c <= u'z') || (c >= u'0' && c <= u'9') || c == u'.' || c == u'-';
+  });
+  if (directory.isEmpty() || !plain) return {};
+  if (server.port() > 0) host += QStringLiteral("-%1").arg(server.port());
+  return QDir(directory).filePath(QStringLiteral("seance-identity-%1").arg(host));
 }
 
 void write_token(const QString& path, const QString& token) {
   if (path.isEmpty()) return;
-  const QString directory = QFileInfo(path).absolutePath();
-  if (!QFileInfo::exists(directory)) {
-    if (!QDir().mkpath(directory)) return;
-    QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                         QFileDevice::ExeOwner);
+  const QFileInfo target(path);
+  const QFileInfo directory(target.absolutePath());
+  if (!directory.exists()) {
+    // Its parent is the platform's per-user data directory; this one is
+    // owner-only from the moment it exists.
+    const QString parent = directory.absolutePath();
+    if (!QDir().mkpath(parent) ||
+        !QDir(parent).mkdir(directory.fileName(), QFileDevice::ReadOwner |
+                                                     QFileDevice::WriteOwner |
+                                                     QFileDevice::ExeOwner)) {
+      return;
+    }
   }
+  // Created owner-only, so the token is never readable by anyone else even
+  // for an instant; a file that already existed is made owner-only before
+  // it is written.
   QFile file(path);
-  // Owner-only before the token is written, so it is never readable by
-  // anyone else even for an instant.
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-  file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate,
+                 QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+      !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+    return;
+  }
   file.write(token.toUtf8());
 }
 
@@ -223,7 +242,7 @@ int main(int argc, char** argv) {
   const QCommandLineOption token_opt(
       QStringLiteral("anon-token-file"),
       QStringLiteral("Keep the seance identity in this owner-only file across runs "
-                     "(default: seance-identity in the helper's data directory)."),
+                     "(default: one per server in the helper's data directory)."),
       QStringLiteral("path"));
   const QCommandLineOption program_opt(
       QStringLiteral("program-file"),
@@ -458,10 +477,10 @@ int main(int argc, char** argv) {
     }
     submit_program(QString::fromUtf8(file.readAll()), 0, QStringLiteral("file"));
   } else {
-    const QString token_path =
-        parser.isSet(token_opt) ? parser.value(token_opt) : default_token_path();
     SeanceClient::Options client_options;
     client_options.server = QUrl(parser.value(server_opt));
+    const QString token_path = parser.isSet(token_opt) ? parser.value(token_opt)
+                                                       : default_token_path(client_options.server);
     client_options.session_id = *session_id;
     client_options.origin = parser.value(origin_opt);
     client_options.anon_token = read_token(token_path);
