@@ -107,4 +107,25 @@ if kill -0 "$helper_pid" >/dev/null 2>&1; then
 fi
 helper_pid=""
 trap - EXIT
+
+# A bundle with the render helper must start it on the bundle's own Qt. The
+# helper builds its Qt GUI application, which loads QtCore through its rpath
+# and the Cocoa plugin through Resources/qt.conf, before it prints usage.
+# Qt's environment overrides are cleared so a Qt install on this machine
+# cannot stand in for the bundle's.
+render="$bundle/Contents/MacOS/sync-render"
+if [[ -e "$render" ]]; then
+  if ! render_help="$(env -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH -u DYLD_LIBRARY_PATH \
+      -u DYLD_FRAMEWORK_PATH -u QT_QPA_PLATFORM_PLUGIN_PATH "$render" --help 2>&1)"; then
+    echo "smoke-macos-app: sync-render --help failed:" >&2
+    echo "$render_help" >&2
+    exit 1
+  fi
+  if ! grep -q 'seance' <<<"$render_help"; then
+    echo "smoke-macos-app: unexpected sync-render --help output:" >&2
+    echo "$render_help" >&2
+    exit 1
+  fi
+  echo "sync-render starts on the bundle's Qt"
+fi
 echo "Sync app lifecycle smoke passed"
