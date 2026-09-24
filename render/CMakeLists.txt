@@ -4,7 +4,11 @@
 # syncd publishes. Built only with SYNC_BUILD_RENDER, because it needs Qt 6
 # and a desktop OpenGL 4.1 driver, neither of which the rest of Sync does.
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Multimedia OpenGL Network WebSockets)
+# Qt 6.5 is the floor: media inputs request camera and microphone access
+# through QPermissions, which Qt 6.5 introduced. Ubuntu 24.04's Qt 6.4.2 does
+# not build this helper (CI run 36023181792), so a Linux package cannot
+# depend on that distribution's Qt.
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Multimedia OpenGL Network WebSockets)
 
 # Pinned by commit, never a branch, so a Sync build is reproducible. For local
 # work against a checkout, configure with
