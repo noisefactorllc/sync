@@ -248,6 +248,78 @@ jobs:
           npm run test:unit
           SYNC_DAEMON_PATH=build/syncd npm run test:integration:soak
 
+  render:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
+    name: Render helper ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+          # No GPU on hosted Linux runners: the helper's GL 4.1 core context
+          # comes from Mesa llvmpipe under Xvfb, as in noisemaker-for-qt's CI.
+          - name: Ubuntu 24.04 llvmpipe
+            os: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.8.3'
+          modules: 'qtwebsockets qtmultimedia'
+          cache: true
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake pkg-config openssl@3 libuv
+
+      - name: Install build dependencies and GL runtime (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Runner images carry third-party apt sources whose stale indexes
+          # can fail apt-get update; only Ubuntu archives are needed here.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config libssl-dev libuv1-dev libasound2-dev \
+            libjack-jackd2-dev xvfb mesa-utils libgl1-mesa-dri libegl1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-randr0 \
+            libxcb-render-util0 libxcb-xinerama0 libxcb-image0
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSYNC_BUILD_RENDER=ON \
+            -DCMAKE_CXX_FLAGS='-Wall -Wextra -Wpedantic -Werror'
+          cmake --build build --parallel 4 \
+            --target sync-render sync_render_helper_tests sync_render_ring_tests sync_render_supervisor_tests
+
+      - name: Run render tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          build/sync_render_ring_tests
+          build/sync_render_supervisor_tests
+          build/render/sync_render_helper_tests
+
+      - name: Run render tests (Linux, Xvfb + llvmpipe)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          build/sync_render_ring_tests
+          build/sync_render_supervisor_tests
+          xvfb-run -a -s "-screen 0 1280x1024x24" glxinfo -B
+          xvfb-run -a -s "-screen 0 1280x1024x24" build/render/sync_render_helper_tests
+
   windows:
     needs: changes
     if: needs.changes.outputs.product == 'true'
