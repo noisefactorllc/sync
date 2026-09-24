@@ -338,11 +338,18 @@ test("a half-configured render build is refused before anything is packaged", {
     mkdirSync(path.dirname(render), { recursive: true });
     writeFileSync(path.join(buildDirectory, "syncd"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(render, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // The packager checks its tools before its inputs. The refusal comes
+    // before any tool runs, so stubs stand in for the ones a runner may lack.
+    const fakeBin = path.join(temporaryDirectory, "bin");
+    mkdirSync(fakeBin, { recursive: true });
+    for (const tool of ["dylibbundler", "rsvg-convert"]) {
+      writeFileSync(path.join(fakeBin, tool), "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+    }
     const result = spawnSync(path.join(sourceDirectory, "scripts/package-macos.sh"), [
       "bundle", buildDirectory, sourceDirectory, "0.2.3", framework,
     ], {
       encoding: "utf8",
-      env: { ...process.env, SYNC_RENDER_BINARY: render },
+      env: { ...process.env, SYNC_RENDER_BINARY: render, PATH: `${fakeBin}:${process.env.PATH}` },
       timeout: 10_000,
     });
     assert.equal(result.error, undefined);
