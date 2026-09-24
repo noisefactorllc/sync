@@ -91,6 +91,20 @@ struct ProbeState {
   std::mutex samples_mutex;
   std::vector<Sample> samples;
   std::size_t max_samples = 0;
+  // Syphon's -stop holds the client's lock while it waits for the frame
+  // queue, and -newFrameImage, called from a frame handler on that queue,
+  // takes the same lock: a stop that meets an arriving frame deadlocks
+  // (SyphonClientBase -stopBase, Syphon 71351d4 and upstream). This probe
+  // hung in 2 of 150 stops against a 60 fps server. Handlers stand down
+  // before every stop instead; see stop_client below.
+  std::atomic<bool> standing_down{false};
+  std::atomic<int> handlers_running{0};
+};
+
+// Counts a frame handler out however it returns.
+struct HandlerScope {
+  ProbeState* state;
+  ~HandlerScope() { state->handlers_running.fetch_sub(1); }
 };
 
 auto parse_u32(std::string_view value, std::uint32_t& output) noexcept -> bool {
@@ -332,6 +346,13 @@ int main(int argc, char** argv) {
     __block id<SyncSyphonMetalClient> client = nil;
     void (^frame_handler)(id<SyncSyphonMetalClient>) =
         ^(id<SyncSyphonMetalClient> callback_client) {
+                    // Counted in before the flag is read, and stop_client sets
+                    // the flag before it reads the count: a handler either
+                    // finishes before the stop begins or never touches the
+                    // client's lock.
+                    state->handlers_running.fetch_add(1);
+                    const HandlerScope scope{state.get()};
+                    if (state->standing_down.load()) return;
                     const auto frame_index =
                         state->frames_seen.fetch_add(1, std::memory_order_relaxed) + 1U;
                     ReadbackSlot* claimed = nullptr;
@@ -439,6 +460,14 @@ int main(int argc, char** argv) {
                         [command_buffer waitUntilCompleted];
                     }
                   };
+    const auto stop_client = [&state](id<SyncSyphonMetalClient> stopping) {
+      state->standing_down.store(true);
+      while (state->handlers_running.load() != 0) run_loop_for(std::chrono::milliseconds(1));
+      @try {
+        [stopping stop];
+      } @catch (NSException*) {
+      }
+    };
     id allocated_client = [client_class alloc];
     client = [(id<SyncSyphonMetalClient>)allocated_client
         initWithServerDescription:description
@@ -460,10 +489,7 @@ int main(int argc, char** argv) {
         NSArray<NSDictionary<NSString*, id>*>* matches =
             [directory serversMatchingName:server_name appName:nil];
         if (matches.count > 0) {
-          @try {
-            [client stop];
-          } @catch (NSException*) {
-          }
+          stop_client(client);
           client = nil;
           @try {
             client = [(id<SyncSyphonMetalClient>)[client_class alloc]
@@ -474,10 +500,11 @@ int main(int argc, char** argv) {
           } @catch (NSException*) {
             client = nil;
           }
+          state->standing_down.store(false);
         }
       }
     }
-    [client stop];
+    stop_client(client);
     const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (state->in_flight.load(std::memory_order_acquire) != 0 &&
            std::chrono::steady_clock::now() < drain_deadline) {
