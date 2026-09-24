@@ -70,6 +70,11 @@ if ($env:SYNC_EXPECT_RENDER -eq '1') {
       Fail "render helper bundle is missing $directory"
     }
   }
+  $notices = Get-Content -LiteralPath (Join-Path $Bundle 'Third-Party-Notices.txt')
+  if (-not ($notices -contains 'Sync render helper (sync-render)') -or
+      -not ($notices -contains 'LGPL-3.0-only')) {
+    Fail 'Third-Party-Notices.txt lacks the render helper and Qt notices'
+  }
 }
 
 function Get-PeMachine([string]$path) {

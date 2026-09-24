@@ -724,7 +724,11 @@ if(APPLE)
     set(SYNC_BUNDLE_RENDER_ENVIRONMENT
       SYNC_RENDER_BINARY=$<TARGET_FILE:sync-render>
       SYNC_RENDER_DATA=$<TARGET_FILE_DIR:sync-render>/noisemaker
-      SYNC_MACDEPLOYQT=${SYNC_MACDEPLOYQT})
+      SYNC_MACDEPLOYQT=${SYNC_MACDEPLOYQT}
+      SYNC_RENDER_QT_SBOM_DIR=${SYNC_RENDER_QT_SBOM_DIR}
+      SYNC_RENDER_QT_MODULES=${SYNC_RENDER_QT_MODULES}
+      SYNC_RENDER_NOTICE_COMPONENTS=${SYNC_RENDER_NOTICE_COMPONENTS}
+      SYNC_NODE=${SYNC_NODE})
     set(SYNC_BUNDLE_RENDER_TARGET sync-render)
   endif()
   add_custom_command(
@@ -744,6 +748,7 @@ if(APPLE)
       packaging/macos/Third-Party-Notices.txt
       scripts/package-macos.sh
       scripts/verify-macos-bundle.sh
+      scripts/render-notices.mjs
     VERBATIM
   )
   add_custom_target(sync_macos_bundle DEPENDS ${SYNC_BUNDLE_STAMP})
@@ -1508,7 +1513,11 @@ elseif(WIN32)
     set(SYNC_BUNDLE_RENDER_ENVIRONMENT
       SYNC_RENDER_BINARY=$<TARGET_FILE:sync-render>
       SYNC_RENDER_DATA=$<TARGET_FILE_DIR:sync-render>/noisemaker
-      SYNC_WINDEPLOYQT=${SYNC_WINDEPLOYQT})
+      SYNC_WINDEPLOYQT=${SYNC_WINDEPLOYQT}
+      SYNC_RENDER_QT_SBOM_DIR=${SYNC_RENDER_QT_SBOM_DIR}
+      SYNC_RENDER_QT_MODULES=${SYNC_RENDER_QT_MODULES}
+      SYNC_RENDER_NOTICE_COMPONENTS=${SYNC_RENDER_NOTICE_COMPONENTS}
+      SYNC_NODE=${SYNC_NODE})
     set(SYNC_BUNDLE_RENDER_TARGET sync-render)
   endif()
   add_custom_command(
@@ -1535,6 +1544,7 @@ elseif(WIN32)
       packaging/windows/bundle-dependencies.cmake
       scripts/package-windows.ps1
       scripts/verify-windows-bundle.ps1
+      scripts/render-notices.mjs
     VERBATIM
   )
   add_custom_target(sync_windows_bundle DEPENDS ${SYNC_BUNDLE_STAMP})

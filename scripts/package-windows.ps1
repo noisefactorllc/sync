@@ -159,6 +159,13 @@ if ($renderBinary -or $renderData -or $windeployqt) {
       -not (Test-Path -LiteralPath $windeployqt -PathType Leaf)) {
     Fail "SYNC_WINDEPLOYQT must be an absolute path to windeployqt: $windeployqt"
   }
+  if (-not (Test-Path -LiteralPath ([string]$env:SYNC_RENDER_QT_SBOM_DIR) -PathType Container) -or
+      [string]::IsNullOrWhiteSpace($env:SYNC_RENDER_QT_MODULES) -or
+      [string]::IsNullOrWhiteSpace($env:SYNC_RENDER_NOTICE_COMPONENTS) -or
+      -not (Test-Path -LiteralPath ([string]$env:SYNC_NODE) -PathType Leaf)) {
+    Fail ('the render helper''s notices need SYNC_RENDER_QT_SBOM_DIR, SYNC_RENDER_QT_MODULES, ' +
+          'SYNC_RENDER_NOTICE_COMPONENTS and SYNC_NODE')
+  }
 }
 
 if (Test-Path -LiteralPath $bundleDir) { Remove-Item -LiteralPath $bundleDir -Recurse -Force }
@@ -187,6 +194,20 @@ if ($renderBinary) {
   Copy-Item -LiteralPath (Join-Path $renderData 'shaders') -Destination $bundleData -Recurse
   & $windeployqt --no-compiler-runtime --no-translations (Join-Path $bundleDir 'sync-render.exe')
   if ($LASTEXITCODE -ne 0) { Fail "windeployqt failed with exit code $LASTEXITCODE" }
+  # The helper's dependencies and every component of the shipped Qt, from
+  # Qt's software bill of materials, with the full text of each license.
+  $noticeArguments = @(
+    (Join-Path $SourceDir 'scripts/render-notices.mjs'),
+    '--sbom-dir', $env:SYNC_RENDER_QT_SBOM_DIR,
+    '--modules', $env:SYNC_RENDER_QT_MODULES,
+    '--spdx-texts', (Join-Path $SourceDir 'packaging/licenses/spdx'))
+  foreach ($component in ([string]$env:SYNC_RENDER_NOTICE_COMPONENTS).Split('|')) {
+    $noticeArguments += @('--component', $component)
+  }
+  $notices = & $env:SYNC_NODE @noticeArguments
+  if ($LASTEXITCODE -ne 0) { Fail "render-notices.mjs failed with exit code $LASTEXITCODE" }
+  Add-Content -LiteralPath (Join-Path $bundleDir 'Third-Party-Notices.txt') `
+    -Value (@('') + $notices) -Encoding utf8
 }
 Copy-Item -LiteralPath (Join-Path $SourceDir 'LICENSE') `
   -Destination (Join-Path $bundleDir 'LICENSE.txt')

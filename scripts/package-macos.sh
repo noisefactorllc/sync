@@ -31,7 +31,9 @@ if [[ "$mode" == "dmg" ]]; then
   ditto "$bundle" "$dmg_root/Sync.app"
   ln -s /Applications "$dmg_root/Applications"
   cp "$source_dir/LICENSE" "$dmg_root/LICENSE.txt"
-  cp "$source_dir/packaging/macos/Third-Party-Notices.txt" \
+  # The bundle's notices, not the source file: a bundle with the render
+  # helper carries the generated Qt and helper section as well.
+  cp "$bundle/Contents/Resources/Third-Party-Notices.txt" \
     "$dmg_root/Third-Party-Notices.txt"
   rm -f "$dmg"
   hdiutil create -quiet -volname "Sync Preview" -srcfolder "$dmg_root" \
@@ -81,6 +83,12 @@ if [[ -n "$render_binary$render_data$macdeployqt" ]]; then
   fi
   if [[ "$macdeployqt" != /* || ! -x "$macdeployqt" ]]; then
     echo "package-macos: SYNC_MACDEPLOYQT must be an absolute executable" >&2
+    exit 1
+  fi
+  if [[ ! -d "${SYNC_RENDER_QT_SBOM_DIR:-}" || -z "${SYNC_RENDER_QT_MODULES:-}" ||
+        -z "${SYNC_RENDER_NOTICE_COMPONENTS:-}" || ! -x "${SYNC_NODE:-}" ]]; then
+    echo "package-macos: the render helper's notices need SYNC_RENDER_QT_SBOM_DIR," \
+      "SYNC_RENDER_QT_MODULES, SYNC_RENDER_NOTICE_COMPONENTS and SYNC_NODE" >&2
     exit 1
   fi
 fi
@@ -169,6 +177,27 @@ if [[ -n "$render_binary" ]]; then
   ditto "$render_data/shaders" "$bundle/Contents/Resources/noisemaker/shaders"
   "$macdeployqt" "$bundle" \
     "-executable=$bundle/Contents/MacOS/sync-render" -verbose=1
+  # Qt's own packages are universal (x86_64 and arm64). Sync ships for Apple
+  # silicon only, so every library macdeployqt copied is thinned to arm64:
+  # about half the size, and one architecture for the verifier and signing.
+  while IFS= read -r -d '' library; do
+    file -b "$library" | grep -q 'Mach-O universal' || continue
+    lipo "$library" -thin arm64 -output "$library.arm64"
+    mv -f "$library.arm64" "$library"
+  done < <(find "$bundle/Contents/Frameworks" "$bundle/Contents/PlugIns" -type f -print0)
+  # The helper's dependencies and every component of the shipped Qt, from
+  # Qt's software bill of materials, with the full text of each license.
+  notice_arguments=()
+  IFS='|' read -r -a notice_components <<<"$SYNC_RENDER_NOTICE_COMPONENTS"
+  for component in "${notice_components[@]}"; do
+    notice_arguments+=(--component "$component")
+  done
+  {
+    echo
+    "$SYNC_NODE" "$source_dir/scripts/render-notices.mjs" \
+      --sbom-dir "$SYNC_RENDER_QT_SBOM_DIR" --modules "$SYNC_RENDER_QT_MODULES" \
+      --spdx-texts "$source_dir/packaging/licenses/spdx" "${notice_arguments[@]}"
+  } >>"$bundle/Contents/Resources/Third-Party-Notices.txt"
 fi
 
 "$source_dir/scripts/verify-macos-bundle.sh" "$bundle" "$version"

@@ -134,21 +134,35 @@ if [[ "${SYNC_EXPECT_RENDER:-}" == 1 ]]; then
       exit 1
     fi
   done
-  while IFS= read -r dependency; do
-    case "$dependency" in
-      @rpath/*)
-        if [[ ! -e "$contents/Frameworks/${dependency#@rpath/}" ]]; then
-          echo "verify-macos-bundle: sync-render dependency is not bundled: $dependency" >&2
-          exit 1
-        fi
-        ;;
-    esac
-  done < <(otool -L "$render" | awk 'NR > 1 { print $1 }')
-  if ! otool -l "$render" | awk '$1 == "path" { print $2 }' |
-      grep -qx '@executable_path/../Frameworks'; then
-    echo "verify-macos-bundle: sync-render has no @executable_path/../Frameworks rpath" >&2
+  # The Qt and helper notices are generated at packaging time; a bundle that
+  # ships the helper without them would ship its licenses unstated.
+  if ! grep -q '^Sync render helper (sync-render)$' "$contents/Resources/Third-Party-Notices.txt" ||
+     ! grep -q '^LGPL-3.0-only$' "$contents/Resources/Third-Party-Notices.txt"; then
+    echo "verify-macos-bundle: Third-Party-Notices.txt lacks the render helper and Qt notices" >&2
     exit 1
   fi
+  # macdeployqt points the helper at Frameworks through @loader_path (the
+  # helper lives in MacOS); an @rpath dependency needs a matching rpath.
+  render_rpaths="$(otool -l "$render" | awk '$1 == "path" { print $2 }')"
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      @loader_path/../Frameworks/*|@executable_path/../Frameworks/*)
+        bundled="$contents/Frameworks/${dependency#*/../Frameworks/}"
+        ;;
+      @rpath/*)
+        if ! grep -qxE '@(loader|executable)_path/\.\./Frameworks' <<<"$render_rpaths"; then
+          echo "verify-macos-bundle: sync-render has $dependency but no Frameworks rpath" >&2
+          exit 1
+        fi
+        bundled="$contents/Frameworks/${dependency#@rpath/}"
+        ;;
+      *) continue ;;
+    esac
+    if [[ ! -e "$bundled" ]]; then
+      echo "verify-macos-bundle: sync-render dependency is not bundled: $dependency" >&2
+      exit 1
+    fi
+  done < <(otool -L "$render" | awk 'NR > 1 { print $1 }')
 fi
 
 echo "verified $bundle ($version, $mach_count Mach-O files)"

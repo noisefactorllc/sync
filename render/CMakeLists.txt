@@ -32,6 +32,19 @@ FetchContent_Declare(rtmidi
   URL_HASH SHA256=c5090c14edb3e3f82dd63589041f516bb24b78091aa82574fdc17d33ee62361e
 )
 FetchContent_MakeAvailable(rtmidi)
+
+# Third-party notices for the packaged helper, written by
+# scripts/render-notices.mjs: the helper's own dependencies and every
+# component in Qt's software bill of materials for the modules that ship.
+# Cached so the bundle targets in the top-level CMakeLists.txt see them.
+set(SYNC_RENDER_NOTICE_COMPONENTS
+  "noisemaker-for-qt=https://github.com/noisefactorllc/noisemaker-for-qt=${noisemaker_qt_SOURCE_DIR}/LICENSE|RtMidi=https://github.com/thestk/rtmidi=${rtmidi_SOURCE_DIR}/LICENSE"
+  CACHE INTERNAL "License files of the render helper's own dependencies")
+set(SYNC_RENDER_QT_SBOM_DIR "${QT6_INSTALL_PREFIX}/sbom"
+  CACHE INTERNAL "Qt's SPDX software bill of materials")
+set(SYNC_RENDER_QT_MODULES "qtbase,qtmultimedia,qtwebsockets,qtsvg"
+  CACHE INTERNAL "Qt modules the packaged helper ships")
+find_program(SYNC_NODE node)
 # Keep the warnings-as-errors gate off pinned upstream code, as for RtAudio.
 if(MSVC)
   target_compile_options(rtmidi PRIVATE /WX-)
