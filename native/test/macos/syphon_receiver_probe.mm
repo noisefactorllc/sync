@@ -449,16 +449,24 @@ int main(int argc, char** argv) {
       const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
           probe_deadline - std::chrono::steady_clock::now());
       run_loop_for(std::min(remaining, std::chrono::milliseconds(50)));
-      if (client != nil && [client respondsToSelector:@selector(isValid)] && ![client isValid]) {
+      if (client == nil || ([client respondsToSelector:@selector(isValid)] && ![client isValid])) {
         NSArray<NSDictionary<NSString*, id>*>* matches =
             [directory serversMatchingName:server_name appName:nil];
         if (matches.count > 0) {
-          [client stop];
-          client = [(id<SyncSyphonMetalClient>)[client_class alloc]
-              initWithServerDescription:matches.firstObject
-                                 device:device
-                                options:nil
-                        newFrameHandler:frame_handler];
+          @try {
+            [client stop];
+          } @catch (NSException*) {
+          }
+          client = nil;
+          @try {
+            client = [(id<SyncSyphonMetalClient>)[client_class alloc]
+                initWithServerDescription:matches.firstObject
+                                   device:device
+                                  options:nil
+                          newFrameHandler:frame_handler];
+          } @catch (NSException*) {
+            client = nil;
+          }
         }
       }
     }
