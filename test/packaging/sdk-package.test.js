@@ -12,11 +12,15 @@ import { createHash } from 'node:crypto';
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
-test('packed SDK installs in an external project and emits literal frame bytes', { timeout: 30000 }, async (t) => {
+// The timeouts catch a hung npm, not a slow one. On hosted Windows runners npm's
+// cold start competes with the other packaging suites running in parallel:
+// pack and install took 4.7 to 10.4 s together, and pack alone exceeded 20 s
+// in three runs on 2026-09-24 (36038380299, 36040781952, 36042728765).
+test('packed SDK installs in an external project and emits literal frame bytes', { timeout: 150000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'sync-sdk-consumer-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const { stdout } = await runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', directory], {
-    cwd: path.join(root, 'browser'), timeout: 20000,
+    cwd: path.join(root, 'browser'), timeout: 60000,
   });
   const [artifact] = JSON.parse(stdout);
   assert.equal(artifact.name, '@noisefactor/sync');
@@ -25,7 +29,7 @@ test('packed SDK installs in an external project and emits literal frame bytes',
   assert.deepEqual(artifact.files.map(file => file.path).sort(), [...manifest.files, 'package.json'].sort());
   await writeFile(path.join(directory, 'package.json'), '{"private":true,"type":"module"}');
   await runNpm(['install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false',
-    path.join(directory, artifact.filename)], { cwd: directory, timeout: 20000 });
+    path.join(directory, artifact.filename)], { cwd: directory, timeout: 60000 });
   const sample = `
     import assert from 'node:assert/strict';
     import { SyncFrameSink, RgbaExportQueue, SyncBridgeClient, SYNC_SDK_VERSION } from '@noisefactor/sync';
