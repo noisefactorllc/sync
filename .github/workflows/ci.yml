@@ -254,6 +254,9 @@ jobs:
     name: Render helper ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # The distro-Qt leg answers whether a Linux package can depend on
+    # Ubuntu's own Qt 6.4 instead of bundling Qt; it does not gate main.
+    continue-on-error: ${{ matrix.qt == 'distro' }}
     strategy:
       fail-fast: false
       matrix:
@@ -268,6 +271,9 @@ jobs:
           # opengl32sw.dll under QT_OPENGL=software, as in noisemaker-for-qt's CI.
           - name: Windows llvmpipe
             os: windows-latest
+          - name: Ubuntu 24.04 distro Qt 6.4
+            os: ubuntu-24.04
+            qt: distro
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -277,6 +283,7 @@ jobs:
       # layout (windows_x86/desktop/qt6_6111/...), so Windows stays on 6.10.3,
       # the version noisemaker-for-qt's Windows CI qualifies.
       - name: Install Qt
+        if: matrix.qt != 'distro'
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: ${{ runner.os == 'Windows' && '6.10.3' || '6.11.1' }}
@@ -300,6 +307,14 @@ jobs:
             libjack-jackd2-dev xvfb mesa-utils libgl1-mesa-dri libegl1 libxkbcommon-x11-0 \
             libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-randr0 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-image0
+
+      - name: Install Ubuntu's Qt 6 (distro-Qt leg)
+        if: matrix.qt == 'distro'
+        run: |
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev qt6-websockets-dev \
+            qt6-multimedia-dev libgl-dev
+          dpkg-query -W qt6-base-dev qt6-websockets-dev qt6-multimedia-dev
 
       - name: Install build dependencies (Windows)
         if: runner.os == 'Windows'
