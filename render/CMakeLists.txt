@@ -11,7 +11,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Multimedia OpenGL Network WebSocke
 #   -DFETCHCONTENT_SOURCE_DIR_NOISEMAKER_QT=/path/to/noisemaker-for-qt
 FetchContent_Declare(noisemaker_qt
   GIT_REPOSITORY https://github.com/noisefactorllc/noisemaker-for-qt.git
-  GIT_TAG 3a4f421e351e76e28e4bdb58e19f38a96c8d9c7d
+  GIT_TAG c43d33f333c9c8d2242396536b4bd1c46ff34840
   SOURCE_SUBDIR qt
 )
 FetchContent_MakeAvailable(noisemaker_qt)
@@ -36,6 +36,7 @@ else()
 endif()
 
 add_library(sync_render_helper STATIC
+  src/audio_capture.cpp
   src/event_log.cpp
   src/media_inputs.cpp
   src/midi_input.cpp
@@ -54,6 +55,7 @@ target_link_libraries(sync_render_helper PUBLIC
   Qt6::Network
   Qt6::WebSockets
   rtmidi
+  sync_audio_native
   sync_render_ring
 )
 
@@ -81,6 +83,7 @@ add_custom_command(TARGET sync-render POST_BUILD
 )
 
 add_executable(sync_render_helper_tests
+  test/audio_capture_test.cpp
   test/media_inputs_test.cpp
   test/midi_input_test.cpp
   test/qt_test_main.cpp

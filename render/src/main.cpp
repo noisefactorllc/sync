@@ -18,6 +18,7 @@
 #include <QTimer>
 
 #include <atomic>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <thread>
 
+#include "audio_capture.h"
 #include "event_log.h"
 #include "media_inputs.h"
 #include "midi_input.h"
@@ -32,8 +34,15 @@
 #include "render_engine.h"
 #include "seance_client.h"
 
+#include <runtime/audio_state.h>
 #include <runtime/midi_state.h>
 #include <sync/render/render_ring.hpp>
+
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -45,6 +54,26 @@ constexpr int kExitStartup = 3;
 constexpr int kExitSessionEnded = 4;
 
 std::atomic<bool> g_stop_requested{false};
+
+// Raw reads, never stdio: a thread blocked in fgetc(stdin) holds glibc's
+// stdin lock, and exit() flushes every stream under those locks, so the
+// helper would deadlock on its way out on Linux.
+void wait_for_stdin_eof() {
+#if defined(Q_OS_WIN)
+  const HANDLE input = ::GetStdHandle(STD_INPUT_HANDLE);
+  char buffer[256];
+  DWORD count = 0;
+  while (::ReadFile(input, buffer, sizeof(buffer), &count, nullptr) && count > 0) {
+  }
+#else
+  char buffer[256];
+  for (;;) {
+    const ssize_t count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (count > 0 || (count < 0 && errno == EINTR)) continue;
+    break;
+  }
+#endif
+}
 
 // The helper's stderr is syncd's log. Qt's media backends can repeat one
 // warning per decoded frame (macOS: "cannot create texture, Metal texture
@@ -210,12 +239,16 @@ int main(int argc, char** argv) {
       QStringLiteral("name"));
   const QCommandLineOption no_midi_opt(QStringLiteral("no-midi"),
                                        QStringLiteral("Open no MIDI inputs."));
+  const QCommandLineOption audio_opt(
+      QStringLiteral("audio"),
+      QStringLiteral("Audio input for audio() steps: default, or a source id or name."),
+      QStringLiteral("source"));
   const QCommandLineOption stdin_opt(
       QStringLiteral("exit-on-stdin-eof"),
       QStringLiteral("Exit when stdin closes (the supervising process went away)."));
   parser.addOptions({session_opt, server_opt, origin_opt, token_opt, program_opt, width_opt,
                      height_opt, fps_opt, loop_opt, ring_opt, data_opt, frames_opt, media_opt,
-                     midi_opt, no_midi_opt, stdin_opt});
+                     midi_opt, no_midi_opt, audio_opt, stdin_opt});
   parser.process(app);
 
   EventLog events;
@@ -312,8 +345,41 @@ int main(int argc, char** argv) {
     midi->start();
   }
 
+  // Audio: one native input, analysed by the engine's own AudioInput with
+  // Noisedeck's analyser settings. It feeds both the default input and a
+  // device of the source's name, so audio(band: ...) and audio(band: ...,
+  // name: "...", channel: N) in a controller's program both resolve.
+  std::unique_ptr<AudioCapture> capture;
+  nm::AudioInput audio_input;
+  nm::AudioDevice audio_device;
+  if (parser.isSet(audio_opt)) {
+    capture = std::make_unique<AudioCapture>(parser.value(audio_opt));
+    if (!capture->start(error)) return fatal(error, kExitStartup);
+    const auto& source = capture->source();
+    audio_device = nm::AudioDevice{QString::fromStdString(source.id),
+                                   QString::fromStdString(source.name),
+                                   static_cast<int>(source.channels), true};
+    events.write(QStringLiteral("audio"),
+                 {{QStringLiteral("source"), audio_device.name},
+                  {QStringLiteral("id"), audio_device.id},
+                  {QStringLiteral("channels"), audio_device.channelCount},
+                  {QStringLiteral("sample_rate"), static_cast<int>(source.sample_rate)}});
+  }
+
   engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
     media.apply(backend, graph, generation, compiler.registry());
+    if (capture) {
+      const audio::Packet packet = capture->read();
+      if (packet.channels > 0 && !packet.samples.empty()) {
+        const auto frames = static_cast<qsizetype>(packet.samples.size() / packet.channels);
+        audio_input.pushDefault(packet.samples.data(), frames, static_cast<int>(packet.channels));
+        audio_input.pushDevice(audio_device, packet.samples.data(), frames);
+      }
+      // The reference pump advances once per rendered frame, sound or not,
+      // so levels fall away in silence exactly as they do in the browser.
+      audio_input.update();
+      backend.setAudioState(audio_input.snapshot());
+    }
     if (midi && feed_midi(midi_state, midi->drain())) midi_dirty = true;
     // A snapshot costs about a millisecond with a few ports, so it is taken
     // only when a message or a port change has made the last one stale.
@@ -423,8 +489,7 @@ int main(int argc, char** argv) {
     // A supervisor that dies cannot send a signal; its end of our stdin
     // closing is the one notice that always arrives.
     std::thread([] {
-      while (std::fgetc(stdin) != EOF) {
-      }
+      wait_for_stdin_eof();
       g_stop_requested.store(true);
     }).detach();
   }

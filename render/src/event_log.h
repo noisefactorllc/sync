@@ -18,6 +18,7 @@ namespace noisefactor::sync::render_helper {
 //   program  source ("seance" | "file"), rev, ok, compile_ms, error?, diagnostic?
 //   render_error  message
 //   midi     ports (the MIDI inputs now open)
+//   audio    source, id, channels, sample_rate (the capture that feeds audio())
 //   media    source, state (image | video | camera | waiting | denied | error), detail
 //   stats    reader_attached (syncd read the ring within 1 s) and the
 //            engine's counters since start
