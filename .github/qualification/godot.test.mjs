@@ -44,9 +44,11 @@ Write-Output 'ANCESTOR_GUARD_PASS'
 function zip(entries) {
   const locals = [], central = []; let offset = 0
   for (const e of entries) {
-    const name = Buffer.from(e.name), data = Buffer.from(e.body || ''), packed = deflateRawSync(data)
+    const name = Buffer.from(e.name), data = Buffer.from(e.body || ''), method = e.method ?? 8
+    const packed = method === 0 ? data : deflateRawSync(data)
     const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4)
-    local.writeUInt16LE(8, 8); local.writeUInt32LE(crc32(data), 14); local.writeUInt32LE(packed.length, 18)
+    local.writeUInt16LE(e.flags ?? 0, 6); local.writeUInt16LE(method, 8)
+    local.writeUInt32LE(crc32(data), 14); local.writeUInt32LE(packed.length, 18)
     local.writeUInt32LE(data.length, 22); local.writeUInt16LE(name.length, 26)
     const header = Buffer.alloc(46); header.writeUInt32LE(0x02014b50); header.writeUInt16LE(0x0314, 4)
     local.copy(header, 6, 4, 26); header.writeUInt16LE(name.length, 28)
@@ -67,6 +69,25 @@ test('ZIP extraction returns exact regular-file bytes and rejects corruption and
     if (bad.length === data.length) bad[bad.readUInt32LE(bad.length - 6) + 16] ^= 1
     assert.throws(() => readZip(bad))
   }
+})
+
+test('ZIP method8 accepts standard deflate compression hints used by the pinned Godot archive', () => {
+  for (const flags of [0, 2, 4, 6, 0x802]) {
+    const data = zip([{ name: 'Godot_v4.7.2-stable_win64.exe', body: 'MZ exact byte fixture', flags }])
+    assert.equal(readZip(data).get('Godot_v4.7.2-stable_win64.exe').toString(), 'MZ exact byte fixture')
+    const mismatched = Buffer.from(data)
+    mismatched.writeUInt16LE(flags ^ 2, 6)
+    assert.throws(() => readZip(mismatched), undefined, 'local and central hints must agree')
+  }
+})
+
+test('ZIP deflate hints do not admit encryption, reserved flags, unsupported methods or hints on stored entries', () => {
+  assert.equal(readZip(zip([{ name: 'file', body: 'stored bytes', method: 0 }])).get('file').toString(), 'stored bytes')
+  for (const flags of [2, 4, 6]) assert.throws(() => readZip(zip([{ name: 'file', body: 'stored bytes', method: 0, flags }])))
+  for (const flags of [1, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x1000, 0x2000, 0x4000, 0x8000]) {
+    assert.throws(() => readZip(zip([{ name: 'file', body: 'deflated bytes', flags: flags | 2 }])))
+  }
+  assert.throws(() => readZip(zip([{ name: 'file', body: 'unsupported method', method: 9, flags: 2 }])))
 })
 
 test('ZIP names, entry types and duplicate identities cannot escape or alias Windows files', () => {

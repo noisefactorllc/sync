@@ -58,7 +58,9 @@ export function readZip(buffer, { maxBytes = 512 * 1024 * 1024 } = {}) {
     check(cursor + 46 + length + extra + comment <= end && buffer.readUInt16LE(cursor + 34) === 0)
     const nameBytes = buffer.subarray(cursor + 46, cursor + 46 + length), name = decoder.decode(nameBytes), key = archiveName(name)
     const directory = name.endsWith('/'), type = (attributes >>> 16) & 0xf000
-    check(!identities.has(key) && (flags & ~0x0808) === 0 && [0, 8].includes(method) && !(attributes & 0x400))
+    // APPNOTE4.4.4: bits1/2 describe compression level for deflate; they are undefined for stored entries.
+    const allowedFlags = method === 8 ? 0x080e : 0x0808
+    check(!identities.has(key) && (flags & ~allowedFlags) === 0 && [0, 8].includes(method) && !(attributes & 0x400))
     check(directory ? [0, 0x4000].includes(type) && size === 0 : [0, 0x8000].includes(type) && !(attributes & 0x10))
     expanded += size; check(expanded <= maxBytes && size <= 256 * 1024 * 1024)
     check(offset + 30 <= start && buffer.readUInt32LE(offset) === 0x04034b50)
