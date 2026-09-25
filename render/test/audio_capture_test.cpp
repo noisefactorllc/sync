@@ -139,6 +139,12 @@ class RingBackend final : public audio::InputBackend {
   std::shared_ptr<audio::CaptureBuffer> ring_;
 };
 
+// How long a test waits for something the audio thread does within about
+// half a second. Generous, because a loaded machine (a CI runner, a build
+// beside the tests) can hold a thread off the CPU for seconds; a wait ends
+// as soon as its condition holds, so a passing run never pays it.
+constexpr int kPatienceMs = 10000;
+
 // Reads as the render thread does, once a frame, until samples arrive.
 [[nodiscard]] auto read_until_heard(AudioCapture& capture, int milliseconds) -> audio::Packet {
   QElapsedTimer waited;
@@ -182,7 +188,7 @@ SYNC_TEST(an_unplugged_source_is_silence_until_it_is_plugged_back_in) {
   // While it is gone, every frame reads silence and nothing more is reported.
   QElapsedTimer gone;
   gone.start();
-  while (!device->closed && gone.elapsed() < 3000) {
+  while (!device->closed && gone.elapsed() < kPatienceMs) {
     SYNC_REQUIRE(capture.read().samples.empty());
     QThread::msleep(16);
   }
@@ -197,7 +203,7 @@ SYNC_TEST(an_unplugged_source_is_silence_until_it_is_plugged_back_in) {
 
   device->broken = false;
   device->present = true;
-  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 1600);
+  SYNC_REQUIRE(read_until_heard(capture, kPatienceMs).samples.size() == 1600);
   const auto back = capture.take_changes();
   SYNC_REQUIRE(back.size() == 1 && back[0].live);
   SYNC_REQUIRE(back[0].source.name == "Stage Interface");
@@ -215,7 +221,7 @@ SYNC_TEST(a_source_missing_at_start_is_waited_for) {
   SYNC_REQUIRE(capture.read().samples.empty());
 
   device->present = true;
-  SYNC_REQUIRE(read_until_heard(capture, 3000).samples.size() == 1600);
+  SYNC_REQUIRE(read_until_heard(capture, kPatienceMs).samples.size() == 1600);
   const auto heard = capture.take_changes();
   SYNC_REQUIRE(heard.size() == 1 && heard[0].live);
 }
@@ -232,7 +238,7 @@ SYNC_TEST(a_source_that_fails_at_once_reports_both_changes) {
   std::vector<AudioCapture::Change> changes;
   QElapsedTimer waited;
   waited.start();
-  while (changes.size() < 2 && waited.elapsed() < 3000) {
+  while (changes.size() < 2 && waited.elapsed() < kPatienceMs) {
     SYNC_REQUIRE(capture.read().samples.empty());
     for (auto& change : capture.take_changes()) changes.push_back(std::move(change));
     QThread::msleep(16);
@@ -254,17 +260,17 @@ SYNC_TEST(the_live_stream_is_closed_on_the_capture_thread) {
 }
 
 SYNC_TEST(a_capture_waiting_for_its_source_stops_promptly) {
+  // With a minute to its next search, stopping must not wait for it.
   auto device = std::make_shared<Interface>();
   device->present = false;
   QElapsedTimer stopped;
   {
-    AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device));
+    AudioCapture capture(QStringLiteral("stage"), std::make_unique<InterfaceBackend>(device),
+                         std::chrono::minutes(1));
     capture.start();
-    QThread::msleep(50);
     stopped.start();
   }
-  // Not the 500 ms to its next search.
-  SYNC_REQUIRE(stopped.elapsed() < 400);
+  SYNC_REQUIRE(stopped.elapsed() < kPatienceMs);
 }
 
 SYNC_TEST(a_stream_unplugged_just_before_shutdown_is_closed_late) {
@@ -283,7 +289,7 @@ SYNC_TEST(a_stream_unplugged_just_before_shutdown_is_closed_late) {
   SYNC_REQUIRE(device->closed);
   SYNC_REQUIRE(device->closed_on == device->opened_on);
   SYNC_REQUIRE(device->closed_at - unplugged >= std::chrono::milliseconds(400));
-  SYNC_REQUIRE(stopped.elapsed() < 3000);
+  SYNC_REQUIRE(stopped.elapsed() < kPatienceMs);
 }
 
 SYNC_TEST(the_analysers_hear_the_newest_sound_every_frame) {
@@ -370,7 +376,7 @@ SYNC_TEST(levels_fall_to_zero_while_the_source_is_gone) {
   device->present = true;
   QElapsedTimer waited;
   waited.start();
-  while (input.state().low <= 0.1 && waited.elapsed() < 3000) {
+  while (input.state().low <= 0.1 && waited.elapsed() < kPatienceMs) {
     (void)frame();
     QThread::msleep(16);
   }

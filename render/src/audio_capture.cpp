@@ -9,12 +9,6 @@ namespace noisefactor::sync::render_helper {
 
 namespace {
 
-// How often a missing source is looked for. Listing the sources costs about a
-// millisecond and a half, on the audio thread; a returning device is heard
-// within half a second. A failed stream is also closed this long after it
-// failed: RtAudio reports an unplugged device from inside its own close, on
-// the HAL's thread, and finishes that close after the report returns.
-constexpr auto kSearchInterval = std::chrono::milliseconds(500);
 
 // A 60 fps frame brings 735 to 800 frames of audio, and one read returns at
 // most kMaximumPacketFrames (480, the browser protocol's packet). Reading
@@ -49,8 +43,9 @@ auto choose_audio_source(const std::vector<audio::Source>& sources, const QStrin
 AudioCapture::AudioCapture(QString wanted)
     : AudioCapture(std::move(wanted), audio::make_native_input_backend()) {}
 
-AudioCapture::AudioCapture(QString wanted, std::unique_ptr<audio::InputBackend> backend)
-    : wanted_(std::move(wanted)), backend_(std::move(backend)) {}
+AudioCapture::AudioCapture(QString wanted, std::unique_ptr<audio::InputBackend> backend,
+                           std::chrono::milliseconds search_interval)
+    : wanted_(std::move(wanted)), backend_(std::move(backend)), search_interval_(search_interval) {}
 
 AudioCapture::~AudioCapture() {
   // The live stream is closed where it was opened: at once, unless it has
@@ -60,7 +55,7 @@ AudioCapture::~AudioCapture() {
     try {
       (void)capture_->read();
     } catch (...) {
-      close_at += kSearchInterval;
+      close_at += search_interval_;
     }
   }
   {
@@ -125,7 +120,7 @@ void AudioCapture::run() {
         found_ = std::move(opened);
         searching_ = false;
       } else {
-        search_at_ = Clock::now() + kSearchInterval;
+        search_at_ = Clock::now() + search_interval_;
       }
       if (!attempted_) {
         attempted_ = true;
@@ -176,7 +171,7 @@ void AudioCapture::retire(QString reason) {
   changes_.push_back({false, {}, std::move(reason)});
   {
     std::lock_guard lock(mutex_);
-    const auto close_at = Clock::now() + kSearchInterval;
+    const auto close_at = Clock::now() + search_interval_;
     retired_.push_back({std::move(capture_), close_at});
     // Look again once the failed stream is closed, not beside it.
     searching_ = true;

@@ -45,8 +45,17 @@ class AudioCapture {
     QString reason;        // why it is waiting
   };
 
+  // How often a missing source is looked for. Listing the sources costs about
+  // a millisecond and a half, on the audio thread; a returning device is
+  // heard within half a second. A failed stream is also closed this long
+  // after it failed: RtAudio reports an unplugged device from inside its own
+  // close, on the HAL's thread, and finishes that close after the report
+  // returns.
+  static constexpr std::chrono::milliseconds kSearchInterval{500};
+
   explicit AudioCapture(QString wanted);
-  AudioCapture(QString wanted, std::unique_ptr<audio::InputBackend> backend);
+  AudioCapture(QString wanted, std::unique_ptr<audio::InputBackend> backend,
+               std::chrono::milliseconds search_interval = kSearchInterval);
   ~AudioCapture();
   AudioCapture(const AudioCapture&) = delete;
   auto operator=(const AudioCapture&) -> AudioCapture& = delete;
@@ -78,6 +87,7 @@ class AudioCapture {
 
   QString wanted_;
   std::unique_ptr<audio::InputBackend> backend_;  // the audio thread's, once started
+  std::chrono::milliseconds search_interval_;
   // Render thread only.
   std::unique_ptr<audio::Capture> capture_;
   std::vector<Change> changes_;
