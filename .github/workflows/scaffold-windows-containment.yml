@@ -1,0 +1,190 @@
+name: Scaffold Windows process containment
+
+on:
+  workflow_dispatch:
+    inputs:
+      scaffold_sha:
+        description: Reviewed full Scaffold SHA, which must equal its published main head
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Queue behind camera work. A subsequent camera gate may cancel this qualification.
+concurrency:
+  group: sync-camera-e2e
+  cancel-in-progress: false
+
+jobs:
+  containment:
+    name: Windows process containment ${{ inputs.scaffold_sha }}
+    if: github.repository == 'noisefactorllc/sync' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, sync-camera]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SCAFFOLD_SOURCE_SHA: ${{ inputs.scaffold_sha }}
+    steps:
+      - name: Verify the existing host and retain its baseline
+        id: baseline
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          if ($env:SCAFFOLD_SOURCE_SHA -cnotmatch '^[a-f0-9]{40}$') { throw 'A full reviewed Scaffold SHA is required' }
+          if ($env:COMPUTERNAME -ne 'LARGEBOI' -or $env:RUNNER_NAME -ne 'largeboi-sync-camera') { throw 'Unexpected Windows runner' }
+          if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'An interactive session is required' }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Qualification must remain unelevated' }
+          if ($identity.Name -ne 'LARGEBOI\aayar') { throw 'Unexpected runner identity' }
+          if ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE) -ne 'C:\actions-runner-sync\_work\sync\sync') { throw 'Unexpected camera workspace' }
+          $root = Join-Path $env:RUNNER_TEMP "scaffold-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'Qualification directory already exists' }
+          [IO.Directory]::CreateDirectory($root) | Out-Null
+          [IO.Directory]::CreateDirectory((Join-Path $root 'evidence')) | Out-Null
+          [IO.Directory]::CreateDirectory((Join-Path $root 'scratch')) | Out-Null
+          "SCAFFOLD_WINDOWS_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "evidence_ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $runner = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
+          $node = Join-Path $runner 'externals/node24/bin/node.exe'
+          $nodeFile = Get-Item -LiteralPath $node -ErrorAction SilentlyContinue
+          $regular = $null -ne $nodeFile -and -not $nodeFile.PSIsContainer -and -not ($nodeFile.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          @{ executable = $node; exists = $null -ne $nodeFile; regular = $regular } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
+          if (-not $regular) { throw 'The existing Node runtime must be a regular executable' }
+          $nodeRuntime = & $node -p 'JSON.stringify({version:process.versions.node, platform:process.platform, arch:process.arch})' | ConvertFrom-Json
+          $nodeExit = $LASTEXITCODE
+          @{ executable = $node; regular = $regular; version = $nodeRuntime.version; sha256 = (Get-FileHash -LiteralPath $node -Algorithm SHA256).Hash;
+             platform = $nodeRuntime.platform; architecture = $nodeRuntime.arch; powershell_version = $PSVersionTable.PSVersion.ToString() } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
+          if ($nodeExit -ne 0 -or $nodeRuntime.platform -ne 'win32' -or $nodeRuntime.arch -ne 'x64' -or [version]$nodeRuntime.version -lt [version]'24.13.0') {
+            throw 'The existing runner Node runtime is unsupported'
+          }
+          "SCAFFOLD_WINDOWS_NODE=$node" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # This script only reads the registration, scheduled task, and existing workspace.
+          $snapshot = @'
+          $ErrorActionPreference = 'Stop'
+          $runner = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
+          $registration = @{}
+          foreach ($name in @('.runner', '.credentials', '.credentials_rsaparams')) {
+            $path = Join-Path $runner $name
+            if (Test-Path -LiteralPath $path) { $registration[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+            elseif ($name -eq '.credentials_rsaparams') { $registration[$name] = $null }
+            else { throw 'Expected runner registration file is missing' }
+          }
+          $inventory = @(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Recurse -Force -File |
+            ForEach-Object { $_.FullName + '|' + $_.Length + '|' + $_.LastWriteTimeUtc.Ticks } | Sort-Object)
+          $workspace = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))))
+          $key = Get-Item 'HKLM:\SOFTWARE\Classes\CLSID\{2F8E7B14-9C3D-4A62-B5E1-7D4A9F2C6B08}\InprocServer32'
+          $task = Get-ScheduledTask -TaskName 'GitHub Actions Runner - sync-camera'
+          $listeners = @(Get-Process -Name 'Runner.Listener' | ForEach-Object { @{ id = $_.Id; started = $_.StartTime.ToUniversalTime().Ticks } } | Sort-Object { $_.id })
+          if ($listeners.Count -eq 0) { throw 'The existing runner listener is missing' }
+          @{ registration = $registration; workspace = $workspace; camera = $key.GetValue('');
+             task = @{ user = $task.Principal.UserId; logon = [string]$task.Principal.LogonType; level = [string]$task.Principal.RunLevel };
+             listeners = $listeners } | ConvertTo-Json -Depth 6 -Compress
+          '@
+          $snapshotPath = Join-Path $root 'snapshot.ps1'
+          [IO.File]::WriteAllText($snapshotPath, $snapshot)
+          & $snapshotPath | Set-Content -LiteralPath (Join-Path $root 'host-before.json') -Encoding utf8
+          "ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Mint a Scaffold contents-read token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liy6T6BW0BXuZRzx
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+          repositories: scaffold
+          permission-contents: read
+
+      - name: Download only the reviewed containment source into runner temp
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ steps.source-token.outputs.token }}
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const owner = 'noisefactorllc', repo = 'scaffold', sha = process.env.SCAFFOLD_SOURCE_SHA;
+            if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid source identity');
+            const metadata = (await github.rest.repos.get({ owner, repo })).data;
+            if (metadata.default_branch !== 'main' || metadata.permissions?.push === true) throw new Error('Source credential must be read-only');
+            const head = (await github.rest.repos.getCommit({ owner, repo, ref: 'main' })).data;
+            if (head.sha !== sha) throw new Error('Reviewed source must equal published Scaffold main');
+            const tree = (await github.rest.git.getTree({ owner, repo, tree_sha: head.commit.tree.sha, recursive: '1' })).data;
+            if (tree.truncated || !Array.isArray(tree.tree)) throw new Error('Source inventory is incomplete');
+            const files = [
+              'apps/scaffold-cloud/lib/windows-process.mjs',
+              'apps/scaffold-cloud/runtime/windows-process.cs',
+              'apps/scaffold-cloud/runtime/windows-process.ps1',
+              'apps/scaffold-cloud/test/windows-process.test.mjs',
+              'apps/scaffold-cloud/test/fixtures/windows-process-child.mjs',
+              'apps/scaffold-cloud/test/fixtures/windows-process-breakaway.ps1',
+            ];
+            const root = process.env.SCAFFOLD_WINDOWS_ROOT;
+            if (!root || path.dirname(root).toLowerCase() !== path.resolve(process.env.RUNNER_TEMP).toLowerCase()) throw new Error('Invalid qualification directory');
+            const manifest = { repository: `${owner}/${repo}`, source_sha: sha, files: [] };
+            for (const file of files) {
+              const entries = tree.tree.filter(entry => entry.path === file);
+              if (entries.length !== 1 || entries[0].type !== 'blob' || !['100644', '100755'].includes(entries[0].mode)) throw new Error('Source must contain regular files');
+              const blob = (await github.rest.git.getBlob({ owner, repo, file_sha: entries[0].sha })).data;
+              if (blob.encoding !== 'base64' || blob.size > 2097152) throw new Error('Invalid source blob');
+              const data = Buffer.from(blob.content, 'base64');
+              if (data.length !== blob.size) throw new Error('Incomplete source blob');
+              const actualBlob = crypto.createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
+              if (actualBlob !== entries[0].sha) throw new Error('Source blob identity mismatch');
+              const target = path.join(root, file);
+              await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.writeFile(target, data, { flag: 'wx' });
+              manifest.files.push({ path: file, sha256: crypto.createHash('sha256').update(data).digest('hex') });
+            }
+            await fs.writeFile(path.join(root, 'evidence', 'source-manifest.json'), JSON.stringify(manifest, null, 2), { flag: 'wx' });
+
+      - name: Run actual Windows process containment tests
+        env:
+          SCAFFOLD_WINDOWS_QUALIFICATION: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $env:TEMP = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'scratch'
+          $env:TMP = $env:TEMP
+          $test = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'apps/scaffold-cloud/test/windows-process.test.mjs'
+          $log = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'evidence/windows-process.tap'
+          & $env:SCAFFOLD_WINDOWS_NODE --test --test-reporter=tap $test 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows process containment tests failed' }
+          $text = Get-Content -LiteralPath $log -Raw
+          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 16\s*$') {
+            throw 'The complete Windows containment inventory must run without skips'
+          }
+
+      - name: Verify the camera host and workspace were preserved
+        if: always() && steps.baseline.outputs.ready == 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $root = $env:SCAFFOLD_WINDOWS_ROOT
+          $before = Get-Content -LiteralPath (Join-Path $root 'host-before.json') -Raw | ConvertFrom-Json -AsHashtable
+          $after = & (Join-Path $root 'snapshot.ps1') | ConvertFrom-Json -AsHashtable
+          $preserved = $true
+          foreach ($name in @('workspace', 'camera')) { if ($before[$name] -ne $after[$name]) { $preserved = $false } }
+          foreach ($name in $before.registration.Keys) { if ($before.registration[$name] -ne $after.registration[$name]) { $preserved = $false } }
+          foreach ($name in $before.task.Keys) { if ($before.task[$name] -ne $after.task[$name]) { $preserved = $false } }
+          if (($before.listeners | ConvertTo-Json -Compress) -ne ($after.listeners | ConvertTo-Json -Compress)) { $preserved = $false }
+          $remaining = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($root) -and $_.ProcessId -ne $PID })
+          $evidence = @{ source_sha = $env:SCAFFOLD_SOURCE_SHA; runner = $env:RUNNER_NAME; os = [Environment]::OSVersion.VersionString;
+            host_preserved = $preserved; remaining_invocation_processes = $remaining.Count }
+          $evidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/host-preservation.json') -Encoding utf8
+          if (-not $preserved -or $remaining.Count -ne 0) { throw 'Qualification did not preserve the host or confirm process cleanup' }
+
+      - name: Retain qualification results without uploading private source
+        if: always() && steps.baseline.outputs.evidence_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-containment-${{ inputs.scaffold_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SCAFFOLD_WINDOWS_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
