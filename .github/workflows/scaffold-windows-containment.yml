@@ -144,6 +144,216 @@ jobs:
             }
             await fs.writeFile(path.join(root, 'evidence', 'source-manifest.json'), JSON.stringify(manifest, null, 2), { flag: 'wx' });
 
+      - name: Inventory installed native engines without launching them
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $root = $env:SCAFFOLD_WINDOWS_ROOT
+          $formatter = @'
+          import assert from 'node:assert/strict';
+          import { readFile, writeFile } from 'node:fs/promises';
+          function publicInventory(raw, source) {
+            const require = value => { if (!value) throw new Error('Invalid engine inventory metadata.'); };
+            const text = value => { require(typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value)); return value; };
+            const optional = value => value === null || value === '' ? null : text(value);
+            const family = value => { require(['unity', 'godot', 'touchdesigner', 'blender', 'houdini', 'unreal'].includes(value)); return value; };
+            const path = value => {
+              if (value === null || value === '') return null;
+              text(value); require(/^[A-Za-z]:\\/.test(value) && !/[/%]/.test(value));
+              const parts = value.slice(3).split('\\');
+              if (parts.at(-1) === '') parts.pop();
+              require(parts.every(part => part.length > 0 && !/[<>:"|?*]/.test(part) && !/[. ]$/.test(part)));
+              return value.replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '<user-profile>');
+            };
+            const rows = (values, project) => {
+              require(Array.isArray(values) && values.length <= 128);
+              return values.map(value => { require(value && typeof value === 'object' && !Array.isArray(value)); return project(value); });
+            };
+            require(raw && /^[a-f0-9]{40}$/.test(source));
+            const complete = Object.fromEntries(['registry', 'directories', 'path', 'gpu', 'processes'].map(key => {
+              require(typeof raw.complete?.[key] === 'boolean'); return [key, raw.complete[key]];
+            }));
+            return { schema_version: 1, source_sha: source, inventory_only: true, license_status: 'not_inspected',
+              scope: 'registry_known_directories_and_path', complete,
+              registry: rows(raw.registry, value => ({ engine: family(value.engine), name: text(value.name), version: optional(value.version), path: path(value.path) })),
+              executables: rows(raw.executables, value => {
+                require(typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(value.sha256));
+                const executable = path(value.path); require(executable !== null);
+                return { engine: family(value.engine), path: executable, version: optional(value.version), sha256: value.sha256.toLowerCase() };
+              }),
+              gpu: rows(raw.gpu, value => ({ name: text(value.name), driver: optional(value.driver) })),
+              processes: rows(raw.processes, value => {
+                require(Number.isSafeInteger(value.pid) && value.pid > 0 && value.pid <= 4294967295);
+                require(typeof value.started === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(value.started) && Number.isFinite(Date.parse(value.started)));
+                return { engine: family(value.engine), pid: value.pid, started: value.started };
+              }) };
+          }
+          if (process.argv[2] === '--self-test') {
+            const source = 'a'.repeat(40);
+            const raw = { complete: { registry: true, directories: true, path: true, gpu: true, processes: true },
+              registry: [{ engine: 'unity', name: 'Unity 6000.3.16f1', version: '6000.3.16f1', path: 'C:\\Program Files\\Unity', license: 'private-license' }],
+              executables: [{ engine: 'godot', path: 'C:\\Users\\private-user\\Tools\\Godot.exe', version: '4.5', sha256: 'B'.repeat(64), environment: 'private-environment' }],
+              gpu: [{ name: 'NVIDIA GPU', driver: '32.0.15.0000', serial: 'private-serial' }],
+              processes: [{ engine: 'unity', pid: 123, started: '2026-09-25T10:00:00.0000000Z', command_line: 'private-command' }],
+              environment: 'private-token' };
+            const result = publicInventory(raw, source);
+            assert.deepEqual(result, { schema_version: 1, source_sha: source, inventory_only: true, license_status: 'not_inspected',
+              scope: 'registry_known_directories_and_path', complete: raw.complete,
+              registry: [{ engine: 'unity', name: 'Unity 6000.3.16f1', version: '6000.3.16f1', path: 'C:\\Program Files\\Unity' }],
+              executables: [{ engine: 'godot', path: '<user-profile>\\Tools\\Godot.exe', version: '4.5', sha256: 'b'.repeat(64) }],
+              gpu: [{ name: 'NVIDIA GPU', driver: '32.0.15.0000' }],
+              processes: [{ engine: 'unity', pid: 123, started: '2026-09-25T10:00:00.0000000Z' }] });
+            assert.ok(!JSON.stringify(result).includes('private-'));
+            assert.equal(publicInventory({ ...raw, complete: { ...raw.complete, path: false } }, source).complete.path, false);
+            for (const change of [
+              { complete: { registry: true } }, { registry: Array(129).fill(raw.registry[0]) },
+              { executables: [{ ...raw.executables[0], path: '\\\\server\\share\\Godot.exe' }] },
+              { executables: [{ ...raw.executables[0], path: 'C:\\Tools\\..\\Godot.exe' }] },
+              { executables: [{ ...raw.executables[0], sha256: 'private-hash' }] },
+              { processes: [{ ...raw.processes[0], pid: 0 }] }, { gpu: [{ name: 'private\nvalue', driver: '1' }] },
+              { registry: [{ ...raw.registry[0], engine: 'unknown' }] },
+            ]) assert.throws(() => publicInventory({ ...raw, ...change }, source), { message: 'Invalid engine inventory metadata.' });
+            for (const path of ['C:\\Users/private-user\\Tools\\Godot.exe', 'C:\\Users\\.\\private-user\\Tools\\Godot.exe',
+              'C:\\Users\\\\private-user\\Tools\\Godot.exe', 'C:\\Users.\\private-user\\Tools\\Godot.exe',
+              'C:\\Users \\private-user\\Tools\\Godot.exe', 'C:\\Users\\private-user.\\Tools\\Godot.exe']) {
+              for (const category of ['registry', 'executables']) {
+                assert.throws(() => publicInventory({ ...raw, [category]: [{ ...raw[category][0], path }] }, source),
+                  { message: 'Invalid engine inventory metadata.' });
+              }
+            }
+            assert.equal(publicInventory({ ...raw, registry: [{ ...raw.registry[0], path: 'c:\\uSeRs\\private-user\\Tools\\' }] }, source).registry[0].path,
+              '<user-profile>\\Tools\\');
+            assert.equal(publicInventory({ ...raw, executables: [{ ...raw.executables[0], path: 'c:\\uSeRs\\private-user\\Tools\\Godot.exe' }] }, source).executables[0].path,
+              '<user-profile>\\Tools\\Godot.exe');
+            assert.throws(() => publicInventory(raw, 'unreviewed'), { message: 'Invalid engine inventory metadata.' });
+            process.stdout.write('Engine inventory receipt checks passed.\n');
+          } else {
+            const [input, output, source] = process.argv.slice(2);
+            const text = await readFile(input, 'utf8');
+            if (Buffer.byteLength(text) > 1048576) throw new Error('Engine inventory exceeds its bound.');
+            await writeFile(output, JSON.stringify(publicInventory(JSON.parse(text.replace(/^\uFEFF/, '')), source), null, 2), { flag: 'wx' });
+          }
+          '@
+          $formatterPath = Join-Path $root 'engine-inventory.mjs'
+          [IO.File]::WriteAllText($formatterPath, $formatter)
+          & $env:SCAFFOLD_WINDOWS_NODE $formatterPath --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Engine inventory receipt checks failed' }
+          $inventory = @{ complete = @{ registry = $true; directories = $true; path = $true; gpu = $true; processes = $true };
+            registry = @(); executables = @(); gpu = @(); processes = @() }
+          function Get-EngineFamily([string]$name) {
+            switch -Regex ($name) {
+              '^Unity(\b|Hub)' { return 'unity' }
+              '^Godot(\b|[_ .-])' { return 'godot' }
+              '^Touch(Designer|Player)(\b|[_ .-])' { return 'touchdesigner' }
+              '^Blender\b' { return 'blender' }
+              '^(Houdini\b|hbatch\b|hython\b)' { return 'houdini' }
+              '^(Unreal( Engine|Editor)?\b|UE4Editor\b)' { return 'unreal' }
+            }
+            return $null
+          }
+          function Test-RegularPath($item) {
+            if ($null -eq $item -or $item.FullName -notmatch '^[A-Za-z]:\\') { return $false }
+            $current = $item
+            while ($null -ne $current) {
+              if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+              $current = if ($current -is [IO.DirectoryInfo]) { $current.Parent } else { $current.Directory }
+            }
+            return $true
+          }
+          # Read only application identity fields, never license keys or uninstall commands.
+          foreach ($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+            try {
+              if (-not (Test-Path -LiteralPath $key)) { continue }
+              $entries = @(Get-ChildItem -LiteralPath $key | Select-Object -First 2049)
+              if ($entries.Count -gt 2048) { $inventory.complete.registry = $false }
+              foreach ($entry in $entries | Select-Object -First 2048) {
+                $name = $entry.GetValue('DisplayName', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $family = Get-EngineFamily $name
+                if (-not $family) { continue }
+                if ($inventory.registry.Count -ge 128) { $inventory.complete.registry = $false; break }
+                $inventory.registry += @{ engine = $family; name = $name;
+                  version = $entry.GetValue('DisplayVersion', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);
+                  path = $entry.GetValue('InstallLocation', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+              }
+            } catch { $inventory.complete.registry = $false }
+          }
+          $candidates = @{}
+          function Add-EngineCandidate($item, [string]$section) {
+            if ($item.PSIsContainer -or -not (Get-EngineFamily $item.BaseName)) { return }
+            if (-not (Test-RegularPath $item)) { $inventory.complete[$section] = $false; return }
+            if ($candidates.Count -ge 128 -and -not $candidates.ContainsKey($item.FullName)) { $inventory.complete[$section] = $false; return }
+            $candidates[$item.FullName] = $item
+          }
+          # Each glob is a bounded known installation path; never recurse through user files.
+          $patterns = @('Unity\Hub\Editor\*\Editor\Unity.exe', 'Unity\Editor\Unity.exe',
+            'Godot\Godot*.exe', 'Derivative\TouchDesigner*\bin\TouchDesigner.exe',
+            'Derivative\TouchDesigner*\TouchDesigner.exe', 'Blender Foundation\Blender*\blender.exe',
+            'Side Effects Software\Houdini*\bin\houdini.exe', 'Epic Games\UE_*\Engine\Binaries\Win64\UnrealEditor.exe')
+          foreach ($base in @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) | Where-Object { $_ } | Select-Object -Unique) {
+            foreach ($pattern in $patterns) {
+              try {
+                $parent = Get-Item -LiteralPath $base
+                if (-not (Test-RegularPath $parent)) { $inventory.complete.directories = $false; continue }
+                $directories = @($parent); $parts = $pattern.Split('\')
+                for ($depth = 0; $depth -lt $parts.Count; $depth++) {
+                  $next = @()
+                  foreach ($directory in $directories) {
+                    $items = @(Get-ChildItem -LiteralPath $directory.FullName -Filter $parts[$depth] | Select-Object -First 129)
+                    if ($items.Count -gt 128) { $inventory.complete.directories = $false }
+                    foreach ($item in $items | Select-Object -First 128) {
+                      if ($depth -eq $parts.Count - 1) { Add-EngineCandidate $item 'directories' }
+                      elseif ($item.PSIsContainer) {
+                        if ((Test-RegularPath $item) -and $next.Count -lt 128) { $next += $item } else { $inventory.complete.directories = $false }
+                      }
+                    }
+                  }
+                  $directories = $next
+                }
+              } catch { $inventory.complete.directories = $false }
+            }
+          }
+          foreach ($name in @('Unity.exe', 'Godot*.exe', 'TouchDesigner.exe', 'TouchPlayer.exe', 'blender.exe', 'houdini.exe', 'hbatch.exe', 'hython.exe', 'UnrealEditor.exe', 'UE4Editor.exe')) {
+            try {
+              $commands = @(Get-Command -Name $name -CommandType Application -All -ErrorAction SilentlyContinue | Select-Object -First 129)
+              if ($commands.Count -gt 128) { $inventory.complete.path = $false }
+              foreach ($command in $commands | Select-Object -First 128) {
+                if ($command.Source -notmatch '^[A-Za-z]:\\') { $inventory.complete.path = $false; continue }
+                Add-EngineCandidate (Get-Item -LiteralPath $command.Source) 'path'
+              }
+            } catch { $inventory.complete.path = $false }
+          }
+          $hashedBytes = 0L
+          foreach ($item in $candidates.Values | Sort-Object FullName) {
+            try {
+              if ($item.Length -gt 536870912 -or $hashedBytes + $item.Length -gt 2147483648) {
+                $inventory.complete.directories = $false; $inventory.complete.path = $false; continue
+              }
+              $hashedBytes += $item.Length
+              $inventory.executables += @{ engine = Get-EngineFamily $item.BaseName; path = $item.FullName;
+                version = $item.VersionInfo.ProductVersion; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash }
+            } catch { $inventory.complete.directories = $false; $inventory.complete.path = $false }
+          }
+          try {
+            $gpus = @(Get-CimInstance Win32_VideoController | Select-Object -First 129)
+            if ($gpus.Count -gt 128) { $inventory.complete.gpu = $false }
+            $inventory.gpu = @($gpus | Select-Object -First 128 | ForEach-Object { @{ name = $_.Name; driver = $_.DriverVersion } })
+          } catch { $inventory.complete.gpu = $false }
+          try {
+            $processes = @(Get-Process -Name 'Unity', 'UnityHub', 'Godot*', 'TouchDesigner*', 'TouchPlayer*', 'blender', 'houdini', 'hbatch', 'hython', 'UnrealEditor', 'UE4Editor' -ErrorAction SilentlyContinue | Select-Object -First 129)
+            if ($processes.Count -gt 128) { $inventory.complete.processes = $false }
+            foreach ($process in $processes | Select-Object -First 128) {
+              $inventory.processes += @{ engine = Get-EngineFamily $process.ProcessName; pid = $process.Id;
+                started = $process.StartTime.ToUniversalTime().ToString('o') }
+            }
+          } catch { $inventory.complete.processes = $false }
+          $inputPath = Join-Path $root 'engine-inventory-private.json'
+          $inventory | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath -Encoding utf8
+          & $env:SCAFFOLD_WINDOWS_NODE $formatterPath $inputPath (Join-Path $root 'evidence/engine-inventory.json') $env:SCAFFOLD_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Engine inventory metadata could not be safely recorded' }
+
       - name: Run actual Windows process containment tests
         env:
           SCAFFOLD_WINDOWS_QUALIFICATION: '1'
