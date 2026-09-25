@@ -1,0 +1,318 @@
+name: Scaffold portable Godot qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      scaffold_sha:
+        description: Reviewed published Scaffold main SHA from the successful28-case containment run
+        required: true
+        type: string
+      containment_run_id:
+        description: Successful exact-source Windows28-case qualification run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# This shares camera scheduling; it does not lock unrelated work after this job ends.
+concurrency:
+  group: sync-camera-e2e
+  cancel-in-progress: false
+
+jobs:
+  godot:
+    name: Portable Godot4.7.2 diagnostic
+    if: github.repository == 'noisefactorllc/sync' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, sync-camera]
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SCAFFOLD_SOURCE_SHA: ${{ inputs.scaffold_sha }}
+      CONTAINMENT_RUN_ID: ${{ inputs.containment_run_id }}
+    steps:
+      - name: Verify the existing host and retain its baseline
+        id: baseline
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          if ($env:SCAFFOLD_SOURCE_SHA -cnotmatch '^[a-f0-9]{40}$') { throw 'A full reviewed Scaffold SHA is required' }
+          if ($env:COMPUTERNAME -ne 'LARGEBOI' -or $env:RUNNER_NAME -ne 'largeboi-sync-camera') { throw 'Unexpected Windows runner' }
+          if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'An interactive session is required' }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Qualification must remain unelevated' }
+          if ($identity.Name -ne 'LARGEBOI\aayar') { throw 'Unexpected runner identity' }
+          if ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE) -ne 'C:\actions-runner-sync\_work\sync\sync') { throw 'Unexpected camera workspace' }
+          $ancestor = Get-Item -LiteralPath $env:RUNNER_TEMP
+          while ($null -ne $ancestor) {
+            if (-not $ancestor.PSIsContainer -or ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Runner temp ancestors must be regular directories' }
+            $ancestor = $ancestor.Parent
+          }
+          $root = Join-Path $env:RUNNER_TEMP "scaffold-godot-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'Qualification directory already exists' }
+          [IO.Directory]::CreateDirectory($root) | Out-Null
+          [IO.Directory]::CreateDirectory((Join-Path $root 'evidence')) | Out-Null
+          [IO.Directory]::CreateDirectory((Join-Path $root 'scratch')) | Out-Null
+          "SCAFFOLD_WINDOWS_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "evidence_ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $runner = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
+          $node = Join-Path $runner 'externals/node24/bin/node.exe'
+          $nodeFile = Get-Item -LiteralPath $node -ErrorAction SilentlyContinue
+          $regular = $null -ne $nodeFile -and -not $nodeFile.PSIsContainer -and -not ($nodeFile.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          @{ executable = $node; exists = $null -ne $nodeFile; regular = $regular } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
+          if (-not $regular) { throw 'The existing Node runtime must be a regular executable' }
+          $nodeRuntime = & $node -p 'JSON.stringify({version:process.versions.node, platform:process.platform, arch:process.arch})' | ConvertFrom-Json
+          $nodeExit = $LASTEXITCODE
+          @{ executable = $node; regular = $regular; version = $nodeRuntime.version; sha256 = (Get-FileHash -LiteralPath $node -Algorithm SHA256).Hash;
+             platform = $nodeRuntime.platform; architecture = $nodeRuntime.arch; powershell_version = $PSVersionTable.PSVersion.ToString() } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
+          if ($nodeExit -ne 0 -or $nodeRuntime.platform -ne 'win32' -or $nodeRuntime.arch -ne 'x64' -or [version]$nodeRuntime.version -lt [version]'24.13.0') {
+            throw 'The existing runner Node runtime is unsupported'
+          }
+          "SCAFFOLD_WINDOWS_NODE=$node" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # This script only reads the registration, scheduled task, and existing workspace.
+          $snapshot = @'
+          $ErrorActionPreference = 'Stop'
+          $runner = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
+          $registration = @{}
+          foreach ($name in @('.runner', '.credentials', '.credentials_rsaparams')) {
+            $path = Join-Path $runner $name
+            if (Test-Path -LiteralPath $path) { $registration[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+            elseif ($name -eq '.credentials_rsaparams') { $registration[$name] = $null }
+            else { throw 'Expected runner registration file is missing' }
+          }
+          $inventory = @(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Recurse -Force -File |
+            ForEach-Object { $_.FullName + '|' + $_.Length + '|' + $_.LastWriteTimeUtc.Ticks } | Sort-Object)
+          $workspace = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))))
+          $key = Get-Item 'HKLM:\SOFTWARE\Classes\CLSID\{2F8E7B14-9C3D-4A62-B5E1-7D4A9F2C6B08}\InprocServer32'
+          $task = Get-ScheduledTask -TaskName 'GitHub Actions Runner - sync-camera'
+          $listeners = @(Get-Process -Name 'Runner.Listener' | ForEach-Object { @{ id = $_.Id; started = $_.StartTime.ToUniversalTime().Ticks } } | Sort-Object { $_.id })
+          if ($listeners.Count -eq 0) { throw 'The existing runner listener is missing' }
+          @{ registration = $registration; workspace = $workspace; camera = $key.GetValue('');
+             task = @{ user = $task.Principal.UserId; logon = [string]$task.Principal.LogonType; level = [string]$task.Principal.RunLevel };
+             listeners = $listeners } | ConvertTo-Json -Depth 6 -Compress
+          '@
+          $snapshotPath = Join-Path $root 'snapshot.ps1'
+          [IO.File]::WriteAllText($snapshotPath, $snapshot)
+          & $snapshotPath | Set-Content -LiteralPath (Join-Path $root 'host-before.json') -Encoding utf8
+          "ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Fetch only this reviewed qualification helper
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('node:fs/promises'), path = require('node:path'), crypto = require('node:crypto');
+            const head = (await github.rest.repos.getCommit({ ...context.repo, ref: 'main' })).data;
+            if (head.sha !== context.sha) throw new Error('The reviewed workflow must equal published Sync main');
+            const tree = (await github.rest.git.getTree({ ...context.repo, tree_sha: head.commit.tree.sha, recursive: '1' })).data;
+            if (tree.truncated || !Array.isArray(tree.tree)) throw new Error('Incomplete helper source inventory');
+            const files = ['.github/qualification/godot.mjs', '.github/qualification/godot.test.mjs', '.github/workflows/scaffold-godot-qualification.yml'];
+            const manifest = { repository: 'noisefactorllc/sync', source_sha: context.sha, files: [] };
+            for (const file of files) {
+              const rows = tree.tree.filter(row => row.path === file);
+              if (rows.length !== 1 || rows[0].type !== 'blob' || !['100644', '100755'].includes(rows[0].mode)) throw new Error('Helper source must be regular');
+              const blob = (await github.rest.git.getBlob({ ...context.repo, file_sha: rows[0].sha })).data;
+              if (blob.encoding !== 'base64' || blob.size > 2097152) throw new Error('Invalid helper blob');
+              const bytes = Buffer.from(blob.content, 'base64');
+              if (bytes.length !== blob.size || crypto.createHash('sha1').update('blob ' + bytes.length + '\0').update(bytes).digest('hex') !== rows[0].sha) throw new Error('Helper source identity mismatch');
+              const target = path.join(process.env.SCAFFOLD_WINDOWS_ROOT, file);
+              await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.writeFile(target, bytes, { flag: 'wx' });
+              manifest.files.push({ path: file, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+            }
+            await fs.writeFile(path.join(process.env.SCAFFOLD_WINDOWS_ROOT, 'evidence/sync-source.json'), JSON.stringify(manifest, null, 2), { flag: 'wx' });
+
+      - name: Check qualification helper behavior
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          & $env:SCAFFOLD_WINDOWS_NODE --test (Join-Path $env:SCAFFOLD_WINDOWS_ROOT '.github/qualification/godot.test.mjs')
+          if ($LASTEXITCODE -ne 0) { throw 'Qualification helper tests failed' }
+
+      - name: Require complete prior cleanup and exact-source containment qualification
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('node:fs/promises'), path = require('node:path'), crypto = require('node:crypto');
+            const { pathToFileURL } = require('node:url');
+            const root = process.env.SCAFFOLD_WINDOWS_ROOT;
+            const helper = await import(pathToFileURL(path.join(root, '.github/qualification/godot.mjs')).href);
+            const demand = value => { if (!value) throw new Error('Prior qualification evidence is incomplete or unresolved'); };
+            const workflow = '.github/workflows/scaffold-godot-qualification.yml';
+            const checkRun = (run, file) => demand(run.path === file && run.head_repository?.full_name === 'noisefactorllc/sync' && run.head_branch === 'main' && run.event === 'workflow_dispatch');
+            const current = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId })).data;
+            checkRun(current, workflow);
+            demand(current.id === context.runId && current.head_sha === context.sha && current.run_attempt === Number(process.env.GITHUB_RUN_ATTEMPT));
+            const inventory = (await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: current.workflow_id, per_page: 100 })).data;
+            const previous = helper.precedingAttempts(inventory, current);
+            const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+            const artifact = async (run, name) => {
+              const inventory = (await github.rest.actions.listWorkflowRunArtifacts({ ...context.repo, run_id: run.id, per_page: 100 })).data;
+              demand(inventory.total_count < 100 && inventory.total_count === inventory.artifacts.length);
+              const ids = new Set();
+              for (const item of inventory.artifacts) {
+                demand(Number.isSafeInteger(item.id) && item.id > 0 && !ids.has(item.id) && item.workflow_run?.id === run.id);
+                ids.add(item.id);
+              }
+              const matches = inventory.artifacts.filter(item => item.name === name);
+              demand(matches.length === 1);
+              const item = matches[0];
+              demand(!item.expired && item.workflow_run?.id === run.id && item.size_in_bytes > 0 && item.size_in_bytes <= 8388608 && /^sha256:[a-f0-9]{64}$/.test(item.digest));
+              const response = await github.rest.actions.downloadArtifact({ ...context.repo, artifact_id: item.id, archive_format: 'zip' });
+              const bytes = Buffer.from(response.data);
+              demand(bytes.length === item.size_in_bytes && 'sha256:' + digest(bytes) === item.digest);
+              return { bytes, files: helper.readZip(bytes, { maxBytes: 8388608 }), id: item.id, sha256: digest(bytes) };
+            };
+            const jobs = async (run, attempt) => {
+              const response = (await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs', {
+                ...context.repo, run_id: run.id, attempt_number: attempt, per_page: 100 })).data;
+              demand(response.total_count === response.jobs.length && response.jobs.length === 1 && response.jobs[0].run_id === run.id && response.jobs[0].runner_id === 21 && response.jobs[0].runner_name === 'largeboi-sync-camera');
+              return response.jobs[0];
+            };
+            const predecessors = [];
+            for (const { run, attempt } of previous) {
+              const exact = (await github.rest.actions.getWorkflowRunAttempt({ ...context.repo, run_id: run.id, attempt_number: attempt })).data;
+              checkRun(exact, workflow);
+              demand(exact.id === run.id && exact.head_sha === run.head_sha && exact.run_attempt === attempt);
+              const proof = await artifact(exact, 'godot-qualification-' + run.id + '-' + attempt);
+              helper.checkPriorEvidence(proof.files, exact, attempt);
+              const job = await jobs(exact, attempt);
+              for (const name of ['Verify the camera host and workspace were preserved', 'Retain qualification evidence', 'Clean only the proved invocation directory']) {
+                const steps = job.steps.filter(step => step.name === name);
+                demand(steps.length === 1 && steps[0].conclusion === 'success');
+              }
+              predecessors.push({ run_id: run.id, run_attempt: attempt, artifact_id: proof.id, sha256: proof.sha256 });
+            }
+            demand(/^[1-9][0-9]{0,14}$/.test(process.env.CONTAINMENT_RUN_ID));
+            const contained = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: Number(process.env.CONTAINMENT_RUN_ID) })).data;
+            checkRun(contained, '.github/workflows/scaffold-windows-containment.yml');
+            demand(contained.id === Number(process.env.CONTAINMENT_RUN_ID) && Number.isSafeInteger(contained.run_attempt) && contained.run_attempt > 0 && contained.status === 'completed' && contained.conclusion === 'success');
+            const proof = await artifact(contained, 'windows-containment-' + process.env.SCAFFOLD_SOURCE_SHA + '-' + contained.id + '-' + contained.run_attempt);
+            helper.checkContainment(proof.files, process.env.SCAFFOLD_SOURCE_SHA);
+            const containedJob = await jobs(contained, contained.run_attempt);
+            demand(containedJob.conclusion === 'success' && containedJob.name === 'Windows process containment ' + process.env.SCAFFOLD_SOURCE_SHA);
+            const fresh = (await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: current.workflow_id, per_page: 100 })).data;
+            helper.precedingAttempts(fresh, current);
+            const identities = data => JSON.stringify(data.workflow_runs.map(r => [r.id, r.run_attempt, r.head_sha]).sort((a, b) => a[0] - b[0]));
+            demand(identities(fresh) === identities(inventory));
+            const still = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: contained.id })).data;
+            demand(still.run_attempt === contained.run_attempt && still.status === 'completed' && still.conclusion === 'success' && still.head_sha === contained.head_sha);
+            await fs.writeFile(path.join(root, 'containment.zip'), proof.bytes, { flag: 'wx' });
+            const admission = { workflow_sha: context.sha, scaffold_sha: process.env.SCAFFOLD_SOURCE_SHA, run_id: current.id, run_attempt: current.run_attempt,
+              containment_run_id: contained.id, containment_run_attempt: contained.run_attempt, containment_artifact_id: proof.id, containment_sha256: proof.sha256, predecessors };
+            await fs.writeFile(path.join(root, 'admission.json'), JSON.stringify(admission), { flag: 'wx' });
+            await fs.writeFile(path.join(root, 'evidence/admission.json'), JSON.stringify(admission, null, 2), { flag: 'wx' });
+
+      - name: Mint a Scaffold contents-read token
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23liy6T6BW0BXuZRzx
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+          repositories: scaffold
+          permission-contents: read
+
+      - name: Fetch only qualified Job Object runtime source
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ steps.source-token.outputs.token }}
+          script: |
+            const fs = require('node:fs/promises'), path = require('node:path'), crypto = require('node:crypto');
+            const { pathToFileURL } = require('node:url');
+            const root = process.env.SCAFFOLD_WINDOWS_ROOT, sha = process.env.SCAFFOLD_SOURCE_SHA;
+            const { RUNTIME_HASHES } = await import(pathToFileURL(path.join(root, '.github/qualification/godot.mjs')).href);
+            const repository = { owner: 'noisefactorllc', repo: 'scaffold' };
+            const metadata = (await github.rest.repos.get(repository)).data;
+            const head = (await github.rest.repos.getCommit({ ...repository, ref: 'main' })).data;
+            if (metadata.default_branch !== 'main' || metadata.permissions?.push === true || head.sha !== sha) throw new Error('Scaffold source must be exact reviewed main with read-only credentials');
+            const tree = (await github.rest.git.getTree({ ...repository, tree_sha: head.commit.tree.sha, recursive: '1' })).data;
+            if (tree.truncated || !Array.isArray(tree.tree)) throw new Error('Incomplete runtime source inventory');
+            const manifest = { repository: 'noisefactorllc/scaffold', source_sha: sha, files: [] };
+            for (const [file, expected] of Object.entries(RUNTIME_HASHES)) {
+              const rows = tree.tree.filter(row => row.path === file);
+              if (rows.length !== 1 || rows[0].type !== 'blob' || !['100644', '100755'].includes(rows[0].mode)) throw new Error('Runtime source must be regular');
+              const blob = (await github.rest.git.getBlob({ ...repository, file_sha: rows[0].sha })).data;
+              if (blob.encoding !== 'base64' || blob.size > 2097152) throw new Error('Invalid runtime source');
+              const bytes = Buffer.from(blob.content, 'base64'), actual = crypto.createHash('sha256').update(bytes).digest('hex');
+              if (bytes.length !== blob.size || actual !== expected || crypto.createHash('sha1').update('blob ' + bytes.length + '\0').update(bytes).digest('hex') !== rows[0].sha) throw new Error('Runtime binding changed');
+              const target = path.join(root, file); await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.writeFile(target, bytes, { flag: 'wx' }); manifest.files.push({ path: file, sha256: actual });
+            }
+            await fs.writeFile(path.join(root, 'evidence/scaffold-source.json'), JSON.stringify(manifest, null, 2), { flag: 'wx' });
+
+      - name: Run only the pinned portable Godot fixtures
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $gpus = @(Get-CimInstance Win32_VideoController | Select-Object -First 9)
+          if ($gpus.Count -eq 0 -or $gpus.Count -gt 8) { throw 'GPU inventory is incomplete' }
+          @($gpus | ForEach-Object { @{ name = $_.Name; driver = $_.DriverVersion } }) |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'evidence/gpu.json') -Encoding utf8
+          & $env:SCAFFOLD_WINDOWS_NODE (Join-Path $env:SCAFFOLD_WINDOWS_ROOT '.github/qualification/godot.mjs') $env:SCAFFOLD_WINDOWS_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'The two named Godot fixtures did not qualify' }
+
+      - name: Verify the camera host and workspace were preserved
+        if: always() && steps.baseline.outputs.ready == 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $root = $env:SCAFFOLD_WINDOWS_ROOT
+          $before = Get-Content -LiteralPath (Join-Path $root 'host-before.json') -Raw | ConvertFrom-Json -AsHashtable
+          $after = & (Join-Path $root 'snapshot.ps1') | ConvertFrom-Json -AsHashtable
+          $components = [ordered]@{ registration = $true; workspace = $before.workspace -eq $after.workspace;
+            camera = $before.camera -eq $after.camera; task = $true; listeners = $true }
+          foreach ($name in $before.registration.Keys) { if ($before.registration[$name] -ne $after.registration[$name]) { $components.registration = $false } }
+          foreach ($name in $before.task.Keys) { if ($before.task[$name] -ne $after.task[$name]) { $components.task = $false } }
+          $beforeListeners = @($before.listeners | Sort-Object -Property id, started)
+          $afterListeners = @($after.listeners | Sort-Object -Property id, started)
+          if ($beforeListeners.Count -ne $afterListeners.Count) { $components.listeners = $false }
+          else {
+            for ($index = 0; $index -lt $beforeListeners.Count; $index++) {
+              if ($beforeListeners[$index].id -ne $afterListeners[$index].id -or $beforeListeners[$index].started -ne $afterListeners[$index].started) {
+                $components.listeners = $false
+              }
+            }
+          }
+          $preserved = -not ($components.Values -contains $false)
+          $remaining = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($root) -and $_.ProcessId -ne $PID })
+          $evidence = @{ source_sha = $env:SCAFFOLD_SOURCE_SHA; runner = $env:RUNNER_NAME; os = [Environment]::OSVersion.VersionString;
+            host_preserved = $preserved; components = $components; remaining_invocation_processes = $remaining.Count;
+            remaining_invocation_identities = @($remaining | ForEach-Object { @{ pid = $_.ProcessId; parent_pid = $_.ParentProcessId;
+              name = $_.Name; created_at = $_.CreationDate.ToUniversalTime().ToString('o') } }) }
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'evidence/host-preservation.json') -Encoding utf8
+          if (-not $preserved -or $remaining.Count -ne 0) { throw 'Qualification did not preserve the host or confirm process cleanup' }
+
+      - name: Retain qualification evidence
+        id: artifact
+        if: always() && steps.baseline.outputs.evidence_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: godot-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SCAFFOLD_WINDOWS_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Clean only the proved invocation directory
+        if: always() && steps.artifact.outcome == 'success'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $root = $env:SCAFFOLD_WINDOWS_ROOT
+          $expected = Join-Path $env:RUNNER_TEMP "scaffold-godot-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if ([IO.Path]::GetFullPath($root) -ne [IO.Path]::GetFullPath($expected)) { throw 'Unexpected cleanup directory' }
+          $hostProof = Get-Content -LiteralPath (Join-Path $root 'evidence/host-preservation.json') -Raw | ConvertFrom-Json
+          $runProof = Get-Content -LiteralPath (Join-Path $root 'evidence/qualification.json') -Raw | ConvertFrom-Json
+          if (-not $hostProof.host_preserved -or $hostProof.remaining_invocation_processes -ne 0 -or -not $runProof.cleanup_confirmed) { throw 'Cleanup is unconfirmed; future Godot runs must remain blocked' }
+          foreach ($name in @('registration', 'workspace', 'camera', 'task', 'listeners')) {
+            if ($hostProof.components.$name -ne $true) { throw 'A host preservation component is unconfirmed' }
+          }
+          $items = @(Get-Item -LiteralPath $root) + @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+          if ($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) { throw 'Invocation cleanup cannot follow reparse points' }
+          Remove-Item -LiteralPath $root -Recurse -Force
+          if (Test-Path -LiteralPath $root) { throw 'Invocation directory cleanup was incomplete' }
