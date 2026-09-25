@@ -157,7 +157,7 @@ jobs:
           & $env:SCAFFOLD_WINDOWS_NODE --test --test-reporter=tap $test 2>&1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { throw 'Windows process containment tests failed' }
           $text = Get-Content -LiteralPath $log -Raw
-          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 16\s*$') {
+          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 18\s*$') {
             throw 'The complete Windows containment inventory must run without skips'
           }
 
@@ -169,15 +169,27 @@ jobs:
           $root = $env:SCAFFOLD_WINDOWS_ROOT
           $before = Get-Content -LiteralPath (Join-Path $root 'host-before.json') -Raw | ConvertFrom-Json -AsHashtable
           $after = & (Join-Path $root 'snapshot.ps1') | ConvertFrom-Json -AsHashtable
-          $preserved = $true
-          foreach ($name in @('workspace', 'camera')) { if ($before[$name] -ne $after[$name]) { $preserved = $false } }
-          foreach ($name in $before.registration.Keys) { if ($before.registration[$name] -ne $after.registration[$name]) { $preserved = $false } }
-          foreach ($name in $before.task.Keys) { if ($before.task[$name] -ne $after.task[$name]) { $preserved = $false } }
-          if (($before.listeners | ConvertTo-Json -Compress) -ne ($after.listeners | ConvertTo-Json -Compress)) { $preserved = $false }
+          $components = [ordered]@{ registration = $true; workspace = $before.workspace -eq $after.workspace;
+            camera = $before.camera -eq $after.camera; task = $true; listeners = $true }
+          foreach ($name in $before.registration.Keys) { if ($before.registration[$name] -ne $after.registration[$name]) { $components.registration = $false } }
+          foreach ($name in $before.task.Keys) { if ($before.task[$name] -ne $after.task[$name]) { $components.task = $false } }
+          $beforeListeners = @($before.listeners | Sort-Object -Property id, started)
+          $afterListeners = @($after.listeners | Sort-Object -Property id, started)
+          if ($beforeListeners.Count -ne $afterListeners.Count) { $components.listeners = $false }
+          else {
+            for ($index = 0; $index -lt $beforeListeners.Count; $index++) {
+              if ($beforeListeners[$index].id -ne $afterListeners[$index].id -or $beforeListeners[$index].started -ne $afterListeners[$index].started) {
+                $components.listeners = $false
+              }
+            }
+          }
+          $preserved = -not ($components.Values -contains $false)
           $remaining = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($root) -and $_.ProcessId -ne $PID })
           $evidence = @{ source_sha = $env:SCAFFOLD_SOURCE_SHA; runner = $env:RUNNER_NAME; os = [Environment]::OSVersion.VersionString;
-            host_preserved = $preserved; remaining_invocation_processes = $remaining.Count }
-          $evidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/host-preservation.json') -Encoding utf8
+            host_preserved = $preserved; components = $components; remaining_invocation_processes = $remaining.Count;
+            remaining_invocation_identities = @($remaining | ForEach-Object { @{ pid = $_.ProcessId; parent_pid = $_.ParentProcessId;
+              name = $_.Name; created_at = $_.CreationDate.ToUniversalTime().ToString('o') } }) }
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'evidence/host-preservation.json') -Encoding utf8
           if (-not $preserved -or $remaining.Count -ne 0) { throw 'Qualification did not preserve the host or confirm process cleanup' }
 
       - name: Retain qualification results without uploading private source
