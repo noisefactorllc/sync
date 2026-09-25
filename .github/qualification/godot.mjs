@@ -201,6 +201,73 @@ export function checkPriorEvidence(files, run, attempt) {
   return true
 }
 
+// This reviewed source throws at baseline line14 before directory creation or its first child launch.
+const BOOTSTRAP_SOURCE = 'c4ac26bfa36e7742403d7b4276f4e567ec54bbea8d2071b9e5b30268a8e16aab'
+export function checkBootstrapFailure({ run, attempt, job, artifactCount, workflowSha256, log }) {
+  check(workflowSha256 === BOOTSTRAP_SOURCE && artifactCount === 0 && integer(attempt) && run.run_attempt === attempt &&
+    integer(run.id) && SHA.test(run.head_sha) && run.path === '.github/workflows/scaffold-godot-qualification.yml' &&
+    run.head_repository?.full_name === 'noisefactorllc/sync' && run.head_branch === 'main' && run.event === 'workflow_dispatch' &&
+    run.status === 'completed' && run.conclusion === 'failure')
+  check(integer(job.id) && job.run_id === run.id && job.head_sha === run.head_sha && job.status === 'completed' &&
+    job.conclusion === 'failure' && job.runner_id === 21 && job.runner_name === 'largeboi-sync-camera' && job.name === 'Portable Godot4.7.2 diagnostic')
+  const names = ['Set up job', 'Verify the existing host and retain its baseline', 'Fetch only this reviewed qualification helper',
+    'Check qualification helper behavior', 'Require complete prior cleanup and exact-source containment qualification',
+    'Mint a Scaffold contents-read token', 'Fetch only qualified Job Object runtime source', 'Run only the pinned portable Godot fixtures',
+    'Verify the camera host and workspace were preserved', 'Retain qualification evidence', 'Clean only the proved invocation directory', 'Complete job']
+  check(Array.isArray(job.steps) && job.steps.length === names.length)
+  for (const [index, name] of names.entries()) {
+    const step = job.steps[index]
+    check(step.name === name && step.number === index + 1 && step.status === 'completed' &&
+      step.conclusion === (index === 1 ? 'failure' : [0, 11].includes(index) ? 'success' : 'skipped'))
+  }
+  check(Buffer.isBuffer(log) && log.length > 0 && log.length <= 262144)
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(log).replace(/\x1b\[[0-9;]*m/g, '')
+  check(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text))
+  const lines = text.trimEnd().split(/\r?\n/).map(line => {
+    check(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{1,7}Z /.test(line))
+    return line.slice(line.indexOf(' ') + 1)
+  })
+  const echoEnd = lines.lastIndexOf('##[endgroup]'), tail = lines.slice(echoEnd + 1)
+  check(echoEnd >= 0 && tail.length === 7 && lines.filter(line => line.startsWith('Exception:')).length === 1 &&
+    lines.filter(line => line.startsWith('##[error]')).length === 1)
+  check(/^Exception: C:\\actions-runner-sync\\_work\\_temp\\[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.ps1:14$/.test(tail[0]) &&
+    tail[1] === 'Line |' && /^\s*14 \| .*throw 'Runner temp ancestors must be regular directories' .*$/u.test(tail[2]) &&
+    /^\s*\|\s+~+\s*$/.test(tail[3]) && /^\s*\| Runner temp ancestors must be regular directories$/.test(tail[4]) &&
+    tail[5] === '##[error]Process completed with exit code 1.' && tail[6] === 'Cleaning up orphan processes')
+  return { kind: 'bootstrap_no_engine', run_id: run.id, run_attempt: attempt, job_id: job.id, workflow_sha: run.head_sha,
+    workflow_sha256: workflowSha256, reason: 'ancestor_guard_before_child', log_bytes: log.length, log_sha256: hash(log),
+    steps: job.steps.map(({ number, name, conclusion }) => ({ number, name, conclusion })) }
+}
+
+export async function fetchBootstrapLog(jobId, token, request = fetch) {
+  try {
+    check(integer(jobId) && typeof token === 'string' && token.length > 0)
+    const signal = AbortSignal.timeout(20000)
+    const api = await request('https://api.github.com/repos/noisefactorllc/sync/actions/jobs/' + jobId + '/logs',
+      { signal, redirect: 'manual', headers: { Authorization: 'Bearer ' + token, 'X-GitHub-Api-Version': '2022-11-28' } })
+    const location = api.headers.get('location'); await api.body?.cancel()
+    check(api.status === 302 && location)
+    const url = new URL(location)
+    check(url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash &&
+      /^productionresultssa[0-9]+\.blob\.core\.windows\.net$/.test(url.hostname))
+    // GitHub documents this one redirect. Storage receives no GitHub credentials and cannot redirect again.
+    const response = await request(url.href, { signal, redirect: 'error' })
+    const declared = response.headers.get('content-length')
+    check(response.status === 200 && response.body && (declared === null || /^\d+$/.test(declared) && Number(declared) <= 262144))
+    const reader = response.body.getReader(), chunks = []; let length = 0
+    try {
+      while (true) {
+        const next = await reader.read(); if (next.done) break
+        length += next.value.length; check(length <= 262144); chunks.push(next.value)
+      }
+    } finally { await reader.cancel() }
+    check(length > 0 && (declared === null || Number(declared) === length))
+    const bytes = Buffer.concat(chunks)
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return bytes
+  } catch { fail() } // Never print the token, signed storage URL or remote response text.
+}
+
 export async function fetchBytes(url, maximum) {
   const signal = AbortSignal.timeout(120000)
   for (let redirects = 0; redirects <= 4; redirects++) {
