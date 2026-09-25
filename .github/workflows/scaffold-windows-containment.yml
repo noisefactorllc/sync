@@ -118,7 +118,17 @@ jobs:
             const tree = (await github.rest.git.getTree({ owner, repo, tree_sha: head.commit.tree.sha, recursive: '1' })).data;
             if (tree.truncated || !Array.isArray(tree.tree)) throw new Error('Source inventory is incomplete');
             const files = [
+              'apps/scaffold-cloud/native-worker.mjs',
+              'apps/scaffold-cloud/lib/contract.mjs',
+              'apps/scaffold-cloud/lib/engines.mjs',
+              'apps/scaffold-cloud/lib/executor.mjs',
+              'apps/scaffold-cloud/lib/native-lock.mjs',
+              'apps/scaffold-cloud/lib/native.mjs',
+              'apps/scaffold-cloud/lib/runner.mjs',
+              'apps/scaffold-cloud/lib/skill-worker.mjs',
+              'apps/scaffold-cloud/lib/skills.mjs',
               'apps/scaffold-cloud/lib/windows-process.mjs',
+              'apps/scaffold-cloud/lib/worker.mjs',
               'apps/scaffold-cloud/runtime/windows-process.cs',
               'apps/scaffold-cloud/runtime/windows-process.ps1',
               'apps/scaffold-cloud/test/windows-process.test.mjs',
@@ -367,7 +377,7 @@ jobs:
           & $env:SCAFFOLD_WINDOWS_NODE --test --test-reporter=tap $test 2>&1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { throw 'Windows process containment tests failed' }
           $text = Get-Content -LiteralPath $log -Raw
-          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 18\s*$') {
+          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 28\s*$') {
             throw 'The complete Windows containment inventory must run without skips'
           }
 
