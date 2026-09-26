@@ -10,6 +10,7 @@
 
 #include <fcntl.h>
 #include <mach/mach_time.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -133,6 +134,15 @@ struct CmioCameraSink::Impl {
       return;
     }
 
+    // Keep a second sink from truncating, publishing into, or scrubbing this
+    // writer's mapping. Readers do not take this advisory writer lock.
+    if (::flock(ring_fd, LOCK_EX | LOCK_NB) != 0) {
+      ::close(ring_fd);
+      ring_fd = -1;
+      ring_path.clear();
+      return;
+    }
+
     // Ensure permissions are strictly owner-private 0600 even if the pre-existing file had looser mode.
     if ((st.st_mode & 0777) != 0600) {
       if (::fchmod(ring_fd, 0600) != 0) {
@@ -182,13 +192,18 @@ struct CmioCameraSink::Impl {
       ring_view = nullptr;
     }
     if (ring_fd >= 0) {
+      // A replacement at the pathname belongs to somebody else. Check the
+      // open file's identity and keep its writer lock through unlinking.
+      struct stat opened{}, named{};
+      if (!ring_path.empty() && ::fstat(ring_fd, &opened) == 0 &&
+          ::lstat(ring_path.c_str(), &named) == 0 &&
+          opened.st_dev == named.st_dev && opened.st_ino == named.st_ino) {
+        ::unlink(ring_path.c_str());
+      }
       ::close(ring_fd);
       ring_fd = -1;
     }
-    if (!ring_path.empty()) {
-      ::unlink(ring_path.c_str());
-      ring_path.clear();
-    }
+    ring_path.clear();
   }
 
   CameraSinkUnavailableReason reason = CameraSinkUnavailableReason::DeviceNotFound;

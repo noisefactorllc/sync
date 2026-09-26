@@ -278,33 +278,50 @@ SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file_with_owner_private_permissi
   SYNC_REQUIRE(::stat(test_path.c_str(), &st_after) != 0);
 }
 
-SYNC_TEST(cmio_camera_sink_rejects_symlink_shm_path) {
-  const std::string target_path = "/tmp/SyncCamera.target." + std::to_string(::getpid()) + ".frames";
-  const std::string link_path = "/tmp/SyncCamera.link." + std::to_string(::getpid()) + ".frames";
-  ::unlink(link_path.c_str());
-  ::unlink(target_path.c_str());
-
-  int fd = ::open(target_path.c_str(), O_RDWR | O_CREAT, 0600);
-  SYNC_REQUIRE(fd >= 0);
+SYNC_TEST(cmio_camera_sink_preserves_a_replacement_file_on_close) {
+  const std::string test_path = "/tmp/SyncCamera.replaced." + std::to_string(::getpid()) + ".frames";
+  const std::string original_path = test_path + ".original";
   const char canary[] = "CANARY_DATA_DO_NOT_OVERWRITE";
-  SYNC_REQUIRE(::write(fd, canary, sizeof(canary)) == sizeof(canary));
-  ::close(fd);
-
-  SYNC_REQUIRE(::symlink(target_path.c_str(), link_path.c_str()) == 0);
-
   {
     CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
-                         .shm_path = link_path,
+                         .shm_path = test_path,
                          .enable_shm = true});
+    SYNC_REQUIRE(::rename(test_path.c_str(), original_path.c_str()) == 0);
+    const int fd = ::open(test_path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    SYNC_REQUIRE(fd >= 0);
+    SYNC_REQUIRE(::write(fd, canary, sizeof(canary)) == sizeof(canary));
+    ::close(fd);
   }
+  const int fd = ::open(test_path.c_str(), O_RDONLY | O_NOFOLLOW);
+  char actual[sizeof(canary)]{};
+  const auto count = fd < 0 ? -1 : ::read(fd, actual, sizeof(actual));
+  if (fd >= 0) ::close(fd);
+  ::unlink(test_path.c_str());
+  ::unlink(original_path.c_str());
+  SYNC_REQUIRE(count == sizeof(canary));
+  SYNC_REQUIRE(std::memcmp(actual, canary, sizeof(canary)) == 0);
+}
 
-  // Target must NOT have been truncated or modified through the symlink
+SYNC_TEST(cmio_camera_sink_second_writer_cannot_scrub_the_first_writer) {
+  const std::string test_path = "/tmp/SyncCamera.owner." + std::to_string(::getpid()) + ".frames";
+  CmioCameraSink first({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                        .shm_path = test_path, .enable_shm = true});
+  const int fd = ::open(test_path.c_str(), O_RDONLY | O_NOFOLLOW);
+  SYNC_REQUIRE(fd >= 0);
+  std::uint32_t before = 0;
+  SYNC_REQUIRE(::pread(fd, &before, sizeof(before), 0) == sizeof(before));
+  {
+    CmioCameraSink second({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                           .shm_path = test_path, .enable_shm = true});
+  }
+  std::uint32_t after = 0;
+  const auto count = ::pread(fd, &after, sizeof(after), 0);
+  ::close(fd);
   struct stat st{};
-  SYNC_REQUIRE(::stat(target_path.c_str(), &st) == 0);
-  SYNC_REQUIRE(st.st_size == sizeof(canary));
-
-  ::unlink(link_path.c_str());
-  ::unlink(target_path.c_str());
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st) == 0);
+  SYNC_REQUIRE(count == sizeof(after));
+  SYNC_REQUIRE(before == noisefactor::sync::camera::kFrameRingMagic);
+  SYNC_REQUIRE(after == before);
 }
 
 SYNC_TEST(cmio_camera_sink_rejects_non_regular_file_shm_path) {

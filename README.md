@@ -62,10 +62,10 @@ one exists. Add an entry when a report is diagnosed, and remove it when the
 fix ships.
 
 - **Heat limits long sessions on fanless Macs.** Sync does carry 1080p60
-  with 32 channels of audio: on an M2 MacBook Air with a WING Rack, hour-long
-  runs through Syphon delivered more than 99.9% of frames with every channel
-  identified, and three hours back to back stayed inside a 1% loss budget
-  (see the [thermal report](https://sync.noisedeck.app/performance/research-2026-09-23-thermal-load-gpu-clock-cap/)).
+  with 32 channels of audio: on an M2 MacBook Air with a WING Rack, a
+  one-hour run through Syphon delivered 99.97% of marked frames with every
+  channel identified, inside the 1% loss budget the run was held to (see the
+  [thermal report](https://sync.noisedeck.app/performance/research-2026-09-23-thermal-load-gpu-clock-cap/)).
   But a heavy program can heat a fanless laptop until macOS caps the GPU
   clock. The render keeps its share and the WebCodecs encoder starves, so
   delivery used to collapse to 30-40 fps. noisemaker `fde2ea40` and
@@ -82,9 +82,10 @@ fix ships.
   A recovered output is a new Syphon server with the same name. OBS
   reconnects to it on its own; other receivers may need the source selected
   again.
-- **Audio can drop out briefly as a Mac heats up.** In three hours of WING
-  capture, one thermal pressure change stalled native audio reads for about
-  2.6 seconds. Outside those moments the audio stayed intact in our runs.
+- **Audio can drop out briefly on a busy Mac.** In that hour of WING
+  capture, one disturbance stalled the browser's AudioWorklet for about
+  three seconds, while native audio reads kept zero drops and zero cursor
+  gaps. Outside that moment the audio stayed intact in our runs.
 - **Not yet qualified at 1080p60 with 32-channel audio:** Sync Camera,
   Spout, NDI, Windows, and Linux. Capture from a physical audio interface has
   been checked on macOS only.

@@ -450,7 +450,7 @@ public preview:
    source slot, channel identity/order and sample-value checks, zero audio ring drops,
    underruns and cursor gaps, and retained jitter/latency tails. An authoritative
    jitter epsilon remains unresolved; do not infer one from an average FPS.
-   The [revised next research plan](https://sync.noisedeck.app/performance/research-2026-09-21-next-research-plan-review/)
+   The [revised next research plan](https://sync.noisedeck.app/performance/research-2026-09-25-next-research-plan-v5/)
    specifies the observation window, evidence and remaining platform actions.
    The Windows WASAPI result uses a two-channel virtual cable for two seconds;
    it does not qualify 32 physical inputs or combined audio/video.
