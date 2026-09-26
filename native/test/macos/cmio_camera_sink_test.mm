@@ -278,6 +278,38 @@ SYNC_TEST(cmio_camera_sink_initializes_shm_ring_file_with_owner_private_permissi
   SYNC_REQUIRE(::stat(test_path.c_str(), &st_after) != 0);
 }
 
+// The sink must refuse to follow a symlinked shared-frame path: it opens
+// with O_NOFOLLOW, so the target is neither truncated nor scrubbed through
+// the link, and the sink leaves the link and target alone.
+SYNC_TEST(cmio_camera_sink_rejects_symlink_shm_path) {
+  const std::string target_path = "/tmp/SyncCamera.target." + std::to_string(::getpid()) + ".frames";
+  const std::string link_path = "/tmp/SyncCamera.link." + std::to_string(::getpid()) + ".frames";
+  ::unlink(link_path.c_str());
+  ::unlink(target_path.c_str());
+
+  int fd = ::open(target_path.c_str(), O_RDWR | O_CREAT, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  const char canary[] = "CANARY_DATA_DO_NOT_OVERWRITE";
+  SYNC_REQUIRE(::write(fd, canary, sizeof(canary)) == sizeof(canary));
+  ::close(fd);
+
+  SYNC_REQUIRE(::symlink(target_path.c_str(), link_path.c_str()) == 0);
+
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = link_path,
+                         .enable_shm = true});
+  }
+
+  // Target must NOT have been truncated or modified through the symlink
+  struct stat st{};
+  SYNC_REQUIRE(::stat(target_path.c_str(), &st) == 0);
+  SYNC_REQUIRE(st.st_size == sizeof(canary));
+
+  ::unlink(link_path.c_str());
+  ::unlink(target_path.c_str());
+}
+
 SYNC_TEST(cmio_camera_sink_preserves_a_replacement_file_on_close) {
   const std::string test_path = "/tmp/SyncCamera.replaced." + std::to_string(::getpid()) + ".frames";
   const std::string original_path = test_path + ".original";
