@@ -57,97 +57,47 @@ current public implementation.
 
 ## Known issues
 
-These issues stop Sync from working today. Each entry includes a workaround
-where one exists. Keep this list current. Add an entry when a report is
-diagnosed. Remove it when the fix ships.
+Known problems and limits in the current preview, with a workaround where
+one exists. Add an entry when a report is diagnosed, and remove it when the
+fix ships.
 
-- **Sustained 1080p60 camera delivery with concurrent 32-channel audio remains
-  unqualified.** The [18 September native versus Chromium measurements](https://sync.noisedeck.app/performance/research-2026-09-18-1080p60-native-avfoundation/measurements.json)
-  record 23,664 distinct native pictures in 599.982 seconds: 39.441 FPS, with
-  12,335 producer skips and 591 complete seconds below 50 FPS. Zero unexplained
-  native losses at that offered rate does not establish 60-FPS capacity. The
-  Chromium arm has invalid accounting, so it cannot establish an exclusive
-  capture-path cause. The [20 September web candidate](https://sync.noisedeck.app/performance/research-2026-09-20-web-native-frame-pacing/measurements.json)
-  reports 35,612 distinct pictures in 600 seconds, or 98.922% of 36,000 target
-  frame slots. This is below 99% and lacks concurrent 32-channel final-pixel
-  evidence. Native receiver, browser arrival, and final-rendered-pixel results
-  must remain separate. See the [current closure plan](https://sync.noisedeck.app/performance/research-2026-09-21-next-research-plan-review/).
-- **Short delivery stalls from browser senders remain under investigation.**
-  If Chrome rendering and delivery both settle at 30 FPS on battery power,
-  connect the computer to power and check Settings > Performance > Energy
-  Saver. Chrome can limit frame cadence when battery charge is low. This
-  check does not explain delivery stalls while rendering remains at 60 FPS.
-  The [30-minute direct-receiver report](https://sync.noisedeck.app/performance/research-2026-09-08-direct-rgba-web-30m/)
-  records both symptoms. Its experimental path still has unresolved stalls;
-  it is not a released fix.
-  The [allocation pooling report](https://sync.noisedeck.app/performance/research-2026-09-09-allocation-pooling-round2/)
-  records 13 short web and desktop tests. The unchanged receiver also slowed
-  on a later run. New pooling changes are therefore not required to reproduce
-  the loss. Sender backpressure increased while rendering continued near
-  60 FPS. The cause remains unresolved. These tests do not establish a GC fix.
-  The [source byte-budget report](https://sync.noisedeck.app/performance/research-2026-09-09-source-byte-budgets/)
-  records a separate bounded queue experiment. Its two-packet source limit
-  averaged 59.730 FPS in web and 59.668 in desktop over three minutes.
-  Both still had seconds below 50. The sequential runs do not establish
-  a performance benefit or the effect on latency. The report retains one
-  rejected marker-check attempt. Its cause remains unproved.
-  The [decoder and ACK report](https://sync.noisedeck.app/performance/research-2026-09-09-browser-scalar-allocations/)
-  records a separate allocation candidate with the same source limit. Web
-  averaged 59.863 FPS over three minutes, with no complete seconds below 50.
-  Desktop averaged 58.015 FPS and had five seconds below 50. Pixel checks
-  passed in both contexts. These short runs do not establish sustained
-  60 FPS or a general pooling benefit. The candidate has not shipped.
-  The [native write report](https://sync.noisedeck.app/performance/research-2026-09-09-native-write-cpu/)
-  records a 227.731 ms write with 4.019 ms of thread CPU time. These timings
-  do not distinguish scheduling delay from a system wait. Web and desktop
-  observations still had seconds below 50. One source renderer stopped
-  before cleanup. Its caller remains unknown. The report retains that
-  rejected attempt. These diagnostics do not establish a GC cause or fix.
-  A fixed source-encoder candidate completed fresh web and desktop pixel checks.
-  Three-minute observations averaged 58.181 unique pairs/s on web and
-  59.118 on desktop. Web had six complete seconds below 50, including one
-  with zero pairs. Desktop had two, with a minimum of 43. Source telemetry
-  retained gaps between pipeline calls. Their cause remains unknown.
-  GPU contention on the busy test machine is a working hypothesis.
-  These tests did not measure GPU scheduling or contention.
-  A warm test avoided explicit view constructors and BigInt calls. It does
-  not prove zero allocation or a GC fix. These sequential runs do not
-  establish a performance benefit. The candidate has not shipped.
-  The [fixed source encoder report](https://sync.noisedeck.app/performance/research-2026-09-09-fixed-source-encoder/) is live.
-  A separate native socket experiment passed its pixel, source and cleanup
-  checks but failed both three-minute delivery checkpoints. A fixed
-  262,144-byte HTTP send buffer averaged 18.313 unique pairs/s on web and
-  16.321 on desktop. Each run had 174 complete seconds below 50.
-  This setting fails release requirements and is not a released workaround.
-  Mean initial native write time decreased while mean callback time
-  increased. These native measurements include setup and cleanup. Lost event
-  records prevent a complete per-write reconstruction. The sequential tests
-  do not establish an exclusive cause or explain the earlier source-entry
-  gaps. The [fixed socket buffer report](https://sync.noisedeck.app/performance/research-2026-09-09-native-send-buffer/) is live.
-  A separate source packet copy candidate uses three reusable packets. It removes one
-  8,294,400-byte payload copy per fast-path encoding attempt and reduces
-  logical retained CPU packet storage by 8,294,272 bytes. Fresh web and desktop
-  pixel controls passed. Three-minute observations averaged 45.479 unique
-  pairs/s on web and 55.562 on desktop. A later unchanged encoder reference
-  averaged 53.978 on web. These sequential runs do not isolate the change's
-  effect. A repeated candidate measurement failed its diagnostic deadline
-  and has no accepted FPS. The prepared report retains both failed attempts. Publication is pending.
-  The [controlled sender stage separation report](https://sync.noisedeck.app/performance/research-2026-09-18-sender-stage-separation/)
-  records a first-successful-fence-poll delay of 11.7 ms quiet / 12.4 ms loaded,
-  an upper bound on fence readiness rather than isolated GPU execution time.
-  Readback/row-flip call time was 3.3 ms, payload-copy time 0.6 ms, and
-  WebSocket send-call time 0.8 ms. These short sender observations do not
-  establish transmission completion or a general cause of delivery stalls.
-  The [combined diagnostic report](https://sync.noisedeck.app/performance/research-2026-09-18-combined-audio-video/)
-  measures synthetic audio cursors and video submissions to a test publisher.
-  Its 59.999 FPS is a sender rate; its approximately 12.4 MiB final physical
-  footprint differs from its 15,824 KiB final RSS. Neither the report nor
-  structural Windows tests certify final-pixel combined acceptance.
-  The macOS camera fitter reduces conversion passes for all alpha modes
-  on Apple Silicon. Two row ranges each use one pass per pixel.
-  The fitter reuses its completion signals between frames.
-  This shared native change applies to web and desktop senders.
-  It reduces conversion work; it does not establish a delivery-stall fix.
+- **Heat limits long sessions on fanless Macs.** Sync does carry 1080p60
+  with 32 channels of audio: on an M2 MacBook Air with a WING Rack, hour-long
+  runs through Syphon delivered more than 99.9% of frames with every channel
+  identified, and three hours back to back stayed inside a 1% loss budget
+  (see the [thermal report](https://sync.noisedeck.app/performance/research-2026-09-23-thermal-load-gpu-clock-cap/)).
+  But a heavy program can heat a fanless laptop until macOS caps the GPU
+  clock. The render keeps its share and the WebCodecs encoder starves, so
+  delivery used to collapse to 30-40 fps. noisemaker `fde2ea40` and
+  `9b88e567` cut the default program's GPU cost roughly in half, and
+  Noisedeck `788feedc` skips a draw while the encoder is behind, so a capped
+  machine now runs slower instead of collapsing. Workaround: connect power,
+  give the laptop airflow, use a lighter program or smaller image, or use a
+  Mac with a fan.
+- **A saturated GPU stops the picture instead of slowing it.** When another
+  app takes the whole GPU, the hardware encoder produces nothing and the
+  output goes dark. Noisedeck `729d9e62` retries, and sending resumes a few
+  seconds after the load ends. Starting while the GPU is saturated fails
+  with a warmup timeout and does not retry; start again after the load ends.
+  A recovered output is a new Syphon server with the same name. OBS
+  reconnects to it on its own; other receivers may need the source selected
+  again.
+- **Audio can drop out briefly as a Mac heats up.** In three hours of WING
+  capture, one thermal pressure change stalled native audio reads for about
+  2.6 seconds. Outside those moments the audio stayed intact in our runs.
+- **Not yet qualified at 1080p60 with 32-channel audio:** Sync Camera,
+  Spout, NDI, Windows, and Linux. Capture from a physical audio interface has
+  been checked on macOS only.
+- **The native render helper (sync-render) has rough edges.** A Seance
+  session with guests turned off refuses the helper's anonymous identity and
+  the render path stops. A render error that repeats every frame, other than
+  audio, leaves the output dark with no restart. The Windows helper needs the
+  Visual C++ runtime installed. Linux does not package the helper yet
+  (it needs Qt 6.9; Ubuntu 24.04 ships 6.4).
+- **Syphon receivers can hang when they stop mid-stream.** Syphon's `-stop`
+  and `-newFrameImage` take the same lock in opposite orders, upstream too.
+  Sync's own receiver probe works around it (`ab97ae5`, `c8f880c`); any
+  other Syphon receiver app that stops while frames arrive can still hit it.
 - **Sync output stops when the Noisedeck window is fully covered.** Chrome
   marks a fully covered page hidden, Noisedeck then pauses rendering, and
   Sync output stops until the window is visible again. Workaround: keep part
