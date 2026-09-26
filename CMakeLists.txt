@@ -1317,7 +1317,7 @@ elseif(WIN32)
   )
   target_compile_features(sync_pairing_prompt_tests PRIVATE cxx_std_20)
   target_include_directories(sync_pairing_prompt_tests PRIVATE native/test)
-  target_link_libraries(sync_pairing_prompt_tests PRIVATE sync_pairing_prompt)
+  target_link_libraries(sync_pairing_prompt_tests PRIVATE sync_pairing_prompt dbghelp)
   add_test(NAME sync_pairing_prompt_tests COMMAND sync_pairing_prompt_tests)
 
   add_library(sync_companion_process
