@@ -601,3 +601,67 @@ SYNC_TEST(linux_camera_concurrent_multi_reader_shm_and_v4l2_seqlock_consistency)
   SYNC_REQUIRE(r2_successes.load() > 0);
   SYNC_REQUIRE(r3_successes.load() > 0);
 }
+
+// A second sink must fail to take the same shared-frame ring instead of
+// truncating, re-initializing, or scrubbing the first writer's mapping.
+SYNC_TEST(linux_camera_sink_second_writer_cannot_scrub_the_first_writer) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  camera::LinuxCameraSink first({
+      .shm_path = shm_file,
+      .enable_shm = true,
+      .device_operations = &operations,
+  });
+  SYNC_REQUIRE(first.available());
+
+  const int fd = ::open(shm_file.c_str(), O_RDONLY | O_NOFOLLOW);
+  SYNC_REQUIRE(fd >= 0);
+  std::uint32_t before = 0;
+  SYNC_REQUIRE(::pread(fd, &before, sizeof(before), 0) == sizeof(before));
+  {
+    DeviceOps second_operations;
+    camera::LinuxCameraSink second({
+        .shm_path = shm_file,
+        .enable_shm = true,
+        .device_operations = &second_operations,
+    });
+  }
+  std::uint32_t after = 0;
+  const auto count = ::pread(fd, &after, sizeof(after), 0);
+  ::close(fd);
+  struct stat st{};
+  SYNC_REQUIRE(::stat(shm_file.c_str(), &st) == 0);
+  SYNC_REQUIRE(count == sizeof(after));
+  SYNC_REQUIRE(before == camera::kFrameRingMagic);
+  SYNC_REQUIRE(after == before);
+}
+
+// A file that replaced the ring pathname belongs to whoever created it: the
+// sink must not unlink it on close.
+SYNC_TEST(linux_camera_sink_preserves_a_replacement_file_on_close) {
+  const auto shm_file = test_temp_path();
+  const auto original_path = shm_file + ".original";
+  const char canary[] = "CANARY_DATA_DO_NOT_OVERWRITE";
+  DeviceOps operations;
+  {
+    camera::LinuxCameraSink sink({
+        .shm_path = shm_file,
+        .enable_shm = true,
+        .device_operations = &operations,
+    });
+    SYNC_REQUIRE(sink.available());
+    SYNC_REQUIRE(::rename(shm_file.c_str(), original_path.c_str()) == 0);
+    const int fd = ::open(shm_file.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    SYNC_REQUIRE(fd >= 0);
+    SYNC_REQUIRE(::write(fd, canary, sizeof(canary)) == sizeof(canary));
+    ::close(fd);
+  }
+  const int fd = ::open(shm_file.c_str(), O_RDONLY | O_NOFOLLOW);
+  char actual[sizeof(canary)]{};
+  const auto count = fd < 0 ? -1 : ::read(fd, actual, sizeof(actual));
+  if (fd >= 0) ::close(fd);
+  ::unlink(shm_file.c_str());
+  ::unlink(original_path.c_str());
+  SYNC_REQUIRE(count == sizeof(canary));
+  SYNC_REQUIRE(std::memcmp(actual, canary, sizeof(canary)) == 0);
+}
