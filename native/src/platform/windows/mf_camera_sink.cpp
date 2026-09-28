@@ -194,7 +194,7 @@ struct MfCameraSink::Impl {
     // byte-range locks do not affect mapped views, only another writer's
     // LockFileEx on the same range.
     OVERLAPPED lock_range{};
-    if (!::LockFileEx(shm_file, LOCKFILE_EXCLUSIVE | LOCKFILE_FAIL_IMMEDIATELY, 0,
+    if (!::LockFileEx(shm_file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
                       0x7FFFFFFF, 0, &lock_range)) {
       reject_shm_file();
       return;
