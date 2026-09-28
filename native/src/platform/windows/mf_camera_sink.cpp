@@ -41,18 +41,7 @@ using Microsoft::WRL::ComPtr;
 // the pathname must be a plain file owned by this process's user. A reparse
 // point here is a symlink or junction substituted for the ring, so it is
 // not opened; a file another user planted is not taken either.
-[[nodiscard]] auto file_owner_is_current_user(HANDLE file) -> bool {
-  PSID owner = nullptr;
-  PSECURITY_DESCRIPTOR descriptor = nullptr;
-  if (::GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
-                        nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
-    return false;
-  }
-  struct DescriptorGuard {
-    PSECURITY_DESCRIPTOR descriptor;
-    ~DescriptorGuard() { ::LocalFree(descriptor); }
-  } const descriptor_guard{descriptor};
-
+[[nodiscard]] auto current_user_sid(std::vector<std::byte>& out) -> bool {
   HANDLE token = nullptr;
   if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
     return false;
@@ -68,10 +57,61 @@ using Microsoft::WRL::ComPtr;
     return false;
   }
   if (size == 0) return false;
-  std::vector<std::byte> user_bytes(size);
-  if (!::GetTokenInformation(token, TokenUser, user_bytes.data(), size, &size)) {
+  out.assign(size, std::byte{});
+  return ::GetTokenInformation(token, TokenUser, out.data(), size, &size) != 0;
+}
+
+// Security attributes that name this process's user as the owner of the
+// file CreateFileW creates. The owner must be set explicitly rather than
+// left to the token default: a security descriptor without an owner takes
+// the creating token's default owner (TokenOwner), which is not always
+// the token user -- an elevated process, including the CI runners, gets the
+// Administrators group -- and the strict owner check below would then
+// reject the file this sink itself just created. Naming the owner to one's
+// own token-user SID is always permitted and needs no privilege; the
+// pairing store does the same (pairing_store_fs.cpp,
+// build_owner_only_security). Only the owner is named; the DACL is left
+// to inheritance, as before.
+struct OwnerAtCreation {
+  SECURITY_DESCRIPTOR descriptor{};
+  std::vector<std::byte> sid_bytes;
+  SECURITY_ATTRIBUTES attributes{};
+
+  OwnerAtCreation() = default;
+  OwnerAtCreation(const OwnerAtCreation&) = delete;
+  OwnerAtCreation& operator=(const OwnerAtCreation&) = delete;
+  OwnerAtCreation(OwnerAtCreation&&) = delete;
+  OwnerAtCreation& operator=(OwnerAtCreation&&) = delete;
+};
+
+[[nodiscard]] auto build_owner_at_creation(OwnerAtCreation& out) -> bool {
+  if (!current_user_sid(out.sid_bytes)) return false;
+  const auto* const user = reinterpret_cast<const TOKEN_USER*>(out.sid_bytes.data());
+  if (user->User.Sid == nullptr) return false;
+  if (!::InitializeSecurityDescriptor(&out.descriptor, SECURITY_DESCRIPTOR_REVISION)) {
     return false;
   }
+  if (!::SetSecurityDescriptorOwner(&out.descriptor, user->User.Sid, FALSE)) return false;
+  out.attributes.nLength = sizeof(out.attributes);
+  out.attributes.lpSecurityDescriptor = &out.descriptor;
+  out.attributes.bInheritHandle = FALSE;
+  return true;
+}
+
+[[nodiscard]] auto file_owner_is_current_user(HANDLE file) -> bool {
+  PSID owner = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (::GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
+                        nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+    return false;
+  }
+  struct DescriptorGuard {
+    PSECURITY_DESCRIPTOR descriptor;
+    ~DescriptorGuard() { ::LocalFree(descriptor); }
+  } const descriptor_guard{descriptor};
+
+  std::vector<std::byte> user_bytes;
+  if (!current_user_sid(user_bytes)) return false;
   const auto* const user = reinterpret_cast<const TOKEN_USER*>(user_bytes.data());
   return owner != nullptr && user->User.Sid != nullptr &&
          ::EqualSid(owner, user->User.Sid) != FALSE;
@@ -151,11 +191,17 @@ struct MfCameraSink::Impl {
     const std::size_t ring_bytes = frame_ring_bytes();
     // DELETE is requested up front: the by-handle POSIX delete in close_shm
     // needs it, and GENERIC_READ | GENERIC_WRITE alone does not include it.
+    // The creation names this process's user as the file's owner so the
+    // strict owner check below accepts the file this sink itself creates
+    // even under an elevated token, whose default owner is the
+    // Administrators group.
+    OwnerAtCreation owner_at_creation;
+    const bool owner_named = build_owner_at_creation(owner_at_creation);
     shm_file = ::CreateFileW(
         resolved_shm_path.c_str(),
         GENERIC_READ | GENERIC_WRITE | DELETE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
+        owner_named ? &owner_at_creation.attributes : nullptr,
         OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
@@ -192,12 +238,19 @@ struct MfCameraSink::Impl {
     }
 
     // Keep a second sink from truncating, publishing into, or scrubbing
-    // this writer's mapping. Readers do not take this advisory writer lock;
-    // byte-range locks do not affect mapped views, only another writer's
-    // LockFileEx on the same range.
+    // this writer's mapping. A byte-range lock does not affect mapped
+    // views -- consumer mappings of the ring are untouched -- so this
+    // writer-exclusion sentinel is safe wherever it sits; only another
+    // writer's LockFileEx on an overlapping range conflicts. The range
+    // starts at 1 GiB, far past the ring-sized file and overlapping the
+    // whole-file range [0, 0x7FFFFFFF) this port's earlier builds took,
+    // so a mixed-version second writer still conflicts with this one.
+    // Locking beyond the end of the file is legal (the Windows lock tests
+    // in Wine's suite, run against real Windows, lock ranges past EOF).
     OVERLAPPED lock_range{};
+    lock_range.Offset = 0x40000000;
     if (!::LockFileEx(shm_file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
-                      0x7FFFFFFF, 0, &lock_range)) {
+                      0x10000, 0, &lock_range)) {
       reject_shm_file();
       return;
     }
