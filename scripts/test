@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Runs the repository's own device-free test suites: the full native ctest
+# suite and the JavaScript unit tests, the same core checks the CI matrix
+# runs on every product commit (the Linux and macOS legs' "Run native tests"
+# plus "Run JavaScript unit tests" steps). Exits nonzero on any failure.
+#
+# The native suites build into a temporary directory under $TMPDIR so the
+# checkout stays clean. Build dependencies (cmake >= 3.21, a C++20 compiler,
+# libuv and OpenSSL headers) are installed from the platform package manager
+# when missing and the privileges for it are available; otherwise the script
+# fails with a message naming the missing requirement rather than skipping.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+# Prefer a system temporary directory; never build inside the checkout.
+tmp_base=${TMPDIR:-/tmp}
+build_dir=$(mktemp -d "$tmp_base/sync-scripts-test.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT
+
+missing_dependencies() {
+  local missing=()
+  command -v cmake >/dev/null 2>&1 || missing+=(cmake)
+  if command -v pkg-config >/dev/null 2>&1; then
+    pkg-config --exists libuv || missing+=(libuv-dev)
+    pkg-config --exists openssl || missing+=(openssl-dev)
+  else
+    missing+=(pkg-config)
+  fi
+  ((${#missing[@]} == 0)) || printf '%s ' "${missing[@]}"
+}
+
+deps=$(missing_dependencies)
+if [[ -n "$deps" ]]; then
+  echo "scripts/test: installing missing build dependencies:$deps" >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo=""
+    [[ $(id -u) -eq 0 ]] || sudo="sudo"
+    $sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      --no-install-recommends build-essential cmake ninja-build pkg-config \
+      libssl-dev libuv1-dev || {
+      echo "scripts/test: could not install:$deps" >&2
+      exit 1
+    }
+  else
+    echo "scripts/test: no apt-get to install:$deps" >&2
+    exit 1
+  fi
+fi
+
+deps=$(missing_dependencies)
+if [[ -n "$deps" ]]; then
+  echo "scripts/test: build dependencies still missing after install:$deps" >&2
+  exit 1
+fi
+
+generator_args=()
+if command -v ninja >/dev/null 2>&1; then
+  generator_args=(-G Ninja)
+fi
+
+echo "scripts/test: configuring native build in $build_dir" >&2
+cmake -S "$root" -B "$build_dir" "${generator_args[@]}" -DCMAKE_BUILD_TYPE=Debug
+
+# Cap the build parallelism so a large host does not exhaust memory.
+parallel=$(nproc 2>/dev/null || echo 2)
+((parallel > 4)) && parallel=4
+echo "scripts/test: building native tests (-j$parallel)" >&2
+cmake --build "$build_dir" --parallel "$parallel"
+
+echo "scripts/test: running native ctest suite" >&2
+ctest --test-dir "$build_dir" --output-on-failure
+
+echo "scripts/test: running JavaScript unit tests" >&2
+npm run --prefix "$root" test:unit
+
+echo "scripts/test: all suites passed" >&2

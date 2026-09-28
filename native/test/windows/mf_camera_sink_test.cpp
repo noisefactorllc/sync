@@ -347,6 +347,115 @@ SYNC_TEST(a_sink_creates_and_maps_windows_shm_ring_file) {
   SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
 }
 
+// A second sink opening an occupied shared-frame file must read as having
+// no capacity of its own rather than truncating, re-initializing, and
+// publishing into the first writer's mapping -- and neither its lifetime
+// nor its close may scrub or unlink the first writer's ring. Mirrors the
+// macOS CMIO and Linux camera sink second-writer regressions.
+SYNC_TEST(a_second_sink_cannot_take_an_occupied_shm_ring) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  MfCameraSink sink(opts);
+  ShmMapping shm(shm_file);
+  SYNC_REQUIRE(shm.view != nullptr);
+  FrameRingReader reader(shm.span());
+  reader.record_demand(now_us());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x44), 4001)) == CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+  {
+    // A second sink exists over the same pathname while the first writer
+    // holds the ring. Its capacity is not asserted directly: submit()'s
+    // return for a mapping-less sink differs by Windows build, and
+    // has_capacity() is demand-ambiguous under the pre-change code (the
+    // second writer would adopt the first writer's stamped ring, whose
+    // demand state the test cannot control from outside). The second
+    // sink's failure to take the ring is asserted by what must survive
+    // both its construction and its close, below.
+    MfCameraSink second(opts);
+    (void)second;
+  }
+
+  // The second sink is gone; the first writer's ring is untouched: the
+  // frame is still readable and the file still exists at the pathname.
+  SYNC_REQUIRE(reader.valid());
+  std::vector<std::byte> out(kFrameRingSlotBytes);
+  std::uint64_t pres = 0;
+  SYNC_REQUIRE(reader.read(out, kStride, pres));
+  SYNC_REQUIRE(pres == 4001);
+  SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x44);
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) != INVALID_FILE_ATTRIBUTES);
+
+  // And the first writer keeps publishing after the second is gone.
+  reader.record_demand(now_us());
+  SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x66), 4003)) == CameraSinkSubmit::Accepted);
+  SYNC_REQUIRE(reader.newest_sequence() == 2);
+}
+
+// A regular file that replaced the pathname while this writer was mapped
+// belongs to somebody else: closing the sink must unlink its own file, not
+// the replacement. Mirrors the macOS CMIO and Linux replacement-preserved
+// regressions.
+SYNC_TEST(a_replacement_at_the_shm_path_survives_close) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  const std::wstring moved = shm_file + L".moved";
+  const char payload[] = "replacement";
+  const DWORD payload_bytes = static_cast<DWORD>(sizeof(payload));
+
+  {
+    MfCameraSink sink(opts);
+    ShmMapping shm(shm_file);
+    SYNC_REQUIRE(shm.view != nullptr);
+    FrameRingReader reader(shm.span());
+    reader.record_demand(now_us());
+    SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x77), 5001)) == CameraSinkSubmit::Accepted);
+    SYNC_REQUIRE(reader.newest_sequence() == 1);
+
+    // The pathname is reclaimed underneath the writer: its file moves away
+    // and a fresh regular file takes its place.
+    SYNC_REQUIRE(::MoveFileW(shm_file.c_str(), moved.c_str()) != 0);
+    const HANDLE replacement =
+        ::CreateFileW(shm_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    SYNC_REQUIRE(replacement != INVALID_HANDLE_VALUE);
+    DWORD written = 0;
+    SYNC_REQUIRE(::WriteFile(replacement, payload, payload_bytes, &written, nullptr) != 0);
+    SYNC_REQUIRE(written == payload_bytes);
+    SYNC_REQUIRE(::CloseHandle(replacement) != 0);
+  }
+
+  // The sink closed without unlinking the replacement: it is still there,
+  // and still holds what its writer put in it.
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) != INVALID_FILE_ATTRIBUTES);
+  const HANDLE reopened = ::CreateFileW(shm_file.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  SYNC_REQUIRE(reopened != INVALID_HANDLE_VALUE);
+  char got[16]{};
+  DWORD read_back = 0;
+  SYNC_REQUIRE(::ReadFile(reopened, got, payload_bytes, &read_back, nullptr) != 0);
+  SYNC_REQUIRE(read_back == payload_bytes);
+  SYNC_REQUIRE(std::equal(payload, payload + payload_bytes, got));
+  ::CloseHandle(reopened);
+
+  // The writer's own renamed file is ordinary leftover state, not this
+  // test's subject; clean both up.
+  ::DeleteFileW(moved.c_str());
+  ::DeleteFileW(shm_file.c_str());
+}
+
 SYNC_TEST(a_sink_supports_zero_copy_direct_writer_on_shm_ring) {
   const std::wstring shm_file = test_temp_path();
   MfCameraSink::Options opts;

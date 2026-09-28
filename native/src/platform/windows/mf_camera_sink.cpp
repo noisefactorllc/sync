@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
 #include <mfapi.h>
 #include <mfvirtualcamera.h>
 #include <winternl.h>
@@ -9,6 +10,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <sync/camera/frame_ring.hpp>
 #include <sync/platform/camera_identity.hpp>
@@ -32,6 +34,47 @@ using Microsoft::WRL::ComPtr;
   }
   ::RegCloseKey(handle);
   return true;
+}
+
+// The Windows half of the regular-file and owner validation the macOS CMIO
+// and POSIX sinks perform on an existing shared-frame file: the object at
+// the pathname must be a plain file owned by this process's user. A reparse
+// point here is a symlink or junction substituted for the ring, so it is
+// not opened; a file another user planted is not taken either.
+[[nodiscard]] auto file_owner_is_current_user(HANDLE file) -> bool {
+  PSID owner = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (::GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
+                        nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+    return false;
+  }
+  struct DescriptorGuard {
+    PSECURITY_DESCRIPTOR descriptor;
+    ~DescriptorGuard() { ::LocalFree(descriptor); }
+  } const descriptor_guard{descriptor};
+
+  HANDLE token = nullptr;
+  if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    return false;
+  }
+  struct TokenGuard {
+    HANDLE token;
+    ~TokenGuard() { ::CloseHandle(token); }
+  } const token_guard{token};
+
+  DWORD size = 0;
+  if (!::GetTokenInformation(token, TokenUser, nullptr, 0, &size) &&
+      ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    return false;
+  }
+  if (size == 0) return false;
+  std::vector<std::byte> user_bytes(size);
+  if (!::GetTokenInformation(token, TokenUser, user_bytes.data(), size, &size)) {
+    return false;
+  }
+  const auto* const user = reinterpret_cast<const TOKEN_USER*>(user_bytes.data());
+  return owner != nullptr && user->User.Sid != nullptr &&
+         ::EqualSid(owner, user->User.Sid) != FALSE;
 }
 
 }  // namespace
@@ -112,11 +155,48 @@ struct MfCameraSink::Impl {
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     if (shm_file == INVALID_HANDLE_VALUE) {
       shm_file = nullptr;
       resolved_shm_path.clear();
+      return;
+    }
+
+    const auto reject_shm_file = [this]() noexcept {
+      if (shm_file != nullptr) {
+        ::CloseHandle(shm_file);
+        shm_file = nullptr;
+      }
+      resolved_shm_path.clear();
+    };
+
+    // Existing-object validation. FILE_FLAG_OPEN_REPARSE_POINT makes the
+    // open itself non-traversing: for an existing symlink at the pathname
+    // the handle is the link, never its target (and a dangling link is not
+    // resolved by the OPEN_ALWAYS creation), so the attribute check below
+    // can and does see the reparse bit. A non-disk object or a file owned
+    // by another user is not taken either.
+    if (::GetFileType(shm_file) != FILE_TYPE_DISK) {
+      reject_shm_file();
+      return;
+    }
+    BY_HANDLE_FILE_INFORMATION shm_info{};
+    if (::GetFileInformationByHandle(shm_file, &shm_info) == 0 ||
+        (shm_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        !file_owner_is_current_user(shm_file)) {
+      reject_shm_file();
+      return;
+    }
+
+    // Keep a second sink from truncating, publishing into, or scrubbing
+    // this writer's mapping. Readers do not take this advisory writer lock;
+    // byte-range locks do not affect mapped views, only another writer's
+    // LockFileEx on the same range.
+    OVERLAPPED lock_range{};
+    if (!::LockFileEx(shm_file, LOCKFILE_EXCLUSIVE | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                      0x7FFFFFFF, 0, &lock_range)) {
+      reject_shm_file();
       return;
     }
 
@@ -181,13 +261,30 @@ struct MfCameraSink::Impl {
       shm_mapping = nullptr;
     }
     if (shm_file != nullptr) {
+      // A replacement at the pathname belongs to somebody else. Check the
+      // open file's identity and keep its writer lock through unlinking.
+      if (!resolved_shm_path.empty()) {
+        BY_HANDLE_FILE_INFORMATION opened{}, named{};
+        const HANDLE named_handle = ::CreateFileW(
+            resolved_shm_path.c_str(), 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        if (named_handle != INVALID_HANDLE_VALUE) {
+          if (::GetFileInformationByHandle(named_handle, &named) != 0 &&
+              ::GetFileInformationByHandle(shm_file, &opened) != 0 &&
+              opened.dwVolumeSerialNumber == named.dwVolumeSerialNumber &&
+              opened.nFileIndexLow == named.nFileIndexLow &&
+              opened.nFileIndexHigh == named.nFileIndexHigh) {
+            ::DeleteFileW(resolved_shm_path.c_str());
+          }
+          ::CloseHandle(named_handle);
+        }
+      }
       ::CloseHandle(shm_file);
       shm_file = nullptr;
     }
-    if (!resolved_shm_path.empty()) {
-      ::DeleteFileW(resolved_shm_path.c_str());
-      resolved_shm_path.clear();
-    }
+    resolved_shm_path.clear();
   }
 
   void close_section() {
