@@ -96,6 +96,13 @@ int main() {
       std::cout << "PASS " << test.name << '\n';
     } catch (const std::exception& error) {
       ++failures;
+      // A GitHub workflow command in addition to the plain line:
+      // `ctest --output-on-failure` forwards the failing test's stdout
+      // into the step log, and the workflow command processor turns it
+      // into a check-run annotation. That is the one channel of CI output
+      // readable without log access, so a failing Windows test names
+      // itself with its file and line instead of dying nameless.
+      std::cout << "::error title=TEST " << test.name << "::" << error.what() << '\n';
       std::cerr << "FAIL " << test.name << ": " << error.what() << '\n';
     }
   }

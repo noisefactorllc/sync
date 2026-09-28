@@ -149,9 +149,11 @@ struct MfCameraSink::Impl {
     if (resolved_shm_path.empty()) return;
 
     const std::size_t ring_bytes = frame_ring_bytes();
+    // DELETE is requested up front: the by-handle POSIX delete in close_shm
+    // needs it, and GENERIC_READ | GENERIC_WRITE alone does not include it.
     shm_file = ::CreateFileW(
         resolved_shm_path.c_str(),
-        GENERIC_READ | GENERIC_WRITE,
+        GENERIC_READ | GENERIC_WRITE | DELETE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_ALWAYS,
@@ -261,24 +263,55 @@ struct MfCameraSink::Impl {
       shm_mapping = nullptr;
     }
     if (shm_file != nullptr) {
-      // A replacement at the pathname belongs to somebody else. Check the
-      // open file's identity and keep its writer lock through unlinking.
-      if (!resolved_shm_path.empty()) {
-        BY_HANDLE_FILE_INFORMATION opened{}, named{};
-        const HANDLE named_handle = ::CreateFileW(
-            resolved_shm_path.c_str(), 0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            nullptr);
-        if (named_handle != INVALID_HANDLE_VALUE) {
-          if (::GetFileInformationByHandle(named_handle, &named) != 0 &&
-              ::GetFileInformationByHandle(shm_file, &opened) != 0 &&
-              opened.dwVolumeSerialNumber == named.dwVolumeSerialNumber &&
-              opened.nFileIndexLow == named.nFileIndexLow &&
-              opened.nFileIndexHigh == named.nFileIndexHigh) {
-            ::DeleteFileW(resolved_shm_path.c_str());
+      // Unlink this writer's own file, exactly. The preferred form is the
+      // by-handle POSIX delete: it removes the name this handle refers to
+      // immediately, while the writer lock is still held, so a replacement
+      // regular file -- or anything else -- at the pathname is never
+      // touched, and no second writer can slip in between releasing the
+      // lock and the unlink. The struct (a single DWORD of
+      // FILE_DISPOSITION_FLAG_* bits) and the FileDispositionInfoEx class
+      // (21) are declared inline because their appearance in the SDK
+      // headers is version-gated; the layout is the documented one, and
+      // the handle was opened with DELETE access, which the by-handle
+      // delete requires and GENERIC_READ | GENERIC_WRITE do not grant.
+      struct DeleteInfoEx {
+        DWORD flags;
+      } delete_info{};
+      // The documented FILE_DISPOSITION_FLAG_* constants, not hand-picked
+      // literals: the flag bits have near neighbors (0x4 forces an image
+      // section check; the read-only bypass is a higher bit), and mislaid
+      // values here silently request a different operation.
+      delete_info.flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+      constexpr auto kFileDispositionInfoEx = static_cast<FILE_INFO_BY_HANDLE_CLASS>(21);
+      if (::SetFileInformationByHandle(shm_file, kFileDispositionInfoEx, &delete_info,
+                                       sizeof(delete_info)) == 0) {
+        // Fallback for systems without the POSIX delete: unlink by name,
+        // still holding the writer lock, and only while a non-traversing
+        // probe shows the pathname still refers to the open file. A
+        // replacement at the pathname belongs to somebody else and must
+        // survive either way. The lock is never released before the unlink:
+        // a second writer that re-initializes the file after an early
+        // unlock would then have its pathname deleted under it. Nothing in
+        // the consulted semantics (the Windows disposition path checks
+        // read-only, image mappings and directory emptiness, not
+        // byte-range locks) says the lock must be released to delete.
+        if (!resolved_shm_path.empty()) {
+          BY_HANDLE_FILE_INFORMATION opened{}, named{};
+          const HANDLE named_handle =
+              ::CreateFileW(resolved_shm_path.c_str(), 0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+          if (named_handle != INVALID_HANDLE_VALUE) {
+            if (::GetFileInformationByHandle(named_handle, &named) != 0 &&
+                ::GetFileInformationByHandle(shm_file, &opened) != 0 &&
+                opened.dwVolumeSerialNumber == named.dwVolumeSerialNumber &&
+                opened.nFileIndexLow == named.nFileIndexLow &&
+                opened.nFileIndexHigh == named.nFileIndexHigh) {
+              ::DeleteFileW(resolved_shm_path.c_str());
+            }
+            ::CloseHandle(named_handle);
           }
-          ::CloseHandle(named_handle);
         }
       }
       ::CloseHandle(shm_file);
