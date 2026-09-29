@@ -178,7 +178,13 @@ public:
 #pragma warning(pop)
 #endif
       if (!gate) throw std::runtime_error("Missing test gate");
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      // Hang protection only: the first blocked open waits for the whole
+      // client-setup loop before the test releases the gate, and that loop
+      // opens 143 controls on the same runner. 10 s was marginal on loaded
+      // hosted runners (the drain of those opens missed a fixed 10 s window
+      // in ci.yml run 36565961295); 45 s bounds the wait without ever
+      // short-circuiting a legitimately slow setup.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
       while (!std::filesystem::exists(gate)) {
         if (std::chrono::steady_clock::now() >= deadline)
           throw std::runtime_error("Audio test gate timed out");

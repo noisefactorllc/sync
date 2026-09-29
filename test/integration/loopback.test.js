@@ -1104,13 +1104,35 @@ test("native audio retains bounded connection slots until blocked cleanup comple
       excess = await upgrade({ port: daemon.ready.port, route: "/control", origin: "http://127.0.0.1:8000" });
     }, "disconnected pending audio owners still occupy the bounded slots");
     await writeFile(gate, "release");
-    const deadline = Date.now() + 10_000;
+    // 143 blocked opens each poll the gate file every 5 ms on their own audio
+    // worker thread, so the drain rate is bounded by the runner's core count:
+    // a fixed 10 s window was marginal on hosted runners (Windows Release
+    // failed this step in ci.yml run 36565961295 on code identical here to the
+    // CI-green 32ce32a, and the same drain misses 10 s deterministically on a
+    // loaded 6-core container at both SHAs). The assertions below stay strict;
+    // only the observation window grows. 30 s still fits the 60 s test
+    // timeout with the fast setup loop.
+    const deadline = Date.now() + 30_000;
     let status;
+    let drained = false;
     do {
       observer.client.sendJson({ type: "listAudioSources" });
-      status = (await observer.client.nextJson("draining audio owners", 10_000)).sources;
-    } while ((status.find(source => source.id === "audio_blocked_completed")?.name !== "143" ||
-              status.find(source => source.id === "audio_active")?.name !== "0") && Date.now() < deadline);
+      const listed = await observer.client.nextJson("draining audio owners", 10_000);
+      // While blocked opens still occupy every audio worker, the server can
+      // only answer audio_busy or audio_unavailable -- the same bounded slots
+      // this drain is waiting on, so poll past the refusals. Pace the polling
+      // like the cleanup loop above: an unpaced loop floods the audio path at
+      // round-trip rate and competes with the 143 completion round-trips the
+      // drain itself needs, which is what made this test marginal on loaded
+      // runners (ci.yml run 36565961295 failed this step on code identical
+      // here to the CI-green 32ce32a). The final state below stays strictly
+      // asserted.
+      if (listed.type === "audioSources") status = listed.sources;
+      drained = status?.find(source => source.id === "audio_blocked_completed")?.name === "143" &&
+                status?.find(source => source.id === "audio_active")?.name === "0";
+      if (!drained) await new Promise((resolve) => setTimeout(resolve, 5));
+    } while (!drained && Date.now() < deadline);
+    assert.ok(Array.isArray(status), "the drain must end with an audio source list");
     assert.equal(status.find(source => source.id === "audio_blocked_completed")?.name, "143");
     assert.equal(status.find(source => source.id === "audio_active")?.name, "0");
     assert.equal(status.find(source => source.id === "audio_wrong_thread_closes")?.name, "0");
