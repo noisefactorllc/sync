@@ -15,6 +15,7 @@ namespace {
 using noisefactor::sync::camera::FrameRingHeader;
 using noisefactor::sync::camera::FrameRingReader;
 using noisefactor::sync::camera::FrameRingWriter;
+using noisefactor::sync::camera::camera_clock_us;
 using noisefactor::sync::camera::frame_ring_bytes;
 using noisefactor::sync::camera::kBytesPerPixel;
 using noisefactor::sync::camera::kCanvas;
@@ -330,29 +331,53 @@ SYNC_TEST(demand_multiplexing_staggered_lifetimes) {
 SYNC_TEST(an_adopted_previous_epoch_heartbeat_cannot_reject_fresh_demand) {
   std::vector<std::byte> mapping(frame_ring_bytes());
   // A previous epoch's reader heartbeats, then the machine reboots: the
-  // mapping outlives the reboot while steady_clock/QPC restarts near zero.
+  // mapping outlives the reboot while the machine-wide steady_clock/QPC
+  // restarts near zero. Model the old epoch as a stamp far ahead of the
+  // current clock, which is what a longer previous uptime leaves behind.
   FrameRingWriter old_writer(mapping);
   FrameRingReader old_reader(mapping);
-  constexpr std::uint64_t kOldEpochNow = 90'000'000'000;  // ~25h of uptime
-  old_reader.record_demand(kOldEpochNow);
-  SYNC_REQUIRE(old_writer.has_demand(kOldEpochNow));
+  const std::uint64_t now = camera_clock_us();
+  constexpr std::uint64_t kPreviousEpochLead = 10 * kFrameRingDemandTimeoutUs;
+  old_reader.record_demand(now + kPreviousEpochLead);
+  SYNC_REQUIRE(old_writer.has_demand(now + kPreviousEpochLead));
 
-  // The new epoch's writer adopts the stamped ring as it is.
+  // The new epoch's writer adopts the stamped ring as it is. The fresh clock
+  // is far behind the adopted stamp, so the old heartbeat reads stale.
   FrameRingWriter new_writer(mapping);
   SYNC_REQUIRE(new_writer.valid());
-  SYNC_REQUIRE(new_writer.has_demand(kOldEpochNow + kFrameRingDemandTimeoutUs - 1));
-
-  // Fresh clock far behind the adopted stamp: the old heartbeat reads stale.
-  constexpr std::uint64_t kNewEpochNow = 5'000'000;  // seconds after reboot
-  SYNC_REQUIRE(!new_writer.has_demand(kNewEpochNow));
+  SYNC_REQUIRE(!new_writer.has_demand(now));
 
   // A live consumer heartbeats. That one heartbeat must publish fresh demand,
   // so recovery is bounded instead of rejected for the life of the mapping.
   FrameRingReader new_reader(mapping);
-  new_reader.record_demand(kNewEpochNow);
-  SYNC_REQUIRE(new_writer.has_demand(kNewEpochNow));
+  new_reader.record_demand(now);
+  SYNC_REQUIRE(new_writer.has_demand(now));
   // And the replaced heartbeat expires normally afterwards.
-  SYNC_REQUIRE(!new_writer.has_demand(kNewEpochNow + kFrameRingDemandTimeoutUs + 1));
+  SYNC_REQUIRE(!new_writer.has_demand(now + kFrameRingDemandTimeoutUs + 1));
+}
+
+SYNC_TEST(a_stale_same_epoch_reader_cannot_regress_live_demand) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  FrameRingReader live_reader(mapping);
+  FrameRingReader stale_reader(mapping);
+  const std::uint64_t now = camera_clock_us();
+
+  // A live consumer heartbeats now.
+  live_reader.record_demand(now);
+  SYNC_REQUIRE(writer.has_demand(now));
+
+  // Another reader sampled the clock two timeouts ago and was descheduled
+  // past the live heartbeat before arriving (media_source.cpp samples
+  // camera_clock_us() before the call). The previous-epoch repair must not
+  // let that old sample overwrite the live demand: a caller whose own
+  // sample is no longer fresh leaves the stamp untouched.
+  const std::uint64_t stale_sample = now - 2 * kFrameRingDemandTimeoutUs;
+  stale_reader.record_demand(stale_sample);
+  const auto* header = reinterpret_cast<const FrameRingHeader*>(mapping.data());
+  SYNC_REQUIRE(header->last_demand_us.load(std::memory_order_acquire) == now);
+  SYNC_REQUIRE(writer.has_demand(now));
+  SYNC_REQUIRE(!writer.has_demand(now + kFrameRingDemandTimeoutUs + 1));
 }
 
 }  // namespace

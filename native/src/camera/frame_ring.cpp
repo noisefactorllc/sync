@@ -141,18 +141,36 @@ void FrameRingReader::record_demand(std::uint64_t now_us) noexcept {
   while (current < now_us && !demand.compare_exchange_weak(
              current, now_us, std::memory_order_release, std::memory_order_relaxed)) {
   }
-  // A stamp dated ahead of this clock by more than the tolerated skew cannot
-  // come from a concurrent reader -- every reader in this epoch shares the
-  // machine-wide steady_clock/QPC domain, and has_demand already refuses to
-  // read such a stamp as demand. It is a previous epoch's heartbeat: the
-  // mapping outlived a reboot while the clock restarted near zero, and the
-  // forward-only loop above can never pass it, so a live consumer's demand
-  // would be rejected for the life of the mapping. Replace it, so recovery
-  // costs one heartbeat; a repair here can only race other fresh stamps.
-  while (current > now_us && (current - now_us) > kFrameRingDemandTimeoutUs) {
-    if (demand.compare_exchange_weak(current, now_us, std::memory_order_release,
-                                     std::memory_order_relaxed)) {
-      break;
+  // A stamp dated ahead of this caller's clock by more than the tolerated
+  // skew cannot come from a concurrent same-epoch reader -- every reader
+  // samples the same machine-wide steady_clock/QPC domain just before it
+  // arrives here (media_source.cpp samples camera_clock_us() before the
+  // call), so two live samples never differ by a whole timeout. It is
+  // either a previous epoch's heartbeat (the mapping outlived a reboot
+  // while the clock restarted near zero) or a caller that was descheduled
+  // for more than the timeout between sampling the clock and arriving.
+  // Only the first may repair the stamp: re-sample the clock and require
+  // the caller's own sample to still be fresh. A stale caller leaves the
+  // stamp untouched -- its demand is genuinely old, and the next fresh
+  // heartbeat, one frame period at 60 fps, is the bounded recovery.
+  if (current > now_us && (current - now_us) > kFrameRingDemandTimeoutUs) {
+    const std::uint64_t fresh_us = camera_clock_us();
+    const bool caller_is_stale =
+        fresh_us > now_us && (fresh_us - now_us) > kFrameRingDemandTimeoutUs;
+    if (!caller_is_stale) {
+      while (current > now_us && (current - now_us) > kFrameRingDemandTimeoutUs) {
+        // Abandon the repair if the caller's sample goes stale while waiting
+        // on the CAS: writing it then would regress whatever newer stamp a
+        // live reader published in the meantime.
+        const std::uint64_t check_us = camera_clock_us();
+        if (check_us > now_us && (check_us - now_us) > kFrameRingDemandTimeoutUs) {
+          break;
+        }
+        if (demand.compare_exchange_weak(current, now_us, std::memory_order_release,
+                                         std::memory_order_relaxed)) {
+          break;
+        }
+      }
     }
   }
 }
