@@ -73,6 +73,19 @@ SYNC_TEST(update_busy_transition_invalidates_uncommitted_idle_proof) {
   SYNC_REQUIRE(!c.reserve(digest, 120001));
   SYNC_REQUIRE(c.reserve(digest, 120002).has_value());
 }
+SYNC_TEST(update_older_reading_from_another_thread_is_ordered_not_refused) {
+  // The control service can observe a later reading before the daemon loop
+  // takes the mutex with an earlier one. That must not refuse a browser or
+  // drop the idle proof for the rest of the daemon's life.
+  Coordinator c; c.set_external_state(true, 0);
+  SYNC_REQUIRE(c.ready(60001));
+  SYNC_REQUIRE(c.begin_activity(60000));
+  c.end_activity(60000);
+  SYNC_REQUIRE(!c.ready(60001));
+  SYNC_REQUIRE(!c.reserve(digest, 120000));
+  SYNC_REQUIRE(c.ready(120001));
+  SYNC_REQUIRE(c.reserve(digest, 120001).has_value());
+}
 SYNC_TEST(update_readiness_probe_never_reserves_or_delays_admission) {
   Coordinator c;
   SYNC_REQUIRE(!c.ready(0));

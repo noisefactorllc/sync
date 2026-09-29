@@ -27,7 +27,7 @@ class Coordinator final {
   [[nodiscard]] bool cancel(std::uint64_t token, std::uint64_t now_ms);
   [[nodiscard]] bool reserved() const;
  private:
-  bool observe_clock(std::uint64_t now_ms);
+  std::uint64_t observe_clock(std::uint64_t now_ms);
   void expire(std::uint64_t now_ms);
   mutable std::mutex mutex_;
   std::uint64_t latest_ms_ = 0;

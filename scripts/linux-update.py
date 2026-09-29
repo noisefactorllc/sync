@@ -332,6 +332,20 @@ class Maintenance:
             if response != {'version':1,'type':'update','status':'idle'}:
                 raise Deferred('download deferred: active or unknown daemon workload')
 
+    @staticmethod
+    def usable_providers(response):
+        providers = response.get('providers')
+        if response.get('version') != 1 or response.get('type') != 'status' or not isinstance(providers,list):
+            raise Deferred('invalid daemon status')
+        return sorted({provider['id'] for provider in providers
+                       if isinstance(provider,dict) and type(provider.get('id')) is str and
+                       provider.get('selected') is True and provider.get('available') is True and
+                       provider.get('healthy') is True})
+
+    def provider_baseline(self, uid, pid):
+        with self.control_request(uid,pid,{'version':1,'command':'update-status'}) as (_,response):
+            return self.usable_providers(response)
+
     @contextlib.contextmanager
     def reservation(self, uid, pid, digest):
         generation = time.monotonic_ns()
@@ -415,32 +429,30 @@ class Maintenance:
                 raise Deferred('exclusive installation lock is not held by maintenance')
             finally: os.close(descriptor)
 
-    def stage_activation(self, users, version):
+    def stage_activation(self, users, version, usable):
         if users:
-            self.write(ACTIVATION,json.dumps({'schema':1,'version':version,
-                'pending':sorted(set(users)),'errors':{}})+'\n')
+            pending=sorted(set(users))
+            self.write(ACTIVATION,json.dumps({'schema':1,'version':version,'pending':pending,'errors':{},
+                'expected':{str(uid):usable[uid] for uid in pending}})+'\n')
 
-    def activation_ready(self, uid, version):
+    def activation_ready(self, uid, version, expected):
         fields=dict(line.split('=',1) for line in self.service(uid,
             ['show','--property=MainPID','--property=ActiveState']).splitlines() if '=' in line)
         if fields.get('ActiveState') != 'active' or not fields.get('MainPID','').isdigit(): return False
         pid=int(fields['MainPID'])
         if pid <= 0 or self.instances().get(pid) != uid: return False
         with self.control_request(uid,pid,{'version':1,'command':'update-status'}) as (_,response):
-            if (response.get('version') != 1 or response.get('type') != 'status' or
-                    response.get('runningVersion') != version): return False
-            providers=response.get('providers')
-            if not isinstance(providers,list) or not providers: return False
-            return all(isinstance(provider,dict) and provider.get('selected') is not None and
-                       (provider['selected'] is False or
-                        (provider.get('available') is True and provider.get('healthy') is True))
-                       for provider in providers)
+            if response.get('runningVersion') != version: return False
+            # Restore what the daemon could do before maintenance. A selected
+            # provider that was already unusable, such as NDI without its
+            # runtime, must not hold this and every later update pending.
+            return set(expected) <= set(self.usable_providers(response))
 
-    def wait_activation(self, uid, version, timeout=60):
+    def wait_activation(self, uid, version, expected, timeout=60):
         deadline=time.monotonic()+timeout
         consecutive=0
         while time.monotonic() < deadline:
-            try: ready=self.activation_ready(uid,version)
+            try: ready=self.activation_ready(uid,version,expected)
             except (Deferred,OSError,ValueError): ready=False
             consecutive=consecutive+1 if ready else 0
             if consecutive >= 3: return
@@ -450,16 +462,20 @@ class Maintenance:
     def restart_pending(self):
         if not self.path(ACTIVATION).exists(): return
         state=json.loads(self.trusted(ACTIVATION).read_text())
-        if (not isinstance(state,dict) or set(state) != {'schema','version','pending','errors'} or
+        if (not isinstance(state,dict) or set(state) != {'schema','version','pending','errors','expected'} or
                 state['schema'] != 1 or not VERSION.fullmatch(state['version']) or
-                not isinstance(state['pending'],list) or
-                any(type(uid) is not int or uid <= 0 or uid >= 2**32-1 for uid in state['pending'])):
+                not isinstance(state['pending'],list) or not isinstance(state['errors'],dict) or
+                any(type(uid) is not int or uid <= 0 or uid >= 2**32-1 for uid in state['pending']) or
+                not isinstance(state['expected'],dict) or
+                any(not isinstance(state['expected'].get(str(uid)),list) or
+                    any(type(name) is not str for name in state['expected'][str(uid)])
+                    for uid in state['pending'])):
             raise Deferred('invalid activation record')
         for uid in tuple(state['pending']):
             try:
                 self.service(uid,['daemon-reload'])
                 self.service(uid,['start'])
-                self.wait_activation(uid,state['version'])
+                self.wait_activation(uid,state['version'],state['expected'][str(uid)])
                 state['pending'].remove(uid)
                 state['errors'].pop(str(uid),None)
             except (Deferred,OSError) as error:
@@ -520,6 +536,7 @@ class Maintenance:
             if fresh_digest != digest: raise Deferred('same-version candidate bytes changed')
             self.check_host_maintenance()
             download_idle()
+            usable = {uid:self.provider_baseline(uid,pid) for pid,uid in managed.items()}
             with contextlib.ExitStack() as stack:
                 channels = [stack.enter_context(self.reservation(uid,pid,digest)) for pid,uid in managed.items()]
                 if self.managed(config['users']) != managed: raise Deferred('Sync process inventory changed')
@@ -544,13 +561,13 @@ class Maintenance:
                         actual = self.run(['/usr/bin/dpkg-query','--show','--showformat=${Status} ${Version}',PACKAGE]).strip()
                         if actual != 'install ok installed '+version: raise Deferred('installed package state did not verify')
                         marker['phase']='installed'; self.write(MARKER,json.dumps(marker)+'\n')
-                        self.stage_activation(stopped,version)
+                        self.stage_activation(stopped,version,usable)
                         self.remove(MARKER)
                     self.restart_pending()
                     return 'installed '+version
                 except Exception as original:
                     if not installing:
-                        self.stage_activation(stopped,installed)
+                        self.stage_activation(stopped,installed,usable)
                         self.remove(MARKER)
                         try: self.restart_pending()
                         except Deferred as recovery:

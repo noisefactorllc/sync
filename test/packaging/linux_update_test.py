@@ -206,8 +206,9 @@ class LinuxUpdateTests(unittest.TestCase):
             if uid==1000 and operation==['start']: raise module.Deferred('start failed')
             return ''
         self.engine.service=service
-        self.engine.wait_activation=lambda uid,version: None
-        self.write('/var/lib/noisedeck-sync-update/activation.json',json.dumps({'schema':1,'version':'1.1','pending':[1000,1001],'errors':{}}))
+        self.engine.wait_activation=lambda uid,version,expected: None
+        self.write('/var/lib/noisedeck-sync-update/activation.json',json.dumps({'schema':1,'version':'1.1','pending':[1000,1001],'errors':{},
+            'expected':{'1000':[],'1001':['ndi']}}))
         with self.assertRaisesRegex(module.Deferred,'restart pending'):
             self.engine.restart_pending()
         self.assertIn((1001,['start']),calls)
@@ -252,23 +253,75 @@ class LinuxUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(module.Deferred,'invalid cancellable'):
             module.run_download(['/usr/bin/apt-get','install','noisedeck-sync=1.1'],lambda:None)
 
-    def test_activation_requires_current_version_active_process_and_healthy_selected_provider(self):
+    def test_activation_requires_current_version_active_process_and_prior_usable_providers(self):
         self.engine.service=lambda uid,operation: 'MainPID=123\nActiveState=active\n'
         self.engine.instances=lambda: {123:1000}
         response={'version':1,'type':'status','runningVersion':'1.1',
-                  'providers':[{'selected':True,'available':True,'healthy':True}]}
+                  'providers':[{'id':'ndi','selected':True,'available':True,'healthy':True}]}
         @contextlib.contextmanager
         def status(uid,pid,request): yield None,response
         self.engine.control_request=status
-        self.assertTrue(self.engine.activation_ready(1000,'1.1'))
+        self.assertTrue(self.engine.activation_ready(1000,'1.1',['ndi']))
         response['runningVersion']='1.0'
-        self.assertFalse(self.engine.activation_ready(1000,'1.1'))
+        self.assertFalse(self.engine.activation_ready(1000,'1.1',['ndi']))
         response['runningVersion']='1.1'; response['providers'][0]['healthy']=False
-        self.assertFalse(self.engine.activation_ready(1000,'1.1'))
+        self.assertFalse(self.engine.activation_ready(1000,'1.1',['ndi']))
         response['providers']=[]
-        self.assertFalse(self.engine.activation_ready(1000,'1.1'))
+        self.assertFalse(self.engine.activation_ready(1000,'1.1',['ndi']))
+        response['type']='error'
+        with self.assertRaises(module.Deferred): self.engine.activation_ready(1000,'1.1',[])
+        response['type']='status'
         self.engine.instances=lambda: {}
-        self.assertFalse(self.engine.activation_ready(1000,'1.1'))
+        self.assertFalse(self.engine.activation_ready(1000,'1.1',[]))
+
+    def test_provider_unusable_before_maintenance_does_not_hold_activation_pending(self):
+        # NDI is selected by default and unavailable without its runtime.
+        self.engine.service=lambda uid,operation: 'MainPID=123\nActiveState=active\n'
+        self.engine.instances=lambda: {123:1000}
+        response={'version':1,'type':'status','runningVersion':'1.1',
+                  'providers':[{'id':'ndi','selected':True,'available':False,'healthy':False}]}
+        @contextlib.contextmanager
+        def status(uid,pid,request): yield None,response
+        self.engine.control_request=status
+        self.assertEqual(self.engine.provider_baseline(1000,123),[])
+        self.assertTrue(self.engine.activation_ready(1000,'1.1',[]))
+        response['providers']=[]
+        self.assertTrue(self.engine.activation_ready(1000,'1.1',[]))
+
+    def test_activation_record_without_expected_provider_state_is_rejected(self):
+        self.write(module.ACTIVATION,json.dumps({'schema':1,'version':'1.1','pending':[1000],'errors':{}}))
+        with self.assertRaisesRegex(module.Deferred,'invalid activation record'):
+            self.engine.restart_pending()
+        self.write(module.ACTIVATION,json.dumps({'schema':1,'version':'1.1','pending':[1000],'errors':{},'expected':{}}))
+        with self.assertRaisesRegex(module.Deferred,'invalid activation record'):
+            self.engine.restart_pending()
+
+    def test_apply_restores_the_providers_each_daemon_could_use_before_maintenance(self):
+        self.ready_transaction()
+        self.engine.managed=lambda users: {123:1000}
+        self.engine.probe=lambda uid,pid: None
+        calls=[]
+        def service(uid,operation):
+            calls.append((uid,operation)); return ''
+        self.engine.service=service
+        class Channel:
+            def setblocking(self,flag): pass
+            def recv(self,size,flags): raise BlockingIOError
+        @contextlib.contextmanager
+        def reservation(uid,pid,digest): yield Channel()
+        self.engine.reservation=reservation
+        response={'version':1,'type':'status','runningVersion':'1.0','providers':[
+            {'id':'ndi','selected':True,'available':True,'healthy':True},
+            {'id':'camera','selected':True,'available':False,'healthy':False}]}
+        @contextlib.contextmanager
+        def status(uid,pid,request): yield None,response
+        self.engine.control_request=status
+        waited=[]
+        self.engine.wait_activation=lambda uid,version,expected: waited.append((uid,version,expected))
+        self.assertEqual(self.engine.apply(),'installed 1.1')
+        self.assertIn((1000,['stop']),calls)
+        self.assertEqual(waited,[(1000,'1.1',['ndi'])])
+        self.assertFalse((self.root/module.ACTIVATION.lstrip('/')).exists())
 
     def test_package_removal_does_not_leave_enrollment_requiring_a_missing_boot_lock(self):
         self.ready_transaction()

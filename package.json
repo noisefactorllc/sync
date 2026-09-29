@@ -19,6 +19,7 @@
     "test:integration": "node --test --test-timeout=60000 test/integration/loopback.test.js && npm run test:integration:soak",
     "test:integration:soak": "node --test --test-concurrency=1 --test-timeout=180000 test/integration/daemon-memory-soak.test.js",
     "test:integration:linux": "node --test --test-timeout=45000 test/integration/linux-daemon-control.test.js",
+    "test:integration:update": "node --test --test-timeout=30000 test/integration/update-gate.test.js",
     "test:packaging": "node --test --test-timeout=30000 test/packaging/*.test.js",
     "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js",
     "test:linux:containers": "scripts/test-linux-containers.sh",
