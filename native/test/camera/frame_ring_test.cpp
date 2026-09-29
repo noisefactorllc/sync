@@ -327,4 +327,32 @@ SYNC_TEST(demand_multiplexing_staggered_lifetimes) {
   SYNC_REQUIRE(!writer.has_demand(kExpiryTime));
 }
 
+SYNC_TEST(an_adopted_previous_epoch_heartbeat_cannot_reject_fresh_demand) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  // A previous epoch's reader heartbeats, then the machine reboots: the
+  // mapping outlives the reboot while steady_clock/QPC restarts near zero.
+  FrameRingWriter old_writer(mapping);
+  FrameRingReader old_reader(mapping);
+  constexpr std::uint64_t kOldEpochNow = 90'000'000'000;  // ~25h of uptime
+  old_reader.record_demand(kOldEpochNow);
+  SYNC_REQUIRE(old_writer.has_demand(kOldEpochNow));
+
+  // The new epoch's writer adopts the stamped ring as it is.
+  FrameRingWriter new_writer(mapping);
+  SYNC_REQUIRE(new_writer.valid());
+  SYNC_REQUIRE(new_writer.has_demand(kOldEpochNow + kFrameRingDemandTimeoutUs - 1));
+
+  // Fresh clock far behind the adopted stamp: the old heartbeat reads stale.
+  constexpr std::uint64_t kNewEpochNow = 5'000'000;  // seconds after reboot
+  SYNC_REQUIRE(!new_writer.has_demand(kNewEpochNow));
+
+  // A live consumer heartbeats. That one heartbeat must publish fresh demand,
+  // so recovery is bounded instead of rejected for the life of the mapping.
+  FrameRingReader new_reader(mapping);
+  new_reader.record_demand(kNewEpochNow);
+  SYNC_REQUIRE(new_writer.has_demand(kNewEpochNow));
+  // And the replaced heartbeat expires normally afterwards.
+  SYNC_REQUIRE(!new_writer.has_demand(kNewEpochNow + kFrameRingDemandTimeoutUs + 1));
+}
+
 }  // namespace

@@ -141,6 +141,20 @@ void FrameRingReader::record_demand(std::uint64_t now_us) noexcept {
   while (current < now_us && !demand.compare_exchange_weak(
              current, now_us, std::memory_order_release, std::memory_order_relaxed)) {
   }
+  // A stamp dated ahead of this clock by more than the tolerated skew cannot
+  // come from a concurrent reader -- every reader in this epoch shares the
+  // machine-wide steady_clock/QPC domain, and has_demand already refuses to
+  // read such a stamp as demand. It is a previous epoch's heartbeat: the
+  // mapping outlived a reboot while the clock restarted near zero, and the
+  // forward-only loop above can never pass it, so a live consumer's demand
+  // would be rejected for the life of the mapping. Replace it, so recovery
+  // costs one heartbeat; a repair here can only race other fresh stamps.
+  while (current > now_us && (current - now_us) > kFrameRingDemandTimeoutUs) {
+    if (demand.compare_exchange_weak(current, now_us, std::memory_order_release,
+                                     std::memory_order_relaxed)) {
+      break;
+    }
+  }
 }
 
 auto FrameRingReader::newest_sequence() const noexcept -> std::uint64_t {
