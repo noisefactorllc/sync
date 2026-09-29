@@ -704,6 +704,10 @@ std::uint64_t monotonic_milliseconds() noexcept {
 
 - (void)showAbout:(id)sender {
   (void)sender;
+  // Sync is an accessory app, so choosing a menu item does not activate it.
+  // Without this the panel opens behind the frontmost app's windows and the
+  // item looks like it did nothing.
+  [NSApp activateIgnoringOtherApps:YES];
   [NSApp orderFrontStandardAboutPanelWithOptions:@{
     NSAboutPanelOptionApplicationName : @"Sync Preview",
     NSAboutPanelOptionVersion : ns_string(noisefactor::sync::kProductVersion),
