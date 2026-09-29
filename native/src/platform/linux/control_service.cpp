@@ -57,7 +57,7 @@ std::string prompt_json(const pairing::PromptRequest& request) {
          ",\"deadlineMs\":30000}";
 }
 
-std::string status_json(const LinuxRuntimeStatusSource& source) {
+std::string status_json(const LinuxRuntimeStatusSource& source, bool update = false) {
   std::array<LinuxProviderStatus, kMaximumProviders> providers{};
   const std::size_t count = source.providers(providers);
   const DaemonMetricsSnapshot metrics = source.metrics();
@@ -76,7 +76,15 @@ std::string status_json(const LinuxRuntimeStatusSource& source) {
               ",\"reason\":" + encode_linux_control_json_string(array_text(provider.reason)) +
               "}";
   }
-  output += "],\"metrics\":{";
+  output += "]";
+  if (update) {
+#ifdef SYNC_PRODUCT_VERSION
+    output += ",\"runningVersion\":" + encode_linux_control_json_string(SYNC_PRODUCT_VERSION);
+#else
+    output += ",\"runningVersion\":\"unknown\"";
+#endif
+  }
+  output += ",\"metrics\":{";
   const std::array fields = {
       std::pair{"receivedFrames", metrics.received_frames},
       std::pair{"acceptedFrames", metrics.accepted_frames},
@@ -203,6 +211,9 @@ struct LinuxControlService::Impl {
     bool close_after_output = false;
     bool pair_owner = false;
     bool prompt_sent = false;
+    std::uint32_t peer_uid = std::numeric_limits<std::uint32_t>::max();
+    std::uint64_t update_token = 0;
+    std::uint64_t update_generation = 0;
   };
 
   explicit Impl(Options value) : options(value) {
@@ -254,6 +265,10 @@ struct LinuxControlService::Impl {
 
   void close_client(Client& client) noexcept {
     deny_owner(client.descriptor);
+    if (client.update_token != 0 && options.updates != nullptr) {
+      options.updates->cancel(client.update_token);
+      client.update_token = 0;
+    }
     if (client.descriptor >= 0) ::close(client.descriptor);
     client.descriptor = -1;
   }
@@ -271,11 +286,62 @@ struct LinuxControlService::Impl {
       return;
     }
     const auto& request = decoded.request;
+    const bool update_command = request.command == LinuxControlCommand::UpdateStatus ||
+                                request.command == LinuxControlCommand::UpdateProbe ||
+                                request.command == LinuxControlCommand::UpdateReserve ||
+                                request.command == LinuxControlCommand::UpdateCancel;
+    if ((update_command && client.peer_uid != 0) ||
+        (!update_command && client.peer_uid != options.expected_uid)) {
+      queue(client, error_json("peer_not_authorized"), true);
+      return;
+    }
+    if (client.update_token != 0 && request.command != LinuxControlCommand::UpdateCancel) {
+      queue(client, error_json("reservation_already_held"), true);
+      return;
+    }
     if (client.pair_owner && request.command != LinuxControlCommand::Decision) {
       queue(client, error_json("invalid_pair_state"), true);
       return;
     }
     switch (request.command) {
+      case LinuxControlCommand::UpdateStatus:
+        queue(client, status_json(*options.status, true), true);
+        return;
+      case LinuxControlCommand::UpdateProbe:
+        if (options.updates == nullptr || !options.updates->ready()) {
+          queue(client, error_json("active_or_unknown"), true);
+        } else {
+          queue(client, "{\"version\":1,\"type\":\"update\",\"status\":\"idle\"}", true);
+        }
+        return;
+      case LinuxControlCommand::UpdateReserve: {
+        if (options.updates == nullptr) {
+          queue(client, error_json("interlock_unavailable"), true);
+          return;
+        }
+        const auto reserved = options.updates->reserve(
+            request.generation, {request.digest.data(), request.digest.size()});
+        if (reserved.token == 0) {
+          queue(client, error_json(reserved.reason), true);
+          return;
+        }
+        client.update_token = reserved.token;
+        client.update_generation = request.generation;
+        reset_input(client);
+        queue(client, "{\"version\":1,\"type\":\"update\",\"status\":\"reserved\",\"generation\":" +
+              std::to_string(request.generation) + ",\"token\":" +
+              std::to_string(reserved.token) + "}", false);
+        return;
+      }
+      case LinuxControlCommand::UpdateCancel:
+        if (client.update_token == 0 || request.generation != client.update_generation) {
+          queue(client, error_json("stale_generation"), true);
+          return;
+        }
+        options.updates->cancel(client.update_token);
+        client.update_token = 0;
+        queue(client, "{\"version\":1,\"type\":\"update\",\"status\":\"canceled\"}", true);
+        return;
       case LinuxControlCommand::Pair: {
         std::lock_guard lock(prompt_mutex);
         if (pair_owner_descriptor >= 0) {
@@ -453,7 +519,8 @@ struct LinuxControlService::Impl {
       }
       Client client;
       client.descriptor = descriptor;
-      if (credential != options.expected_uid) {
+      client.peer_uid = credential;
+      if (credential != options.expected_uid && credential != 0) {
         queue(client, error_json("peer_not_authorized"), true);
       }
       clients.push_back(std::move(client));

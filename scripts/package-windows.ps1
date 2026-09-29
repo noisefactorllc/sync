@@ -41,7 +41,13 @@ param(
   # generators (Ninja) put them at the build root; multi-config generators
   # (Visual Studio) put them in a per-configuration subdirectory, so CMake
   # passes $<TARGET_FILE_DIR:syncd> here rather than letting this guess.
-  [string]$BinaryDir = ''
+  [string]$BinaryDir = '',
+
+  # Optional pinned WinSparkle 0.9.4 distribution. All three inputs are
+  # required together; no updater is packaged by a default unsigned build.
+  [string]$WinSparkleDll = '',
+  [string]$WinSparkleSha256 = '',
+  [string]$WinSparkleLicense = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -135,6 +141,36 @@ $SpoutLibrary = (Resolve-Path -LiteralPath $SpoutLibrary).ProviderPath
 if ([System.IO.Path]::GetFileName($SpoutLibrary) -ne 'SpoutLibrary.dll') {
   Fail "the pinned Spout module must be named SpoutLibrary.dll, got $SpoutLibrary"
 }
+if ($WinSparkleDll -or $WinSparkleSha256 -or $WinSparkleLicense) {
+  if (-not [System.IO.Path]::IsPathRooted($WinSparkleDll) -or
+      -not (Test-Path -LiteralPath $WinSparkleDll -PathType Leaf) -or
+      [System.IO.Path]::GetFileName($WinSparkleDll) -ne 'WinSparkle.dll') {
+    Fail 'WinSparkleDll must be an absolute path to the pinned WinSparkle.dll'
+  }
+  if ($WinSparkleSha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+      (Get-FileHash -LiteralPath $WinSparkleDll -Algorithm SHA256).Hash -ne $WinSparkleSha256) {
+    Fail 'WinSparkle.dll does not match the configured SHA-256 pin'
+  }
+  $frameworkVersion = (Get-Item -LiteralPath $WinSparkleDll).VersionInfo
+  if ($frameworkVersion.FileMajorPart -ne 0 -or
+      $frameworkVersion.FileMinorPart -ne 9 -or
+      $frameworkVersion.FileBuildPart -ne 4) {
+    Fail 'the updater requires WinSparkle 0.9.4'
+  }
+  if (-not [System.IO.Path]::IsPathRooted($WinSparkleLicense) -or
+      -not (Test-Path -LiteralPath $WinSparkleLicense -PathType Leaf)) {
+    Fail 'WinSparkleLicense must name the license file from the pinned distribution'
+  }
+  $winSparkleExpatLicense = Join-Path (Split-Path -Parent $WinSparkleLicense) 'COPYING.expat'
+  if (-not (Test-Path -LiteralPath $winSparkleExpatLicense -PathType Leaf)) {
+    Fail 'COPYING.expat must accompany the WinSparkle license from the pinned distribution'
+  }
+  foreach ($updaterFile in @($WinSparkleDll, $WinSparkleLicense, $winSparkleExpatLicense)) {
+    if ((Get-Item -LiteralPath $updaterFile).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      Fail "updater inputs must be regular files: $updaterFile"
+    }
+  }
+}
 if (-not [string]::IsNullOrWhiteSpace($DependencySearchPath)) {
   $DependencySearchPath = Resolve-AbsoluteDirectory $DependencySearchPath 'dependency search path'
 }
@@ -186,6 +222,13 @@ Copy-Item -LiteralPath (Join-Path $SourceDir 'LICENSE') `
   -Destination (Join-Path $bundleDir 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $SourceDir 'packaging/windows/Third-Party-Notices.txt') `
   -Destination (Join-Path $bundleDir 'Third-Party-Notices.txt')
+
+if ($WinSparkleDll) {
+  Copy-Item -LiteralPath $WinSparkleDll -Destination (Join-Path $bundleDir 'WinSparkle.dll')
+  Add-Content -LiteralPath (Join-Path $bundleDir 'Third-Party-Notices.txt') `
+    -Value (@('', 'WinSparkle 0.9.4', '') + (Get-Content -LiteralPath $WinSparkleLicense) +
+      @('', 'Expat (included in WinSparkle)', '') + (Get-Content -LiteralPath $winSparkleExpatLicense)) -Encoding utf8
+}
 
 # sync-render sits beside syncd.exe, which finds it there, with its effect and
 # shader data in noisemaker\, the helper's own first data-root candidate.

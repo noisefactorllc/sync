@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.21)
 
 project(noisefactor_sync_protocol VERSION 0.2.0 LANGUAGES CXX)
 
+set(SYNC_SPARKLE_ROOT "" CACHE PATH "Pinned Sparkle 2.10.0 distribution directory")
+set(SYNC_MACOS_UPDATE_EDDSA_KEY "" CACHE STRING "Base64 production update public key")
+set(SYNC_WINSPARKLE_ROOT "" CACHE PATH "Pinned WinSparkle 0.9.4 distribution directory")
+set(SYNC_WINSPARKLE_DLL "" CACHE FILEPATH "Pinned WinSparkle x64 DLL")
+set(SYNC_WINSPARKLE_DLL_SHA256 "" CACHE STRING "SHA256 of the pinned x64 WinSparkle DLL")
+set(SYNC_WINSPARKLE_LICENSE "" CACHE FILEPATH "WinSparkle license file")
+set(SYNC_WINDOWS_UPDATE_EDDSA_KEY "" CACHE STRING "Base64 Windows update public key")
+set(SYNC_WINDOWS_UPDATE_PUBLISHER_SHA256 "" CACHE STRING "SHA256 of the Authenticode publisher certificate")
+
 set(SYNC_PRODUCT_VERSION "${PROJECT_VERSION}" CACHE STRING
     "Sync product version reported by the native companion")
 set(SYNC_SYPHON_FRAMEWORK_PATH "" CACHE PATH
@@ -125,6 +134,22 @@ else()
       native/src/platform/posix/pairing_store_fs.cpp)
 endif()
 
+add_library(sync_update_coordinator native/src/update_coordinator.cpp)
+target_compile_features(sync_update_coordinator PUBLIC cxx_std_20)
+target_include_directories(sync_update_coordinator PUBLIC native/include)
+target_link_libraries(sync_update_coordinator PUBLIC Threads::Threads)
+add_executable(sync_update_coordinator_tests
+  native/test/update_coordinator_test.cpp native/test/test_main.cpp)
+target_include_directories(sync_update_coordinator_tests PRIVATE native/test)
+target_link_libraries(sync_update_coordinator_tests PRIVATE sync_update_coordinator)
+add_test(NAME sync_update_coordinator_tests COMMAND sync_update_coordinator_tests)
+
+add_executable(sync_windows_update_policy_tests
+  native/test/windows/update_policy_test.cpp native/test/test_main.cpp)
+target_compile_features(sync_windows_update_policy_tests PRIVATE cxx_std_20)
+target_include_directories(sync_windows_update_policy_tests PRIVATE native/test)
+add_test(NAME sync_windows_update_policy_tests COMMAND sync_windows_update_policy_tests)
+
 add_library(sync_protocol
   native/src/audio_capture.cpp
   native/src/control.cpp
@@ -147,7 +172,7 @@ target_include_directories(sync_protocol PRIVATE native/src)
 target_compile_definitions(sync_protocol PUBLIC
   SYNC_PRODUCT_VERSION="${SYNC_PRODUCT_VERSION}"
 )
-target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads)
+target_link_libraries(sync_protocol PUBLIC OpenSSL::Crypto Threads::Threads sync_update_coordinator)
 if(APPLE)
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
   find_library(CORE_FOUNDATION_PROTOCOL_FRAMEWORK CoreFoundation REQUIRED)
@@ -256,6 +281,19 @@ add_test(NAME sync_linux_control_protocol_tests
   COMMAND sync_linux_control_protocol_tests)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(sync_linux_update_lock native/src/platform/linux/update_lock.cpp)
+  target_compile_features(sync_linux_update_lock PUBLIC cxx_std_20)
+  target_include_directories(sync_linux_update_lock PUBLIC native/include)
+  target_link_libraries(syncd PRIVATE sync_linux_update_lock)
+  add_executable(sync_linux_update_lock_tests
+    native/test/linux/update_lock_test.cpp native/test/test_main.cpp)
+  target_include_directories(sync_linux_update_lock_tests PRIVATE native/test)
+  target_link_libraries(sync_linux_update_lock_tests PRIVATE sync_linux_update_lock)
+  add_test(NAME sync_linux_update_lock_tests COMMAND sync_linux_update_lock_tests)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME sync_linux_update_maintenance_tests
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/packaging/linux_update_test.py)
   add_library(sync_linux_control_service
     native/src/platform/linux/control_service.cpp
   )
@@ -424,6 +462,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "${SYNC_PRODUCT_VERSION}" amd64
     DEPENDS syncd syncctl
     VERBATIM)
+endif()
+
+add_executable(sync_update_test_server
+  native/test/update_server_main.cpp native/src/server.cpp)
+target_compile_features(sync_update_test_server PRIVATE cxx_std_20)
+target_link_libraries(sync_update_test_server PRIVATE
+  sync_protocol sync_render_supervisor ${SYNC_LIBUV_TARGET})
+find_program(SYNC_UPDATE_TEST_NODE NAMES node)
+if(SYNC_UPDATE_TEST_NODE)
+  add_test(NAME sync_update_admission_integration
+    COMMAND ${CMAKE_COMMAND} -E env
+      SYNC_UPDATE_TEST_SERVER=$<TARGET_FILE:sync_update_test_server>
+      ${SYNC_UPDATE_TEST_NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/test/integration/update-gate.test.js)
+  set_tests_properties(sync_update_admission_integration PROPERTIES TIMEOUT 30)
 endif()
 
 add_executable(sync_pairing_test_server
@@ -679,6 +731,24 @@ if(APPLE)
   )
   add_test(NAME sync_companion_process_tests COMMAND sync_companion_process_tests)
 
+  set(SYNC_MACOS_UPDATE_PLIST "")
+  if(SYNC_SPARKLE_ROOT)
+    if(NOT SYNC_MACOS_UPDATE_EDDSA_KEY MATCHES "^[A-Za-z0-9+/]+=$")
+      message(FATAL_ERROR "Sparkle builds require an Ed25519 public key")
+    endif()
+    string(LENGTH "${SYNC_MACOS_UPDATE_EDDSA_KEY}" SYNC_KEY_LENGTH)
+    if(NOT SYNC_KEY_LENGTH EQUAL 44)
+      message(FATAL_ERROR "Ed25519 public key must encode 32 bytes")
+    endif()
+    execute_process(COMMAND /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString"
+      "${SYNC_SPARKLE_ROOT}/Sparkle.framework/Versions/B/Resources/Info.plist"
+      OUTPUT_VARIABLE SYNC_SPARKLE_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE SYNC_SPARKLE_VERSION_RESULT)
+    if(NOT SYNC_SPARKLE_VERSION_RESULT EQUAL 0 OR NOT SYNC_SPARKLE_VERSION STREQUAL "2.10.0")
+      message(FATAL_ERROR "Only the pinned Sparkle 2.10.0 SDK is supported")
+    endif()
+    set(SYNC_MACOS_UPDATE_PLIST "<key>SUFeedURL</key><string>https://downloads.noisefactor.io/updates/sync/preview/macos-arm64.xml</string><key>SUPublicEDKey</key><string>${SYNC_MACOS_UPDATE_EDDSA_KEY}</string><key>SUEnableAutomaticChecks</key><false/><key>SUAutomaticallyUpdate</key><false/><key>SUAllowsAutomaticUpdates</key><false/><key>SURequireSignedFeed</key><true/><key>SUVerifyUpdateBeforeExtraction</key><true/><key>SUSignedFeedFailureExpirationInterval</key><integer>0</integer><key>SUEnableSystemProfiling</key><false/>")
+  endif()
   configure_file(
     packaging/macos/Info.plist.in
     ${CMAKE_CURRENT_BINARY_DIR}/Sync-Info.plist
@@ -686,6 +756,7 @@ if(APPLE)
   )
   add_executable(sync_menu MACOSX_BUNDLE
     native/src/platform/macos/app_main.mm
+    native/src/platform/macos/update_controller.mm
   )
   target_compile_features(sync_menu PRIVATE cxx_std_20)
   # The menu app reports the product version in About and in Copy Diagnostics.
@@ -709,6 +780,23 @@ if(APPLE)
     ${FOUNDATION_FRAMEWORK} ${SERVICE_MANAGEMENT_FRAMEWORK}
     ${SYSTEM_EXTENSIONS_FRAMEWORK}
   )
+
+  if(SYNC_SPARKLE_ROOT)
+    target_compile_definitions(sync_menu PRIVATE SYNC_HAS_SPARKLE=1)
+    target_compile_options(sync_menu PRIVATE "-F${SYNC_SPARKLE_ROOT}")
+    target_include_directories(sync_menu PRIVATE "${SYNC_SPARKLE_ROOT}/Sparkle.framework/Versions/B/Headers")
+    target_link_libraries(sync_menu PRIVATE "${SYNC_SPARKLE_ROOT}/Sparkle.framework/Versions/B/Sparkle")
+    set_property(TARGET sync_menu APPEND PROPERTY BUILD_RPATH "${SYNC_SPARKLE_ROOT}")
+    set_property(TARGET sync_menu APPEND PROPERTY INSTALL_RPATH "@executable_path/../Frameworks")
+  endif()
+  add_executable(sync_update_macos_tests native/src/platform/macos/update_controller.mm
+    native/test/macos/update_controller_test.mm native/test/test_main.cpp)
+  target_compile_features(sync_update_macos_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_update_macos_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_update_macos_tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_include_directories(sync_update_macos_tests PRIVATE native/test native/src/platform/macos)
+  target_link_libraries(sync_update_macos_tests PRIVATE ${FOUNDATION_FRAMEWORK} ${APPKIT_FRAMEWORK})
+  add_test(NAME sync_update_macos_tests COMMAND sync_update_macos_tests)
 
   set(SYNC_PACKAGE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/package)
   set(SYNC_BUNDLE_STAMP ${SYNC_PACKAGE_DIRECTORY}/.sync-bundle-complete)
@@ -734,6 +822,7 @@ if(APPLE)
   add_custom_command(
     OUTPUT ${SYNC_BUNDLE_STAMP}
     COMMAND ${CMAKE_COMMAND} -E env ${SYNC_BUNDLE_RENDER_ENVIRONMENT}
+      SYNC_SPARKLE_ROOT=${SYNC_SPARKLE_ROOT}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-macos.sh bundle
       ${CMAKE_CURRENT_BINARY_DIR}
       ${CMAKE_CURRENT_SOURCE_DIR}
@@ -1440,6 +1529,7 @@ elseif(WIN32)
   # console window when a user launches it from Explorer or at sign-in.
   add_executable(sync_menu WIN32
     native/src/platform/windows/app_main.cpp
+    native/src/platform/windows/update_adapter.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/sync-version.rc
   )
   # Same version plumbing as the macOS menu app: the tray does not link
@@ -1452,8 +1542,50 @@ elseif(WIN32)
   target_include_directories(sync_menu PRIVATE native/src/platform/windows)
   target_link_libraries(sync_menu PRIVATE
     sync_companion_process sync_camera_activation sync_mf_camera_sink
-    shell32 user32 advapi32
+    shell32 user32 advapi32 wintrust crypt32
   )
+  set(SYNC_WINDOWS_UPDATE_PACKAGE_ARGUMENTS)
+  if(SYNC_WINSPARKLE_ROOT)
+    foreach(required SYNC_WINSPARKLE_DLL SYNC_WINSPARKLE_DLL_SHA256
+        SYNC_WINSPARKLE_LICENSE SYNC_WINDOWS_UPDATE_EDDSA_KEY
+        SYNC_WINDOWS_UPDATE_PUBLISHER_SHA256)
+      if(NOT ${required})
+        message(FATAL_ERROR "${required} is required for configured Windows update checks")
+      endif()
+    endforeach()
+    foreach(hash SYNC_WINSPARKLE_DLL_SHA256 SYNC_WINDOWS_UPDATE_PUBLISHER_SHA256)
+      string(LENGTH "${${hash}}" hash_length)
+      if(NOT hash_length EQUAL 64 OR NOT "${${hash}}" MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "${hash} must be 64 lowercase hexadecimal characters")
+      endif()
+    endforeach()
+    string(LENGTH "${SYNC_WINDOWS_UPDATE_EDDSA_KEY}" key_length)
+    if(NOT key_length EQUAL 44 OR NOT SYNC_WINDOWS_UPDATE_EDDSA_KEY MATCHES "^[A-Za-z0-9+/]+=$")
+      message(FATAL_ERROR "SYNC_WINDOWS_UPDATE_EDDSA_KEY must be a base64 Ed25519 public key")
+    endif()
+    file(SHA256 "${SYNC_WINSPARKLE_DLL}" actual_dll_hash)
+    if(NOT actual_dll_hash STREQUAL SYNC_WINSPARKLE_DLL_SHA256)
+      message(FATAL_ERROR "WinSparkle DLL hash does not match its pinned value")
+    endif()
+    target_include_directories(sync_menu PRIVATE "${SYNC_WINSPARKLE_ROOT}/include")
+    target_compile_definitions(sync_menu PRIVATE
+      SYNC_HAS_WINSPARKLE=1
+      SYNC_WINDOWS_UPDATE_FEED="https://downloads.noisefactor.io/updates/sync/preview/windows-x64.xml"
+      SYNC_WINDOWS_UPDATE_EDDSA_KEY="${SYNC_WINDOWS_UPDATE_EDDSA_KEY}"
+      SYNC_WINDOWS_UPDATE_PUBLISHER_SHA256="${SYNC_WINDOWS_UPDATE_PUBLISHER_SHA256}"
+      SYNC_WINSPARKLE_DLL_SHA256="${SYNC_WINSPARKLE_DLL_SHA256}")
+    list(APPEND SYNC_WINDOWS_UPDATE_PACKAGE_ARGUMENTS
+      -WinSparkleDll "${SYNC_WINSPARKLE_DLL}"
+      -WinSparkleSha256 "${SYNC_WINSPARKLE_DLL_SHA256}"
+      -WinSparkleLicense "${SYNC_WINSPARKLE_LICENSE}")
+  endif()
+  add_executable(sync_windows_update_adapter_tests
+    native/src/platform/windows/update_adapter.cpp
+    native/test/windows/update_adapter_test.cpp native/test/test_main.cpp)
+  target_compile_features(sync_windows_update_adapter_tests PRIVATE cxx_std_20)
+  target_include_directories(sync_windows_update_adapter_tests PRIVATE native/test)
+  target_link_libraries(sync_windows_update_adapter_tests PRIVATE wintrust crypt32 advapi32 user32)
+  add_test(NAME sync_windows_update_adapter_tests COMMAND sync_windows_update_adapter_tests)
 
   target_sources(syncd PRIVATE
     ${SYNC_COMMON_CONTROLS_RESOURCE}
@@ -1532,6 +1664,7 @@ elseif(WIN32)
       -SpoutLibrary ${SYNC_SPOUT_LIBRARY_PATH}
       -DependencySearchPath ${SYNC_WINDOWS_DEPENDENCY_PATH}
       -BinaryDir $<TARGET_FILE_DIR:syncd>
+      ${SYNC_WINDOWS_UPDATE_PACKAGE_ARGUMENTS}
     DEPENDS
       # sync_camera_source belongs here for the same reason the other two do:
       # package-windows.ps1 refuses to stage a bundle without SyncCamera.dll,

@@ -35,6 +35,7 @@ rm -rf "$stage"
 mkdir -p "$stage/DEBIAN" "$stage/usr/bin" \
   "$stage/usr/lib/systemd/user" "$stage/usr/lib/udev/rules.d" \
   "$stage/usr/share/noisedeck-sync" "$stage/usr/share/doc/noisedeck-sync" \
+  "$stage/usr/lib/systemd/system" "$stage/usr/lib/tmpfiles.d" "$stage/usr/libexec" \
   "$package_dir"
 
 install -m 0755 "$build_dir/syncd" "$stage/usr/bin/syncd"
@@ -42,6 +43,12 @@ install -m 0755 "$build_dir/syncctl" "$stage/usr/bin/syncctl"
 strip --strip-unneeded "$stage/usr/bin/syncd" "$stage/usr/bin/syncctl"
 install -m 0644 "$source_dir/packaging/linux/noisedeck-sync.service" \
   "$stage/usr/lib/systemd/user/noisedeck-sync.service"
+install -m 0755 "$source_dir/scripts/linux-update.py" "$stage/usr/libexec/noisedeck-sync-update"
+for unit in noisedeck-sync-update.service noisedeck-sync-update.timer; do
+  install -m 0644 "$source_dir/packaging/linux/$unit" "$stage/usr/lib/systemd/system/$unit"
+done
+install -m 0644 "$source_dir/packaging/linux/noisedeck-sync-update.tmpfiles" \
+  "$stage/usr/lib/tmpfiles.d/noisedeck-sync-update.conf"
 install -m 0644 "$source_dir/packaging/linux/70-noisedeck-sync-camera.rules" \
   "$stage/usr/lib/udev/rules.d/70-noisedeck-sync-camera.rules"
 install -m 0644 "$source_dir/packaging/linux/70-noisedeck-sync-camera.rules" \
@@ -55,6 +62,7 @@ install -m 0644 "$source_dir/LICENSE" \
 install -m 0644 "$source_dir/packaging/linux/Third-Party-Notices.txt" \
   "$stage/usr/share/doc/noisedeck-sync/Third-Party-Notices.txt"
 install -m 0755 "$source_dir/packaging/linux/postrm" "$stage/DEBIAN/postrm"
+install -m 0755 "$source_dir/packaging/linux/prerm" "$stage/DEBIAN/prerm"
 sed -e "s/@VERSION@/$version/g" -e "s/@ARCHITECTURE@/$architecture/g" \
   "$source_dir/packaging/linux/control.in" > "$stage/DEBIAN/control"
 chmod 0644 "$stage/DEBIAN/control"

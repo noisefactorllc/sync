@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -21,6 +22,10 @@ enum class LinuxControlCommand {
   Doctor,
   Pairings,
   Revoke,
+  UpdateStatus,
+  UpdateProbe,
+  UpdateReserve,
+  UpdateCancel,
 };
 
 struct LinuxControlRequest {
@@ -28,6 +33,7 @@ struct LinuxControlRequest {
   std::uint64_t generation = 0;
   bool approved = false;
   NormalizedOrigin origin{};
+  std::array<char, 64> digest{};
 };
 
 struct LinuxControlDecodeResult {

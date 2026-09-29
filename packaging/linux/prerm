@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if [ "${1:-}" = remove ] && [ -f /etc/noisedeck-sync/update.json ]; then
+  /usr/bin/python3 -I /usr/libexec/noisedeck-sync-update remove
+fi
+exit 0

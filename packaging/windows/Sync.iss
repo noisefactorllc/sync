@@ -45,7 +45,15 @@ WizardStyle=modern
 ; elevation while an admin install still serves every user correctly.
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
+UsePreviousPrivileges=yes
+; A silent updater must never stop a live sender or a third-party camera
+; consumer. Installation remains user-driven until admission reservation and
+; camera/file replacement have been qualified together.
+CloseApplications=no
+RestartApplications=no
+AppMutex=NoiseFactorSync.SingleInstance
 MinVersion=10.0
 
 [Languages]
@@ -67,7 +75,7 @@ Name: "{group}\Sync documentation"; Filename: "https://noisedeck.app/docs/Sync.m
 Name: "{userstartup}\Sync"; Filename: "{app}\Sync.exe"; Tasks: startupicon
 
 [Run]
-Filename: "{app}\Sync.exe"; Description: "Start Sync now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Sync.exe"; Description: "Start Sync now"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 ; Registration wrote the media source CLSID to HKLM, so removing it needs the
@@ -88,6 +96,23 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM syncd.exe /F"; Flags: runhidden
 
 [Code]
 function InitializeSetup(): Boolean;
+var
+  Index: Integer;
+  Argument: String;
 begin
+  Result := False;
+  { No authenticated update transaction exists yet. Do not accept a feed or
+    caller flag as permission for silent payload replacement. }
+  for Index := 1 to ParamCount do
+  begin
+    Argument := Uppercase(ParamStr(Index));
+    if (Argument = '/SYNCUPDATE') or (Pos('/SYNCUPDATE=', Argument) = 1) then
+    begin
+      Log('Automatic installation is not enabled: no authenticated maintenance transaction.');
+      if not WizardSilent then
+        MsgBox('Automatic installation is not enabled in this release. Close your Sync sessions and run the installer manually.', mbError, MB_OK);
+      Exit;
+    end;
+  end;
   Result := True;
 end;

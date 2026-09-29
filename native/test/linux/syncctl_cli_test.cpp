@@ -97,3 +97,13 @@ SYNC_TEST(syncctl_pair_prompt_rejects_wrong_shape_and_bounds) {
     SYNC_REQUIRE(output.str().empty());
   }
 }
+
+SYNC_TEST(syncctl_update_cli_has_only_fixed_operations) {
+  SYNC_REQUIRE(parse(std::array<std::string_view,2>{"update", "status"}).ok());
+  SYNC_REQUIRE(parse(std::array<std::string_view,2>{"update", "apply"}).ok());
+  SYNC_REQUIRE(parse(std::array<std::string_view,2>{"update", "disable"}).ok());
+  SYNC_REQUIRE(parse(std::array<std::string_view,4>{"update", "enable", "--user", "artist"}).ok());
+  SYNC_REQUIRE(!parse(std::array<std::string_view,2>{"update", "enable"}).ok());
+  SYNC_REQUIRE(!parse(std::array<std::string_view,2>{"update", "apt-hook"}).ok());
+  SYNC_REQUIRE(!parse(std::array<std::string_view,4>{"update", "apply", "--root", "/tmp"}).ok());
+}

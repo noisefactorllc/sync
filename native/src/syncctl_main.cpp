@@ -4,6 +4,7 @@
 #include <sync/platform/linux_camera_setup.hpp>
 
 #include <exception>
+#include <unistd.h>
 #include <iostream>
 #include <cstdlib>
 #include <string_view>
@@ -21,6 +22,19 @@ int main(int argc, char** argv) {
     if (!parsed.ok()) {
       syncctl::print_usage(std::cerr);
       return syncctl::kUsageExit;
+    }
+    if (parsed.options.command == syncctl::Command::Update) {
+      if (parsed.options.update_operation == "enable") {
+        ::execl("/usr/bin/python3", "python3", "-I",
+                "/usr/libexec/noisedeck-sync-update", "enable", "--user",
+                parsed.options.user.c_str(), static_cast<char*>(nullptr));
+      } else {
+        ::execl("/usr/bin/python3", "python3", "-I",
+                "/usr/libexec/noisedeck-sync-update",
+                parsed.options.update_operation.c_str(), static_cast<char*>(nullptr));
+      }
+      std::cerr << "syncctl: packaged update helper is unavailable\n";
+      return syncctl::kFailureExit;
     }
     if (parsed.options.command == syncctl::Command::Doctor) {
       const char* runtime = std::getenv("XDG_RUNTIME_DIR");

@@ -4,6 +4,7 @@ Documentation=https://sync.noisedeck.app/
 
 [Service]
 Type=simple
+ExecCondition=/usr/bin/test ! -e /var/lib/noisedeck-sync-update/transaction.json
 ExecStart=/usr/bin/syncd
 Restart=on-failure
 RestartSec=2s

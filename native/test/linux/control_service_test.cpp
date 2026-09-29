@@ -336,3 +336,74 @@ SYNC_TEST(linux_runtime_status_returns_coherent_concurrent_snapshots) {
   }
   writer.join();
 }
+
+namespace {
+class UpdateMaintenance final : public control::LinuxUpdateMaintenanceSource {
+ public:
+  bool ready() noexcept override { return true; }
+  auto reserve(std::uint64_t generation, std::string_view digest) noexcept
+      -> control::LinuxUpdateReservation override {
+    if (generation != 7 || digest.size() != 64) return {};
+    ++reservations;
+    return {.token=19, .reason={}};
+  }
+  void cancel(std::uint64_t token) noexcept override {
+    if (token == 19) ++cancellations;
+  }
+  std::atomic<unsigned> reservations{0};
+  std::atomic<unsigned> cancellations{0};
+};
+constexpr std::string_view reserve_request =
+    R"({"version":1,"command":"update-reserve","generation":7,"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})";
+}
+
+SYNC_TEST(linux_update_root_reservation_is_released_when_channel_closes) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  UpdateMaintenance updates;
+  auto service = control::LinuxControlService({
+      .runtime_directory=directory.path().string(),
+      .expected_uid=static_cast<std::uint32_t>(::geteuid()),
+      .management=&management, .status=&status, .updates=&updates,
+      .peer_uid=peer_uid,
+  });
+  SYNC_REQUIRE(service.start());
+  injected_uid.store(0);
+  int probe=connect_to(service.socket_path());
+  send_json(probe,R"({"version":1,"command":"update-probe"})");
+  SYNC_REQUIRE(receive_json(probe).find("\"status\":\"idle\"") != std::string::npos);
+  ::close(probe);
+  SYNC_REQUIRE(updates.reservations.load()==0);
+  probe=connect_to(service.socket_path());
+  send_json(probe,R"({"version":1,"command":"update-status"})");
+  SYNC_REQUIRE(receive_json(probe).find("\"runningVersion\"") != std::string::npos);
+  ::close(probe);
+  const int client=connect_to(service.socket_path());
+  send_json(client,reserve_request);
+  SYNC_REQUIRE(receive_json(client).find("\"token\":19") != std::string::npos);
+  SYNC_REQUIRE(updates.reservations.load()==1);
+  ::close(client);
+  for (int i=0; i<100 && updates.cancellations.load()==0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  SYNC_REQUIRE(updates.cancellations.load()==1);
+}
+
+SYNC_TEST(linux_update_nonroot_cannot_reserve_and_missing_interlock_fails_closed) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  auto service=make_service(directory,management,status);
+  SYNC_REQUIRE(service.start());
+  injected_uid.store(static_cast<std::uint32_t>(::geteuid())+1U);
+  int client=connect_to(service.socket_path());
+  SYNC_REQUIRE(receive_json(client).find("peer_not_authorized") != std::string::npos);
+  ::close(client);
+  injected_uid.store(0);
+  client=connect_to(service.socket_path());
+  send_json(client,reserve_request);
+  SYNC_REQUIRE(receive_json(client).find("interlock_unavailable") != std::string::npos);
+  ::close(client);
+}

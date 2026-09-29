@@ -47,6 +47,23 @@ class LinuxRuntimeStatus final : public LinuxRuntimeStatusSource {
   const DaemonMetrics& metrics_;
 };
 
+struct LinuxUpdateReservation {
+  std::uint64_t token = 0;
+  std::string_view reason = "interlock_unavailable";
+};
+
+// A successful reservation blocks all new media admission until cancel().
+// The control channel owns that reservation; disconnect always releases it.
+class LinuxUpdateMaintenanceSource {
+ public:
+  virtual ~LinuxUpdateMaintenanceSource() = default;
+  [[nodiscard]] virtual bool ready() noexcept { return false; }
+  [[nodiscard]] virtual auto reserve(std::uint64_t generation,
+                                    std::string_view digest) noexcept
+      -> LinuxUpdateReservation = 0;
+  virtual void cancel(std::uint64_t token) noexcept = 0;
+};
+
 class LinuxControlService final : public pairing::PairingPrompt {
  public:
   struct Options {
@@ -54,6 +71,7 @@ class LinuxControlService final : public pairing::PairingPrompt {
     std::uint32_t expected_uid = 0;
     pairing::PairingManagement* management = nullptr;
     LinuxRuntimeStatusSource* status = nullptr;
+    LinuxUpdateMaintenanceSource* updates = nullptr;
     // Test seam. Production obtains SO_PEERCRED directly when this is null.
     std::uint32_t (*peer_uid)(int descriptor) noexcept = nullptr;
   };

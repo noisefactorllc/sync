@@ -120,6 +120,35 @@ jobs:
       - name: Run real-daemon loopback tests
         run: SYNC_DAEMON_PATH=build/syncd npm run test:integration
 
+      # Compile the opt-in adapter too: ordinary builds deliberately carry no
+      # update key and would otherwise leave the SDK-facing code unchecked.
+      - name: Compile against pinned Sparkle without enabling a live feed
+        if: matrix.name == 'Release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/sync-sparkle-2.10.0"
+          ARCHIVE="$RUNNER_TEMP/Sparkle-2.10.0.tar.xz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz \
+            --output "$ARCHIVE"
+          echo "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c  $ARCHIVE" | shasum -a 256 -c -
+          mkdir -p "$SDK"
+          # Only regular SDK compilation inputs; no runtime helpers are staged.
+          tar -xJf "$ARCHIVE" -C "$SDK" \
+            ./Sparkle.framework/Versions/B/Headers \
+            ./Sparkle.framework/Versions/B/Resources/Info.plist \
+            ./Sparkle.framework/Versions/B/Sparkle
+          cp -R "$SDK/Sparkle.framework/Versions/B/Headers" "$SDK/Sparkle.framework/Headers"
+          cmake -S . -B build-updater \
+            -DFETCHCONTENT_SOURCE_DIR_RTAUDIO="$PWD/build/_deps/rtaudio-src" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            '-DCMAKE_CXX_FLAGS=-Wall -Wextra -Wpedantic -Werror' \
+            '-DCMAKE_OBJCXX_FLAGS=-Wall -Wextra -Wpedantic -Werror' \
+            -DSYNC_SPARKLE_ROOT="$SDK" \
+            -DSYNC_MACOS_UPDATE_EDDSA_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          cmake --build build-updater --target sync_menu --parallel 4
+
   # ThreadSanitizer over the tests that exercise cross-thread handoffs: the
   # Metal publisher's completion handlers, the render ring's seqlocked slots
   # and leases, and the render supervisor. Metal is not instrumented, so the
@@ -148,7 +177,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_OBJCXX_FLAGS="$FLAGS" \
             -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
           cmake --build build-tsan --parallel 4 \
-            --target sync_metal_publisher_tests sync_render_ring_tests sync_render_supervisor_tests
+            --target sync_metal_publisher_tests sync_render_ring_tests sync_render_supervisor_tests sync_update_coordinator_tests
 
       - name: Run the threaded tests under TSan
         env:
@@ -157,6 +186,7 @@ jobs:
           build-tsan/sync_metal_publisher_tests
           build-tsan/sync_render_ring_tests
           build-tsan/sync_render_supervisor_tests
+          build-tsan/sync_update_coordinator_tests
 
   linux:
     needs: changes
@@ -618,6 +648,43 @@ jobs:
           name: sync-windows-audio-qualification
           path: audio-qualification/
           if-no-files-found: ignore
+
+      - name: Compile the configured WinSparkle adapter
+        if: matrix.name == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'WinSparkle-0.9.4.zip'
+          Invoke-WebRequest -Uri 'https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip' -OutFile $archive
+          $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveHash -ne '6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976') {
+            throw 'WinSparkle 0.9.4 archive SHA-256 mismatch'
+          }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'sync-winsparkle-sdk'
+          Expand-Archive -LiteralPath $archive -DestinationPath $unpacked -Force
+          $sdk = Join-Path $unpacked 'WinSparkle-0.9.4'
+          $dll = Join-Path $sdk 'x64/Release/WinSparkle.dll'
+          $dllHash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($dllHash -ne '9b43b1c16ee39fb9a91b5bd75138767898779510e0836be2919250607cdbe8ab') {
+            throw 'WinSparkle 0.9.4 x64 DLL SHA-256 mismatch'
+          }
+          # Public RFC 8032 test-vector key and an invalid publisher pin:
+          # this build checks compilation only and is never run or packaged.
+          $testKey = '11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo='
+          $testPublisher = '0' * 64
+          $configuredBuild = Join-Path $env:RUNNER_TEMP 'sync-winsparkle-build'
+          cmake -S . -B $configuredBuild -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_BUILD_TYPE=Release `
+            "-DSYNC_WINSPARKLE_ROOT=$sdk" `
+            "-DSYNC_WINSPARKLE_DLL=$dll" `
+            "-DSYNC_WINSPARKLE_DLL_SHA256=$dllHash" `
+            "-DSYNC_WINSPARKLE_LICENSE=$sdk/COPYING" `
+            "-DSYNC_WINDOWS_UPDATE_EDDSA_KEY=$testKey" `
+            "-DSYNC_WINDOWS_UPDATE_PUBLISHER_SHA256=$testPublisher"
+          if ($LASTEXITCODE -ne 0) { throw 'configured WinSparkle build configuration failed' }
+          cmake --build $configuredBuild --config Release --target sync_menu --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'configured WinSparkle adapter compilation failed' }
 
   windows-package:
     needs: changes

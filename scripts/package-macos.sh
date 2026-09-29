@@ -97,6 +97,12 @@ rm -rf "$bundle"
 mkdir -p "$package_dir"
 ditto "$build_dir/Sync.app" "$bundle"
 mkdir -p "$bundle/Contents/Frameworks" "$bundle/Contents/Resources"
+if [[ -n "${SYNC_SPARKLE_ROOT:-}" ]]; then
+  test -d "$SYNC_SPARKLE_ROOT/Sparkle.framework"
+  test -f "$SYNC_SPARKLE_ROOT/LICENSE"
+  ditto "$SYNC_SPARKLE_ROOT/Sparkle.framework" "$bundle/Contents/Frameworks/Sparkle.framework"
+  cp "$SYNC_SPARKLE_ROOT/LICENSE" "$bundle/Contents/Resources/Sparkle-LICENSE.txt"
+fi
 cp "$build_dir/syncd" "$bundle/Contents/MacOS/syncd"
 chmod 0755 "$bundle/Contents/MacOS/Sync" "$bundle/Contents/MacOS/syncd"
 

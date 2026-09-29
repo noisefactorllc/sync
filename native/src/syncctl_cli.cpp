@@ -309,6 +309,18 @@ auto parse(std::span<const std::string_view> arguments) -> ParseResult {
     result.options.command = Command::Revoke;
     result.options.origin = normalized.origin;
     result.options.json = arguments.size() == 3;
+  } else if (command == "update") {
+    if (arguments.size() == 2 && (arguments[1] == "status" ||
+        arguments[1] == "disable" || arguments[1] == "apply")) {
+      result.options.update_operation.assign(arguments[1]);
+    } else if (arguments.size() == 4 && arguments[1] == "enable" &&
+               arguments[2] == "--user" && valid_user(arguments[3])) {
+      result.options.update_operation = "enable";
+      result.options.user.assign(arguments[3]);
+    } else {
+      return result;
+    }
+    result.options.command = Command::Update;
   } else if (command == "camera") {
     if (arguments.size() != 4 || arguments[1] != "setup" ||
         arguments[2] != "--user" || !valid_user(arguments[3])) {
@@ -329,7 +341,9 @@ void print_usage(std::ostream& error) {
            "       syncctl pairings [--json]\n"
            "       syncctl revoke <origin> [--json]\n"
            "       syncctl doctor [--json]\n"
-           "       syncctl camera setup --user <name>\n";
+           "       syncctl camera setup --user <name>\n"
+           "       syncctl update status|apply|disable\n"
+           "       syncctl update enable --user <name>\n";
 }
 
 auto escape_terminal_text(std::string_view input) -> std::string {
@@ -373,7 +387,7 @@ auto read_approval(std::istream& input) -> bool {
 
 auto execute(const Options& options, std::istream& input,
              std::ostream& output, std::ostream& error) -> int {
-  if (options.command == Command::CameraSetup) {
+  if (options.command == Command::CameraSetup || options.command == Command::Update) {
     error << "syncctl: command_not_built\n";
     return kFailureExit;
   }
@@ -405,6 +419,7 @@ auto execute(const Options& options, std::istream& input,
                 "}";
       break;
     case Command::CameraSetup:
+    case Command::Update:
       return close_and_return(kFailureExit);
   }
   if (!send_request(descriptor, request)) {

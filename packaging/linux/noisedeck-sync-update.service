@@ -1,0 +1,12 @@
+[Unit]
+Description=Noisedeck Sync coordinated package maintenance
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/noisedeck-sync/update.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/libexec/noisedeck-sync-update apply --automatic
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle

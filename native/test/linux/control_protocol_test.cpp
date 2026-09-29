@@ -21,6 +21,10 @@ SYNC_TEST(linux_control_protocol_decodes_each_exact_command_shape) {
                 linux_control::LinuxControlCommand::Decision},
       std::pair{R"({"version":1,"command":"status"})",
                 linux_control::LinuxControlCommand::Status},
+      std::pair{R"({"version":1,"command":"update-probe"})",
+                linux_control::LinuxControlCommand::UpdateProbe},
+      std::pair{R"({"version":1,"command":"update-status"})",
+                linux_control::LinuxControlCommand::UpdateStatus},
       std::pair{R"({"version":1,"command":"doctor"})",
                 linux_control::LinuxControlCommand::Doctor},
       std::pair{R"({"version":1,"command":"pairings"})",
@@ -111,3 +115,16 @@ SYNC_TEST(linux_control_json_strings_escape_terminal_control_bytes) {
 }
 
 }  // namespace
+
+SYNC_TEST(linux_update_reservation_requires_digest_and_generation) {
+  using noisefactor::sync::linux_control::decode_linux_control_request;
+  SYNC_REQUIRE(decode_linux_control_request(R"({"version":1,"command":"update-reserve","generation":7,"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})").valid);
+  SYNC_REQUIRE(decode_linux_control_request(R"({"version":1,"command":"update-cancel","generation":7})").valid);
+  for (const std::string_view input : {
+      R"({"version":1,"command":"update-reserve","generation":7})",
+      R"({"version":1,"command":"update-reserve","generation":0,"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})",
+      R"({"version":1,"command":"update-reserve","generation":7,"digest":"bad"})",
+      R"({"version":1,"command":"update-cancel","generation":0})"}) {
+    SYNC_REQUIRE(!decode_linux_control_request(input).valid);
+  }
+}

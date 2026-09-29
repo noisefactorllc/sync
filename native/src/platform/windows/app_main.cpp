@@ -12,6 +12,7 @@
 #include "camera_source/source_guids.hpp"
 #include "companion_process.hpp"
 #include "resource.h"
+#include "update_adapter.hpp"
 
 #include "../../companion_management.hpp"
 #include "../../owner_dispatch_queue.hpp"
@@ -70,6 +71,10 @@ constexpr UINT kCommandCopyDiagnostics = 1002;
 constexpr UINT kCommandQuit = 1003;
 constexpr UINT kCommandEnableCamera = 1005;
 constexpr UINT kCommandPairingsRefresh = 1004;
+constexpr UINT kCommandCheckUpdates = 1006;
+constexpr UINT kCommandAutomaticChecks = 1007;
+constexpr UINT kCommandPauseUpdates = 1008;
+constexpr UINT kCommandPauseUpdatesIndefinitely = 1009;
 // Dynamic pairing-revoke items get ids in [kCommandPairingsBase,
 // kCommandPairingsBase + kMaximumPairingMenuEntries), one per cached
 // pairing, indexed positionally -- mirroring macOS's use of representedObject
@@ -166,6 +171,7 @@ void copy_to_clipboard(HWND owner, const std::wstring& text) {
 
 struct AppState {
   HWND hwnd = nullptr;
+  noisefactor::sync::windows_update::UpdateAdapter updater;
   // Where the camera stands, recomputed at startup and after every attempt to
   // enable it.
   camera::CameraActivationState camera_state = camera::CameraActivationState::Unknown;
@@ -600,6 +606,24 @@ void show_context_menu(AppState& app) {
 
   ::AppendMenuW(menu, MF_STRING, kCommandCopyDiagnostics, L"Copy Diagnostics");
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  ::AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, app.updater.status().c_str());
+  if (app.updater.available())
+    ::AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, app.updater.last_check_status().c_str());
+  ::AppendMenuW(menu, MF_STRING, kCommandCheckUpdates, L"Check for Updates…");
+  UINT update_flags = MF_STRING;
+  if (!app.updater.available() || !app.updater.automatic_checks_available()) update_flags |= MF_GRAYED;
+  if (app.updater.automatic_checks_enabled()) update_flags |= MF_CHECKED;
+  ::AppendMenuW(menu, update_flags, kCommandAutomaticChecks,
+                app.updater.automatic_checks_available() ? L"Automatically Check for Updates" :
+                L"Automatic Checks Unavailable in This Build");
+  if (app.updater.automatic_checks_available()) {
+    const UINT pause_flags = MF_STRING | (app.updater.available() ? 0 : MF_GRAYED);
+    ::AppendMenuW(menu, pause_flags, kCommandPauseUpdates,
+                  app.updater.paused() ? L"Resume Update Checks" : L"Pause Update Checks for 24 Hours");
+    ::AppendMenuW(menu, pause_flags | (app.updater.paused() ? MF_GRAYED : 0),
+                  kCommandPauseUpdatesIndefinitely, L"Pause Update Checks Until Resumed");
+  }
+  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kCommandQuit, L"Quit Sync");
 
   POINT cursor{};
@@ -614,7 +638,16 @@ void show_context_menu(AppState& app) {
 }
 
 void handle_command(AppState& app, UINT command) {
-  if (command == kCommandRestart) {
+  if (command == kCommandCheckUpdates) {
+    app.updater.check_for_updates(app.hwnd);
+  } else if (command == kCommandAutomaticChecks) {
+    app.updater.set_automatic_checks_enabled(!app.updater.automatic_checks_enabled());
+  } else if (command == kCommandPauseUpdates) {
+    if (app.updater.paused()) app.updater.resume_checks();
+    else app.updater.pause_for_24_hours();
+  } else if (command == kCommandPauseUpdatesIndefinitely) {
+    app.updater.pause_indefinitely();
+  } else if (command == kCommandRestart) {
     restart_sync(app);
   } else if (command == kCommandEnableCamera) {
     enable_camera(app);
@@ -623,7 +656,9 @@ void handle_command(AppState& app, UINT command) {
     // available.
     if (app.camera_state == camera::CameraActivationState::Active) restart_sync(app);
   } else if (command == kCommandCopyDiagnostics) {
-    copy_to_clipboard(app.hwnd, to_wide(app.model->diagnostics()));
+    copy_to_clipboard(app.hwnd, to_wide(app.model->diagnostics()) +
+                     L"\nUpdates: " + app.updater.status() + L"\n" +
+                     app.updater.last_check_status());
   } else if (command == kCommandPairingsRefresh) {
     app.pairings_fetched_ever = false;  // force refresh even if "fresh"
     refresh_pairings(app);
@@ -706,6 +741,7 @@ LRESULT CALLBACK window_procedure(HWND hwnd, UINT message, WPARAM wparam,
   case WM_TIMER:
     if (app == nullptr) return 0;
     if (wparam == kPollTimerId) {
+      if (!app->quitting.load(std::memory_order_acquire)) app->updater.poll();
       poll_status(*app);
     } else if (wparam == kRecoveryTimerId) {
       ::KillTimer(hwnd, kRecoveryTimerId);
@@ -830,6 +866,7 @@ int run_tray_application() {
   ::wcsncpy_s(icon_data.szTip, L"Sync Preview", _TRUNCATE);
   ::Shell_NotifyIconW(NIM_ADD, &icon_data);
 
+  app.updater.initialize(to_wide(noisefactor::sync::kProductVersion));
   probe_then_start(app);
   ::SetTimer(hwnd, kPollTimerId, 1000, nullptr);
   refresh_pairings(app);
@@ -846,6 +883,7 @@ int run_tray_application() {
   // thread; anything dispatched from now on runs inline on its own thread.
   // That is what lets CompanionProcess's destructor below -- which may still
   // be waiting on background work via drain_operations() -- finish.
+  app.updater.cleanup();
   app.dispatches.mark_owner_gone();
   app.dispatches.drain();
   app.process.reset();

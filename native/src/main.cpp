@@ -6,6 +6,7 @@
 #include <sync/render/render_ring.hpp>
 #include <sync/render/render_supervisor.hpp>
 #include <sync/server.hpp>
+#include <sync/update_coordinator.hpp>
 #include <sync/audio_capture.hpp>
 
 #include <sync/platform/ndi_publisher.hpp>
@@ -41,6 +42,7 @@
 #include <sync/platform/camera_publisher.hpp>
 #include <sync/platform/linux_camera_sink.hpp>
 #include <sync/platform/linux_control_service.hpp>
+#include <sync/platform/linux_update_lock.hpp>
 #include <unistd.h>
 #endif
 
@@ -82,6 +84,38 @@ void pump_macos_events(void *) noexcept {
 #endif
 
 #if defined(__linux__)
+class LinuxUpdateMaintenance final
+    : public nfsync::linux_control::LinuxUpdateMaintenanceSource {
+ public:
+  explicit LinuxUpdateMaintenance(nfsync::update::Coordinator& coordinator)
+      : coordinator_(coordinator) {}
+  bool ready() noexcept override {
+    try { return coordinator_.ready(uv_hrtime() / 1000000); }
+    catch (...) { return false; }
+  }
+  nfsync::linux_control::LinuxUpdateReservation reserve(
+      std::uint64_t, std::string_view digest) noexcept override {
+    try {
+      const auto now = uv_hrtime() / 1000000;
+      const auto token = coordinator_.reserve(digest, now);
+      if (!token) return {0, "active_or_unknown"};
+      if (!coordinator_.commit(*token, digest, now)) {
+        (void)coordinator_.cancel(*token, now);
+        return {0, "interlock_unavailable"};
+      }
+      return {*token, {}};
+    } catch (...) {
+      return {0, "interlock_unavailable"};
+    }
+  }
+  void cancel(std::uint64_t token) noexcept override {
+    try { (void)coordinator_.cancel(token, uv_hrtime() / 1000000); }
+    catch (...) {}  // Failure retains the exclusion; it never admits a session.
+  }
+ private:
+  nfsync::update::Coordinator& coordinator_;
+};
+
 void update_linux_camera_health(
     void *context, bool healthy,
     nfsync::camera::CameraSinkUnavailableReason reason,
@@ -396,6 +430,13 @@ int run_with_providers(nfsync::ServerOptions &options,
   options.platform_event_pump = pump_windows_events;
 #endif
 
+  // Camera consumer activity cannot yet be established on all supported
+  // drivers. Selected camera output and a native renderer therefore block
+  // maintenance. Each WebSocket holds a separate atomic activity lease.
+  if (options.update_coordinator != nullptr) {
+    options.update_coordinator->set_external_state(
+        !camera_selected && options.render == nullptr, uv_hrtime() / 1000000);
+  }
   nfsync::PublisherHub hub(assembly.publishers());
   return nfsync::run_server(options, &hub);
 }
@@ -498,11 +539,13 @@ int run_production(nfsync::ServerOptions &options,
   }
   nfsync::DaemonMetrics metrics;
   nfsync::linux_control::LinuxRuntimeStatus runtime_status(metrics);
+  LinuxUpdateMaintenance maintenance(*options.update_coordinator);
   nfsync::linux_control::LinuxControlService control({
       .runtime_directory = runtime_directory,
       .expected_uid = static_cast<std::uint32_t>(::geteuid()),
       .management = &authority,
       .status = &runtime_status,
+      .updates = &maintenance,
   });
   if (!control.start()) {
     std::cerr << "syncd: failed to create the owner-only control socket\n";
@@ -610,7 +653,16 @@ int main(int argc, char** argv) {
     }
 #endif
 
+#if defined(__linux__)
+    nfsync::update::LinuxStartupLock startup_lock;
+    if (!startup_lock.acquire()) {
+      std::cerr << "syncd: update maintenance is in progress or requires repair\n";
+      return nfsync::cli::kFailureExit;
+    }
+#endif
+    nfsync::update::Coordinator update_coordinator;
     nfsync::ServerOptions options;
+    options.update_coordinator = &update_coordinator;
     options.port = command.port;
     nfsync::render::RenderSupervisorOptions render_options;
     if (!command.render_join.empty()) {

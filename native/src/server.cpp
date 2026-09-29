@@ -1,3 +1,4 @@
+#include <sync/update_coordinator.hpp>
 #include <sync/server.hpp>
 
 #include <sync/daemon_metrics.hpp>
@@ -111,6 +112,7 @@ struct Connection {
   std::size_t slot = kMaximumConnections;
   ConnectionRole role = ConnectionRole::Http;
   bool closing = false;
+  bool update_activity = false;
   bool audio_pending = false;
   bool audio_approved = false;
   bool handle_closed = false;
@@ -672,6 +674,9 @@ class Server {
       // waits for a driver operation belonging to another connection.
       audio_workers_[connection.slot].reset();
       connections_[connection.slot] = nullptr;
+    }
+    if (connection.update_activity && options_.update_coordinator != nullptr) {
+      options_.update_coordinator->end_activity(uv_hrtime() / 1000000);
     }
     delete &connection;
   }
@@ -1562,6 +1567,17 @@ class Server {
     if (accept.empty()) {
       send_http(connection, 400, "Bad Request", "{\"error\":\"bad_key\"}");
       return false;
+    }
+    // Keep the lease until the connection and its audio worker are gone.
+    // Holding even an idle control connection is conservative: it can start
+    // audio/video at any time. Plain health requests do not acquire a lease.
+    if (options_.update_coordinator != nullptr && !connection.update_activity) {
+      if (!options_.update_coordinator->begin_activity(uv_hrtime() / 1000000)) {
+        send_http(connection, 503, "Service Unavailable",
+                  "{\"error\":\"update_pending\"}");
+        return false;
+      }
+      connection.update_activity = true;
     }
     std::string response =
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"

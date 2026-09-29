@@ -27,6 +27,10 @@ test("Linux package is a complete conservative amd64 daemon artifact",
   for (const expected of [
     "./usr/bin/syncd",
     "./usr/bin/syncctl",
+    "./usr/libexec/noisedeck-sync-update",
+    "./usr/lib/systemd/system/noisedeck-sync-update.service",
+    "./usr/lib/systemd/system/noisedeck-sync-update.timer",
+    "./usr/lib/tmpfiles.d/noisedeck-sync-update.conf",
     "./usr/lib/systemd/user/noisedeck-sync.service",
     "./usr/lib/udev/rules.d/70-noisedeck-sync-camera.rules",
     "./usr/share/noisedeck-sync/noisedeck-sync-camera.modprobe",
@@ -60,7 +64,7 @@ test("Linux package is a complete conservative amd64 daemon artifact",
   const controlRoot = await mkdtemp(path.join(os.tmpdir(), "sync-package-control-"));
   try {
     await execFile("dpkg-deb", ["--control", archive, controlRoot]);
-    const scripts = (await Promise.all(["postrm"].map(async name => {
+    const scripts = (await Promise.all(["postrm", "prerm"].map(async name => {
       try { return await readFile(path.join(controlRoot, name), "utf8"); }
       catch { return ""; }
     }))).join("\n");

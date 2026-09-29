@@ -1,4 +1,5 @@
 #include "companion_process.hpp"
+#import "update_controller.hpp"
 
 #import <AppKit/AppKit.h>
 #import <ServiceManagement/ServiceManagement.h>
@@ -63,6 +64,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
 @end
 
 @implementation SyncAppDelegate {
+  SyncUpdateController* _updates;
   NSStatusItem* _statusItem;
   NSMenu* _menu;
   NSTimer* _pollTimer;
@@ -85,6 +87,8 @@ std::uint64_t monotonic_milliseconds() noexcept {
   (void)notification;
   _model = std::make_unique<companion::CompanionModel>(
       std::string(noisefactor::sync::kProductVersion));
+
+  _updates = [[SyncUpdateController alloc] initWithDefaults:NSUserDefaults.standardUserDefaults];
 
   NSBundle* bundle = NSBundle.mainBundle;
   NSString* helper = [bundle.bundlePath
@@ -555,6 +559,28 @@ std::uint64_t monotonic_milliseconds() noexcept {
                                           keyEquivalent:@""];
   about.target = self;
   [_menu addItem:about];
+  [_menu addItem:disabled_item(_updates.statusText)];
+  [_menu addItem:disabled_item(_updates.lastCheckText)];
+  NSMenuItem* checkUpdate = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+      action:@selector(checkForUpdates:) keyEquivalent:@""];
+  checkUpdate.target = _updates;
+  [_menu addItem:checkUpdate];
+  NSMenuItem* automaticUpdate = [[NSMenuItem alloc] initWithTitle:@"Check for Updates Automatically"
+      action:@selector(toggleAutomaticChecks:) keyEquivalent:@""];
+  automaticUpdate.target = _updates;
+  automaticUpdate.state = (_updates.configured && _updates.automaticChecksEnabled) ? NSControlStateValueOn : NSControlStateValueOff;
+  automaticUpdate.enabled = _updates.configured;
+  [_menu addItem:automaticUpdate];
+  NSMenuItem* pauseUpdate = [[NSMenuItem alloc] initWithTitle:_updates.paused ? @"Resume Update Checks" : @"Pause Update Checks for 24 Hours"
+      action:_updates.paused ? @selector(resumeUpdates:) : @selector(pauseFor24Hours:) keyEquivalent:@""];
+  pauseUpdate.target = _updates;
+  pauseUpdate.enabled = _updates.configured;
+  [_menu addItem:pauseUpdate];
+  NSMenuItem* pauseIndefinitely = [[NSMenuItem alloc] initWithTitle:@"Pause Update Checks Until Resumed"
+      action:@selector(pauseIndefinitely:) keyEquivalent:@""];
+  pauseIndefinitely.target = _updates;
+  pauseIndefinitely.enabled = _updates.configured && !_updates.paused;
+  [_menu addItem:pauseIndefinitely];
   NSMenuItem* quit = [[NSMenuItem alloc] initWithTitle:@"Quit Sync"
                                                 action:@selector(quitSync:)
                                          keyEquivalent:@"q"];

@@ -15,6 +15,7 @@ enum class Field : std::uint8_t {
   Generation,
   Approved,
   Origin,
+  Digest,
 };
 
 constexpr std::uint8_t bit(Field field) noexcept {
@@ -94,6 +95,7 @@ class RequestParser {
     if (key == "generation") return Field::Generation;
     if (key == "approved") return Field::Approved;
     if (key == "origin") return Field::Origin;
+    if (key == "digest") return Field::Digest;
     return std::nullopt;
   }
 
@@ -184,6 +186,8 @@ class RequestParser {
         return boolean(request_.approved);
       case Field::Origin:
         return string(origin_);
+      case Field::Digest:
+        return string(digest_);
     }
     return false;
   }
@@ -214,6 +218,25 @@ class RequestParser {
       const auto normalized = normalize_origin(origin_.view());
       if (!normalized.ok()) return fail("invalid_origin");
       request_.origin = normalized.origin;
+    } else if (command_.view() == "update-status") {
+      request_.command = LinuxControlCommand::UpdateStatus;
+    } else if (command_.view() == "update-probe") {
+      request_.command = LinuxControlCommand::UpdateProbe;
+    } else if (command_.view() == "update-reserve") {
+      request_.command = LinuxControlCommand::UpdateReserve;
+      required |= bit(Field::Generation) | bit(Field::Digest);
+      if (request_.generation == 0) return fail("invalid_generation");
+      if (digest_.length != 64) return fail("invalid_digest");
+      for (std::size_t index = 0; index < 64; ++index) {
+        const char value = digest_.bytes[index];
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f'))) return fail("invalid_digest");
+        request_.digest[index] = value;
+      }
+    } else if (command_.view() == "update-cancel") {
+      request_.command = LinuxControlCommand::UpdateCancel;
+      required |= bit(Field::Generation);
+      if (request_.generation == 0) return fail("invalid_generation");
     } else {
       return fail("invalid_command");
     }
@@ -226,6 +249,7 @@ class RequestParser {
   std::uint8_t seen_ = 0;
   std::uint64_t version_ = 0;
   FixedString<16> command_{};
+  FixedString<64> digest_{};
   FixedString<kMaximumOriginInputBytes> origin_{};
   LinuxControlRequest request_{};
 };

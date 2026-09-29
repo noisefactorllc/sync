@@ -9,6 +9,7 @@
 namespace noisefactor::sync {
 
 class DaemonMetrics;
+namespace update { class Coordinator; }
 namespace audio { class InputBackend; }
 
 namespace pairing {
@@ -39,6 +40,7 @@ struct ProviderCapability {
 };
 
 struct ServerOptions {
+  update::Coordinator* update_coordinator = nullptr;
   std::uint16_t port = 0;
   std::string allowed_origin;
   std::string test_token;

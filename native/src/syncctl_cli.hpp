@@ -15,13 +15,14 @@ inline constexpr int kFailureExit = 1;
 inline constexpr int kUsageExit = 2;
 inline constexpr int kDurabilityUncertainExit = 3;
 
-enum class Command { Pair, Status, Pairings, Revoke, Doctor, CameraSetup };
+enum class Command { Pair, Status, Pairings, Revoke, Doctor, CameraSetup, Update };
 
 struct Options {
   Command command = Command::Status;
   bool json = false;
   NormalizedOrigin origin{};
   std::string user;
+  std::string update_operation;
 };
 
 struct ParseResult {
