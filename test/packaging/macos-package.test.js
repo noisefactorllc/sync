@@ -167,6 +167,18 @@ test("native menu guide opens the shipped public documentation asset", () => {
   assert.doesNotMatch(appSource, /https:\/\/noisedeck\.app\/docs\/Sync"/);
 });
 
+test("native menu About activates the accessory app before showing its panel", () => {
+  const appSource = readFileSync(
+    path.join(sourceDirectory, "native/src/platform/macos/app_main.mm"), "utf8",
+  );
+  const showAbout = appSource.match(/- \(void\)showAbout:\(id\)sender \{[\s\S]*?\n\}/);
+  assert.ok(showAbout, "showAbout: handler not found");
+  const activate = showAbout[0].indexOf("[NSApp activateIgnoringOtherApps:YES]");
+  const panel = showAbout[0].indexOf("orderFrontStandardAboutPanelWithOptions:");
+  assert.ok(activate >= 0, "About must activate Sync or its panel opens behind other apps");
+  assert.ok(panel > activate, "About must activate Sync before ordering its panel front");
+});
+
 test("managed helper callbacks are owned and sequenced per child process", () => {
   const processSource = readFileSync(
     path.join(sourceDirectory, "native/src/platform/macos/companion_process.mm"),
