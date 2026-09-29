@@ -10,6 +10,7 @@ import sys
 sys.dont_write_bytecode = True
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts/linux-update.py'
 spec = importlib.util.spec_from_file_location('sync_linux_update', SCRIPT)
@@ -23,8 +24,11 @@ class FakeRunner:
     def __init__(self):
         self.calls = []
         self.responses = {}
+        self.before_install = None
     def __call__(self, argv):
         self.calls.append(argv)
+        if '--no-download' in argv and self.before_install is not None:
+            self.before_install()
         for key, response in self.responses.items():
             if key in argv:
                 if isinstance(response, Exception):
@@ -118,7 +122,15 @@ class LinuxUpdateTests(unittest.TestCase):
         self.runner.responses['--show-keys'] = 'pub:::::::::\nfpr:::::::::'+'A'*40+':\n'
         self.runner.responses['--print-architecture'] = 'amd64\n'
         self.runner.responses['policy'] = '  Candidate: 1.1\n'
-        self.runner.responses['show'] = 'Package: noisedeck-sync\nVersion: 1.1\nArchitecture: amd64\nSHA256: '+'a'*64+'\n'
+        deb = self.write('/var/cache/apt/archives/sync.deb','sync')
+        self.runner.responses['show'] = 'Package: noisedeck-sync\nVersion: 1.1\nArchitecture: amd64\nSHA256: '+hashlib.sha256(b'sync').hexdigest()+'\n'
+        self.runner.responses['--field'] = 'Package: noisedeck-sync\nVersion: 1.1\nArchitecture: amd64\n'
+        info = self.engine.path(module.LOCK).stat()
+        self.write('/proc/locks','1: FLOCK ADVISORY WRITE '+str(os.getpid())+' '+
+            format(os.major(info.st_dev),'x')+':'+format(os.minor(info.st_dev),'x')+':'+str(info.st_ino)+' 0 EOF\n')
+        # Model APT's boundary, keeping the real hook validation and durable
+        # marker transition in every successful transaction fixture.
+        self.runner.before_install = lambda: self.engine.apt_hook([str(deb)])
         self.runner.responses['--showformat=${Version}'] = '1.0'
         self.runner.responses['--showformat=${Status} ${Version}'] = 'install ok installed 1.1'
         self.runner.responses['--simulate'] = 'Inst noisedeck-sync [1.0] (1.1 Noisefactor Sync:noble-preview [amd64])\nConf noisedeck-sync (1.1 Noisefactor Sync:noble-preview [amd64])\n'
@@ -132,7 +144,73 @@ class LinuxUpdateTests(unittest.TestCase):
         self.assertEqual(len(installs), 1)
         self.assertEqual(installs[0][-2:], ['install', 'noisedeck-sync=1.1'])
         self.assertIn('--no-remove', installs[0])
+        self.assertIn('DPkg::Pre-Install-Pkgs::=/usr/libexec/noisedeck-sync-update apt-hook', installs[0])
         self.assertFalse((self.root/module.MARKER.lstrip('/')).exists())
+
+    def managed_transaction(self):
+        self.ready_transaction()
+        self.engine.managed=lambda users: {123:1000}
+        self.engine.probe=lambda uid,pid: None
+        self.engine.provider_baseline=lambda uid,pid: ['ndi']
+        calls=[]
+        self.engine.service=lambda uid,operation: calls.append((uid,operation)) or ''
+        waited=[]
+        self.engine.wait_activation=lambda uid,version,expected: waited.append((uid,version,expected))
+        class Channel:
+            def setblocking(self,flag): pass
+            def recv(self,size,flags): raise BlockingIOError
+        @contextlib.contextmanager
+        def reservation(uid,pid,digest): yield Channel()
+        self.engine.reservation=reservation
+        return calls,waited
+
+    def test_pre_dpkg_lock_failure_restores_the_unchanged_daemon(self):
+        calls,waited=self.managed_transaction()
+        def busy(): raise module.Deferred('APT could not acquire its package lock')
+        self.runner.before_install=busy
+        with self.assertRaisesRegex(module.Deferred,'package lock'):
+            self.engine.apply()
+        self.assertIn((1000,['start']),calls)
+        self.assertEqual(waited,[(1000,'1.0',['ndi'])])
+        self.assertFalse(self.engine.path(module.MARKER).exists())
+        self.assertFalse(self.engine.path(module.ACTIVATION).exists())
+
+    def test_hook_rejection_before_dpkg_restores_the_unchanged_daemon(self):
+        calls,waited=self.managed_transaction()
+        hook=self.runner.before_install
+        def changed_payload():
+            self.write('/var/cache/apt/archives/sync.deb','corrupt')
+            hook()
+        self.runner.before_install=changed_payload
+        with self.assertRaisesRegex(module.Deferred,'payload differs'):
+            self.engine.apply()
+        self.assertIn((1000,['start']),calls)
+        self.assertEqual(waited,[(1000,'1.0',['ndi'])])
+        self.assertFalse(self.engine.path(module.MARKER).exists())
+
+    def test_unproven_preinstall_state_never_restarts_daemons(self):
+        for change in ('installing','missing','malformed','changed-identity','unsafe-permissions'):
+            with self.subTest(change=change):
+                calls,waited=self.managed_transaction()
+                hook=self.runner.before_install
+                def ambiguous():
+                    path=self.engine.path(module.MARKER)
+                    if change == 'installing': hook()
+                    elif change == 'missing': path.unlink()
+                    elif change == 'malformed': path.write_text('{')
+                    elif change == 'unsafe-permissions': path.chmod(0o666)
+                    else:
+                        marker=json.loads(path.read_text()); marker['digest']='b'*64
+                        path.write_text(json.dumps(marker))
+                    raise module.Deferred('uncertain package outcome')
+                self.runner.before_install=ambiguous
+                with self.assertRaisesRegex(module.Deferred,'uncertain package outcome'):
+                    self.engine.apply()
+                self.assertNotIn((1000,['start']),calls)
+                self.assertEqual(waited,[])
+                self.assertFalse(self.engine.path(module.ACTIVATION).exists())
+                # Isolate each failure injection, never clear real machine state.
+                self.engine.path(module.MARKER).unlink(missing_ok=True)
 
     def test_unknown_process_or_unavailable_reservation_never_downloads_or_stops(self):
         self.ready_transaction()
@@ -232,6 +310,44 @@ class LinuxUpdateTests(unittest.TestCase):
                 self.engine.apt_hook([str(deb)])
         with self.engine.lock(module.LOCK): self.engine.apt_hook([str(deb)])
 
+    def hook_marker(self):
+        self.ready_transaction()
+        marker={'schema':1,'phase':'pre-install','version':'1.1','previous':'1.0',
+                'digest':hashlib.sha256(b'sync').hexdigest(),'users':[1000],
+                'maintenance_pid':os.getpid(),'maintenance_start':'42'}
+        self.write(module.MARKER,json.dumps(marker))
+        return marker,self.engine.path('/var/cache/apt/archives/sync.deb')
+
+    def test_authenticated_hook_durably_marks_payload_writes_before_returning(self):
+        marker,deb=self.hook_marker()
+        with self.engine.lock(module.LOCK):
+            self.engine.apt_hook([str(deb)])
+            marker['phase']='installing'
+            self.assertEqual(json.loads(self.engine.path(module.MARKER).read_text()),marker)
+            # Both global configuration and the fixed install option can invoke it.
+            self.engine.apt_hook([str(deb)])
+
+    def test_hook_accepts_only_descendants_of_the_recorded_live_maintenance_process(self):
+        marker,deb=self.hook_marker()
+        parent=marker['maintenance_pid']
+        child=parent+100000
+        self.write('/proc/'+str(child)+'/stat',str(child)+' (apt hook) S '+str(parent)+' '+'0 '*17+'43\n')
+        with self.engine.lock(module.LOCK), patch.object(module.os,'getpid',return_value=child):
+            self.engine.apt_hook([str(deb)])
+        self.assertEqual(json.loads(self.engine.path(module.MARKER).read_text())['phase'],'installing')
+        for case in ('unrelated','reused-pid','cycle','missing-parent'):
+            with self.subTest(case=case):
+                self.write(module.MARKER,json.dumps(marker))
+                ancestor=0 if case == 'unrelated' else child if case == 'cycle' else parent+1 if case == 'missing-parent' else parent
+                self.write('/proc/'+str(child)+'/stat',str(child)+' (apt hook) S '+str(ancestor)+' '+'0 '*17+'43\n')
+                if case == 'reused-pid':
+                    self.write('/proc/'+str(parent)+'/stat',str(parent)+' (new owner) S '+'0 '*18+'99\n')
+                else:
+                    self.write('/proc/'+str(parent)+'/stat',str(parent)+' (owner) S '+'0 '*18+'42\n')
+                with self.engine.lock(module.LOCK), patch.object(module.os,'getpid',return_value=child):
+                    with self.assertRaises(module.Deferred): self.engine.apt_hook([str(deb)])
+                self.assertEqual(json.loads(self.engine.path(module.MARKER).read_text())['phase'],'pre-install')
+
     def test_withdrawn_offer_or_new_reboot_requirement_never_stops_for_install(self):
         for changed in ('withdrawn','reboot'):
             with self.subTest(changed=changed):
@@ -288,13 +404,48 @@ class LinuxUpdateTests(unittest.TestCase):
         response['providers']=[]
         self.assertTrue(self.engine.activation_ready(1000,'1.1',[]))
 
-    def test_activation_record_without_expected_provider_state_is_rejected(self):
-        self.write(module.ACTIVATION,json.dumps({'schema':1,'version':'1.1','pending':[1000],'errors':{}}))
-        with self.assertRaisesRegex(module.Deferred,'invalid activation record'):
-            self.engine.restart_pending()
-        self.write(module.ACTIVATION,json.dumps({'schema':1,'version':'1.1','pending':[1000],'errors':{},'expected':{}}))
-        with self.assertRaisesRegex(module.Deferred,'invalid activation record'):
-            self.engine.restart_pending()
+    def test_legacy_activation_record_recovers_without_inventing_a_provider_baseline(self):
+        # The old updater keeps running after its package is replaced and writes
+        # this schema-1 journal. The newly installed helper must resume it.
+        self.write(module.ACTIVATION,'{"schema":1,"version":"1.1","pending":[1000],"errors":{}}')
+        self.engine.service=lambda uid,operation: 'MainPID=123\nActiveState=active\n'
+        self.engine.instances=lambda: {123:1000}
+        response={'version':1,'type':'status','runningVersion':'1.1',
+                  'providers':[{'id':'ndi','selected':True,'available':True,'healthy':True}]}
+        @contextlib.contextmanager
+        def status(uid,pid,request): yield None,response
+        self.engine.control_request=status
+        self.engine.restart_pending()
+        self.assertFalse(self.engine.path(module.ACTIVATION).exists())
+
+    def test_legacy_activation_still_defers_unhealthy_or_empty_provider_state(self):
+        self.engine.service=lambda uid,operation: 'MainPID=123\nActiveState=active\n'
+        self.engine.instances=lambda: {123:1000}
+        response={'version':1,'type':'status','runningVersion':'1.1'}
+        @contextlib.contextmanager
+        def status(uid,pid,request): yield None,response
+        self.engine.control_request=status
+        original_wait=self.engine.wait_activation
+        self.engine.wait_activation=lambda uid,version,expected: original_wait(uid,version,expected,timeout=0.001)
+        for providers in ([], [{'id':'ndi','selected':True,'available':False,'healthy':False}]):
+            with self.subTest(providers=providers):
+                response['providers']=providers
+                self.write(module.ACTIVATION,'{"schema":1,"version":"1.1","pending":[1000],"errors":{}}')
+                with self.assertRaisesRegex(module.Deferred,'restart pending'):
+                    self.engine.restart_pending()
+                state=json.loads(self.engine.path(module.ACTIVATION).read_text())
+                self.assertEqual(state['pending'],[1000])
+                self.assertNotIn('expected',state)
+
+    def test_new_activation_records_are_versioned_and_require_expected_provider_state(self):
+        self.engine.stage_activation([1000],'1.1',{1000:['ndi']})
+        state=json.loads(self.engine.path(module.ACTIVATION).read_text())
+        self.assertEqual(state['schema'],2)
+        self.assertEqual(state['expected'],{'1000':['ndi']})
+        for schema,extra in ((2,{}),(1,{'expected':{}})):
+            self.write(module.ACTIVATION,json.dumps({'schema':schema,'version':'1.1','pending':[1000],'errors':{},**extra}))
+            with self.assertRaisesRegex(module.Deferred,'invalid activation record'):
+                self.engine.restart_pending()
 
     def test_apply_restores_the_providers_each_daemon_could_use_before_maintenance(self):
         self.ready_transaction()

@@ -97,6 +97,22 @@ bool file_digest_matches(HANDLE file, std::string_view expected) {
 #endif
 }  // namespace
 
+bool automatic_checks_disabled_in_registry(const std::wstring& registry_path) {
+  HKEY key = nullptr;
+  if (::RegOpenKeyExW(HKEY_CURRENT_USER, registry_path.c_str(), 0,
+                      KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+  wchar_t value[2]{};
+  DWORD type = 0;
+  DWORD bytes = sizeof(value);
+  // WinSparkle writes a REG_SZ "0". Query the raw value rather than using
+  // RegGetValue, which can silently append a missing string terminator.
+  const LSTATUS result = ::RegQueryValueExW(key, L"CheckForUpdates", nullptr,
+      &type, reinterpret_cast<BYTE*>(value), &bytes);
+  ::RegCloseKey(key);
+  return result == ERROR_SUCCESS && type == REG_SZ && bytes == sizeof(value) &&
+         value[0] == L'0' && value[1] == L'\0';
+}
+
 bool verify_authenticode(const std::wstring& path, std::string_view publisher_sha256) {
   if (!is_sha256(publisher_sha256)) return false;
   // Hold the same non-writable, non-deletable file while WinTrust inspects it.
@@ -348,14 +364,11 @@ void UpdateAdapter::initialize(std::wstring_view version) {
   impl_->set_appcast_url(impl_->config.feed_url.c_str());
   // The framework's scheduler can open UI/download controls. Keep it off,
   // including an enabled preference saved by a previous build. Its setter
-  // returns void and catches write failures: confirm the stored DWORD is zero
-  // before init, rather than treating a failed write as quiet-check support.
+  // returns void and catches write failures: confirm its persisted REG_SZ
+  // false value before init, rather than treating a failed write as safe.
   impl_->set_automatic_check_for_updates(0);
-  DWORD automatic = 1;
-  DWORD automatic_bytes = sizeof(automatic);
-  if (::RegGetValueW(HKEY_CURRENT_USER, L"Software\\Noise Factor\\Sync\\Updates\\Preview",
-        L"CheckForUpdates", RRF_RT_REG_DWORD, nullptr, &automatic, &automatic_bytes) != ERROR_SUCCESS ||
-      automatic != 0) {
+  if (!automatic_checks_disabled_in_registry(
+        L"Software\\Noise Factor\\Sync\\Updates\\Preview")) {
     impl_->unavailable = L"Update checks could not be configured safely.";
     ::FreeLibrary(impl_->module);
     impl_->module = nullptr;

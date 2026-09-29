@@ -32,3 +32,78 @@ SYNC_TEST(windows_update_unconfigured_adapter_preserves_check_only_state) {
   adapter.cleanup();
   SYNC_REQUIRE(!adapter.available());
 }
+
+namespace {
+struct UpdateRegistryFixture {
+  std::wstring path = L"Software\\NoiseFactorSyncUpdaterTest_" +
+      std::to_wstring(::GetCurrentProcessId()) + L"_" + std::to_wstring(::GetTickCount64());
+  HKEY key = nullptr;
+  UpdateRegistryFixture() {
+    DWORD disposition = 0;
+    const LSTATUS result = ::RegCreateKeyExW(HKEY_CURRENT_USER, path.c_str(), 0,
+        nullptr, REG_OPTION_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &key, &disposition);
+    if (result != ERROR_SUCCESS || disposition != REG_CREATED_NEW_KEY) {
+      if (key) ::RegCloseKey(key);
+      key = nullptr;
+      throw std::runtime_error("could not create isolated update registry fixture");
+    }
+  }
+  ~UpdateRegistryFixture() {
+    if (key) {
+      ::RegCloseKey(key);
+      ::RegDeleteKeyW(HKEY_CURRENT_USER, path.c_str());
+    }
+  }
+  void write(DWORD type, const void* value, DWORD bytes) {
+    SYNC_REQUIRE(::RegSetValueExW(key, L"CheckForUpdates", 0, type,
+        static_cast<const BYTE*>(value), bytes) == ERROR_SUCCESS);
+  }
+};
+}  // namespace
+
+SYNC_TEST(windows_update_accepts_winsparkle_disabled_registry_string) {
+  UpdateRegistryFixture fixture;
+  // WinSparkle 0.9.4 serializes false as REG_SZ L"0", not a DWORD.
+  constexpr wchar_t disabled[] = L"0";
+  fixture.write(REG_SZ, disabled, sizeof(disabled));
+  SYNC_REQUIRE(automatic_checks_disabled_in_registry(fixture.path));
+}
+
+SYNC_TEST(windows_update_registry_verification_fails_closed) {
+  UpdateRegistryFixture fixture;
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path + L"\\Missing"));
+  constexpr wchar_t enabled[] = L"1";
+  fixture.write(REG_SZ, enabled, sizeof(enabled));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  const DWORD disabled_dword = 0;
+  fixture.write(REG_DWORD, &disabled_dword, sizeof(disabled_dword));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  constexpr wchar_t disabled[] = L"0";
+  fixture.write(REG_EXPAND_SZ, disabled, sizeof(disabled));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  // RegSetValueExW repairs an omitted terminator when the next source wchar
+  // is NUL. Keep it nonzero so this fixture really stores an unterminated "0".
+  constexpr wchar_t unterminated_source[] = L"01";
+  fixture.write(REG_SZ, unterminated_source, sizeof(wchar_t));
+  wchar_t stored[] = {L'?', L'?'};
+  DWORD stored_type = 0;
+  DWORD stored_bytes = sizeof(wchar_t);
+  SYNC_REQUIRE(::RegQueryValueExW(fixture.key, L"CheckForUpdates", nullptr,
+      &stored_type, reinterpret_cast<BYTE*>(stored), &stored_bytes) == ERROR_SUCCESS);
+  SYNC_REQUIRE(stored_type == REG_SZ);
+  SYNC_REQUIRE(stored_bytes == sizeof(wchar_t));
+  SYNC_REQUIRE(stored[0] == L'0' && stored[1] == L'?');
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  constexpr wchar_t trailing[] = L"0 ";
+  fixture.write(REG_SZ, trailing, sizeof(trailing));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  constexpr wchar_t embedded[] = {L'0', L'\0', L'1', L'\0'};
+  fixture.write(REG_SZ, embedded, sizeof(embedded));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  constexpr wchar_t empty[] = L"";
+  fixture.write(REG_SZ, empty, sizeof(empty));
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+  fixture.write(REG_SZ, nullptr, 0);
+  SYNC_REQUIRE(!automatic_checks_disabled_in_registry(fixture.path));
+}

@@ -19,6 +19,10 @@ namespace noisefactor::sync::windows_update {
 // executable is launched, including on a successful verification.
 bool verify_authenticode(const std::wstring& path, std::string_view publisher_sha256);
 
+// Read back WinSparkle 0.9.4's exact persisted false value before its scheduler
+// is initialized. Missing, malformed and unreadable settings fail closed.
+bool automatic_checks_disabled_in_registry(const std::wstring& registry_path);
+
 class UpdateAdapter {
  public:
   UpdateAdapter();

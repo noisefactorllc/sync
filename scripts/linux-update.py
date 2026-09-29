@@ -371,13 +371,36 @@ class Maintenance:
             data = self.trusted(values[0]).read_bytes()
             if hashlib.md5(data).hexdigest() != values[1]: raise Deferred('modified conffile requires administrator review')
 
-    def process_start(self, pid):
+    def process_identity(self, pid):
         if type(pid) is not int or pid <= 0: raise Deferred('invalid maintenance process identity')
-        value=self.path('/proc/'+str(pid)+'/stat').read_text().rsplit(') ',1)
+        value=self.trusted('/proc/'+str(pid)+'/stat').read_text().rsplit(') ',1)
         if len(value) != 2: raise Deferred('unknown maintenance process identity')
         fields=value[1].split()
-        if len(fields) < 20 or not fields[19].isdigit(): raise Deferred('unknown maintenance process start')
-        return fields[19]
+        if len(fields) < 20 or not fields[1].isdigit() or not fields[19].isdigit():
+            raise Deferred('unknown maintenance process ancestry or start')
+        return int(fields[1]), fields[19]
+
+    def process_start(self, pid):
+        return self.process_identity(pid)[1]
+
+    def maintenance_ancestor(self, pid, started):
+        # A sibling APT process must not borrow another transaction's marker.
+        current=os.getpid()
+        seen=set()
+        for _ in range(128):
+            if current <= 0 or current in seen: return False
+            seen.add(current)
+            parent, observed_start=self.process_identity(current)
+            if current == pid: return observed_start == started
+            current=parent
+        return False
+
+    def preinstall_unchanged(self, marker):
+        # Only this exact durable record proves our APT hook has not permitted
+        # dpkg writes. Missing, changed, or unreadable state is not that proof.
+        if marker.get('phase') != 'pre-install': return False
+        try: return json.loads(self.trusted(MARKER).read_text()) == marker
+        except (Deferred,OSError,ValueError): return False
 
     def exclusive_lock_owner(self, pid):
         info=self.trusted(LOCK).stat()
@@ -406,7 +429,7 @@ class Maintenance:
         self.check_host_maintenance()
         for name,values in packages:
             marker = json.loads(self.trusted(MARKER).read_text())
-            if marker.get('phase') != 'installing' or marker.get('version') != values[1] or values[2] != 'amd64':
+            if marker.get('phase') not in ('pre-install','installing') or marker.get('version') != values[1] or values[2] != 'amd64':
                 raise Deferred('Sync package requires coordinated maintenance')
             archive = Path(name)
             try: relative = archive.relative_to(self.root)
@@ -423,8 +446,13 @@ class Maintenance:
                 except BlockingIOError:
                     pid=marker.get('maintenance_pid')
                     if (self.process_start(pid) != marker.get('maintenance_start') or
-                            not self.exclusive_lock_owner(pid)):
-                        raise Deferred('exclusive lock does not belong to the recorded maintenance process')
+                            not self.exclusive_lock_owner(pid) or
+                            not self.maintenance_ancestor(pid,marker.get('maintenance_start'))):
+                        raise Deferred('APT hook is not owned by the recorded maintenance process')
+                    # APT aborts before dpkg if any Pre-Install-Pkgs hook fails.
+                    # Persist the write boundary before returning permission.
+                    marker['phase']='installing'
+                    self.write(MARKER,json.dumps(marker)+'\n')
                     continue
                 raise Deferred('exclusive installation lock is not held by maintenance')
             finally: os.close(descriptor)
@@ -432,7 +460,7 @@ class Maintenance:
     def stage_activation(self, users, version, usable):
         if users:
             pending=sorted(set(users))
-            self.write(ACTIVATION,json.dumps({'schema':1,'version':version,'pending':pending,'errors':{},
+            self.write(ACTIVATION,json.dumps({'schema':2,'version':version,'pending':pending,'errors':{},
                 'expected':{str(uid):usable[uid] for uid in pending}})+'\n')
 
     def activation_ready(self, uid, version, expected):
@@ -443,10 +471,20 @@ class Maintenance:
         if pid <= 0 or self.instances().get(pid) != uid: return False
         with self.control_request(uid,pid,{'version':1,'command':'update-status'}) as (_,response):
             if response.get('runningVersion') != version: return False
+            usable = self.usable_providers(response)
+            if expected is None:
+                # Schema 1 originally recorded no baseline. Preserve its strict
+                # readiness check; current health cannot reconstruct prior health.
+                providers = response['providers']
+                return bool(providers) and all(isinstance(provider,dict) and
+                    type(provider.get('selected')) is bool and
+                    (provider['selected'] is False or
+                     (provider.get('available') is True and provider.get('healthy') is True))
+                    for provider in providers)
             # Restore what the daemon could do before maintenance. A selected
             # provider that was already unusable, such as NDI without its
             # runtime, must not hold this and every later update pending.
-            return set(expected) <= set(self.usable_providers(response))
+            return set(expected) <= set(usable)
 
     def wait_activation(self, uid, version, expected, timeout=60):
         deadline=time.monotonic()+timeout
@@ -462,20 +500,23 @@ class Maintenance:
     def restart_pending(self):
         if not self.path(ACTIVATION).exists(): return
         state=json.loads(self.trusted(ACTIVATION).read_text())
-        if (not isinstance(state,dict) or set(state) != {'schema','version','pending','errors','expected'} or
-                state['schema'] != 1 or not VERSION.fullmatch(state['version']) or
+        fields = {'schema','version','pending','errors'}
+        legacy = isinstance(state,dict) and state.get('schema') == 1 and set(state) == fields
+        if (not isinstance(state,dict) or set(state) != (fields if legacy else fields | {'expected'}) or
+                type(state['schema']) is not int or state['schema'] not in (1,2) or
+                type(state['version']) is not str or not VERSION.fullmatch(state['version']) or
                 not isinstance(state['pending'],list) or not isinstance(state['errors'],dict) or
                 any(type(uid) is not int or uid <= 0 or uid >= 2**32-1 for uid in state['pending']) or
-                not isinstance(state['expected'],dict) or
-                any(not isinstance(state['expected'].get(str(uid)),list) or
-                    any(type(name) is not str for name in state['expected'][str(uid)])
-                    for uid in state['pending'])):
+                (not legacy and (not isinstance(state['expected'],dict) or
+                    any(not isinstance(state['expected'].get(str(uid)),list) or
+                        any(type(name) is not str for name in state['expected'][str(uid)])
+                        for uid in state['pending'])))):
             raise Deferred('invalid activation record')
         for uid in tuple(state['pending']):
             try:
                 self.service(uid,['daemon-reload'])
                 self.service(uid,['start'])
-                self.wait_activation(uid,state['version'],state['expected'][str(uid)])
+                self.wait_activation(uid,state['version'],None if legacy else state['expected'][str(uid)])
                 state['pending'].remove(uid)
                 state['errors'].pop(str(uid),None)
             except (Deferred,OSError) as error:
@@ -512,10 +553,10 @@ class Maintenance:
             digest = candidate_metadata(self.run(['/usr/bin/apt-cache',*APT_OPTIONS,'show',PACKAGE+'='+version]),version)
             managed = self.managed(config['users'])
             stopped = []
-            installing = False
-            marker = {'schema':1,'phase':'prepared','version':version,'previous':installed,'digest':digest,'users':list(managed.values()),
+            marker = {'schema':1,'phase':'pre-install','version':version,'previous':installed,'digest':digest,'users':list(managed.values()),
                       'maintenance_pid':os.getpid(),'maintenance_start':self.process_start(os.getpid())}
-            transaction = ['/usr/bin/apt-get',*APT_OPTIONS,'--only-upgrade','--no-remove','--no-install-recommends','--assume-yes','install',PACKAGE+'='+version]
+            transaction = ['/usr/bin/apt-get',*APT_OPTIONS,
+                '-o','DPkg::Pre-Install-Pkgs::='+HELPER+' apt-hook','--only-upgrade','--no-remove','--no-install-recommends','--assume-yes','install',PACKAGE+'='+version]
             validate_simulation(self.run([*transaction[:1], '--simulate', *transaction[1:]]),version)
             def download_idle():
                 if automatic and not self.config()['enabled']:
@@ -555,8 +596,6 @@ class Maintenance:
                         # Reserve against new daemon startup for the entire package transaction.
                         if self.instances(): raise Deferred('Sync process started during maintenance')
                         validate_simulation(self.run([*transaction[:1],'--simulate',*transaction[1:]]),version)
-                        marker['phase'] = 'installing'; self.write(MARKER,json.dumps(marker)+'\n')
-                        installing = True
                         self.run([*transaction[:1],'--no-download',*transaction[1:]])
                         actual = self.run(['/usr/bin/dpkg-query','--show','--showformat=${Status} ${Version}',PACKAGE]).strip()
                         if actual != 'install ok installed '+version: raise Deferred('installed package state did not verify')
@@ -566,7 +605,7 @@ class Maintenance:
                     self.restart_pending()
                     return 'installed '+version
                 except Exception as original:
-                    if not installing:
+                    if self.preinstall_unchanged(marker):
                         self.stage_activation(stopped,installed,usable)
                         self.remove(MARKER)
                         try: self.restart_pending()
