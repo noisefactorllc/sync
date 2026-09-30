@@ -57,7 +57,7 @@ set(SYNC_RENDER_NOTICE_COMPONENTS "${sync_render_notice_components}"
   CACHE INTERNAL "License files of the render helper's own dependencies")
 set(SYNC_RENDER_QT_SBOM_DIR "${QT6_INSTALL_PREFIX}/sbom"
   CACHE INTERNAL "Qt's SPDX software bill of materials")
-set(SYNC_RENDER_QT_MODULES "qtbase,qtmultimedia,qtwebsockets,qtsvg"
+set(SYNC_RENDER_QT_MODULES "qtbase,qtmultimedia,qtwebsockets,qtsvg,qtimageformats"
   CACHE INTERNAL "Qt modules the packaged helper ships")
 find_program(SYNC_NODE node)
 # Keep the warnings-as-errors gate off pinned upstream code, as for RtAudio.

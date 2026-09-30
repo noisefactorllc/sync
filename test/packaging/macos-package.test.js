@@ -340,6 +340,8 @@ test("packaged Sync app carries the render helper, its data and its Qt", {
                "missing the Cocoa platform plugin");
   assert.equal(existsSync(path.join(contents, "PlugIns/tls/libqsecuretransportbackend.dylib")),
                true, "missing the Secure Transport TLS backend");
+  assert.equal(existsSync(path.join(contents, "PlugIns/imageformats/libqwebp.dylib")), true,
+               "missing the WebP image plugin");
 });
 
 test("a half-configured render build is refused before anything is packaged", {

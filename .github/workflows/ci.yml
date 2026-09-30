@@ -343,13 +343,14 @@ jobs:
 
       # aqtinstall 3.3.0 cannot read Qt 6.11's per-architecture Windows
       # layout (windows_x86/desktop/qt6_6111/...), so Windows stays on 6.10.3,
-      # the version noisemaker-for-qt's Windows CI qualifies.
+      # the version noisemaker-for-qt's Windows CI qualifies. Shared WebP
+      # images decode through qtimageformats' plugin; qtbase has none.
       - name: Install Qt
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: ${{ runner.os == 'Windows' && '6.10.3' || '6.11.1' }}
           arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || '' }}
-          modules: 'qtwebsockets qtmultimedia'
+          modules: 'qtwebsockets qtmultimedia qtimageformats'
           cache: true
 
       - name: Install build dependencies (macOS)
@@ -701,14 +702,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # 6.10.3 for the same reason as the Render helper job: aqtinstall cannot
-      # read Qt 6.11's Windows layout.
+      # 6.10.3 and the same modules as the Render helper job: aqtinstall
+      # cannot read Qt 6.11's Windows layout.
       - name: Install Qt
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: '6.10.3'
           arch: 'win64_msvc2022_64'
-          modules: 'qtwebsockets qtmultimedia'
+          modules: 'qtwebsockets qtmultimedia qtimageformats'
           cache: true
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
