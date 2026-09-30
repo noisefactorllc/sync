@@ -7,7 +7,7 @@
 //
 // Usage:
 //   node scripts/render-notices.mjs --sbom-dir <qt>/sbom \
-//     --modules qtbase,qtmultimedia,qtwebsockets,qtsvg \
+//     --modules qtbase,qtmultimedia,qtwebsockets,qtsvg,qtimageformats \
 //     --spdx-texts packaging/licenses/spdx \
 //     --component "noisemaker-for-qt=<url>=<license file>" \
 //     --component "RtMidi=<url>=<license file>"

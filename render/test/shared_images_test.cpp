@@ -161,7 +161,9 @@ SYNC_TEST(shared_images_decode_gif_webp_and_oriented_jpeg_with_later_xmp) {
     const auto id = image_id(h.server.body);
     h.request(id);
     SYNC_REQUIRE(wait_until([&] { return h.ready > 0 || !h.error.isEmpty(); }));
-    SYNC_REQUIRE(h.error.isEmpty());
+    if (!h.error.isEmpty()) {
+      throw std::runtime_error((QString::fromLatin1(h.server.mime) + QStringLiteral(": ") + h.error).toStdString());
+    }
     SYNC_REQUIRE(h.images.images().value(id).size() == QSize(spec.value(QStringLiteral("width")).toInt(),
                                                           spec.value(QStringLiteral("height")).toInt()));
   }

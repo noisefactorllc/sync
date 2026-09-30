@@ -342,6 +342,10 @@ test("packaged Sync app carries the render helper, its data and its Qt", {
                true, "missing the Secure Transport TLS backend");
   assert.equal(existsSync(path.join(contents, "PlugIns/imageformats/libqwebp.dylib")), true,
                "missing the WebP image plugin");
+  for (const plugin of ["qgif", "qjpeg"]) {
+    assert.equal(existsSync(path.join(contents, `PlugIns/imageformats/lib${plugin}.dylib`)),
+                 true, `missing the ${plugin} image decoder`);
+  }
 });
 
 test("a half-configured render build is refused before anything is packaged", {

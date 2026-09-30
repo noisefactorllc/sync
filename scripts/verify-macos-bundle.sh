@@ -135,6 +135,8 @@ if [[ "${SYNC_EXPECT_RENDER:-}" == 1 ]]; then
     "$contents/Frameworks/QtCore.framework" \
     "$contents/PlugIns/platforms/libqcocoa.dylib" \
     "$contents/PlugIns/tls/libqsecuretransportbackend.dylib" \
+    "$contents/PlugIns/imageformats/libqgif.dylib" \
+    "$contents/PlugIns/imageformats/libqjpeg.dylib" \
     "$contents/PlugIns/imageformats/libqwebp.dylib"; do
     if [[ ! -e "$required" ]]; then
       echo "verify-macos-bundle: render helper bundle is missing $required" >&2

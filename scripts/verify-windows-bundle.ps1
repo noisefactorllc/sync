@@ -64,6 +64,7 @@ foreach ($forbidden in Get-ChildItem -LiteralPath $Bundle -File -Filter '*.dll')
 if ($env:SYNC_EXPECT_RENDER -eq '1') {
   foreach ($required in @('sync-render.exe', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6OpenGL.dll',
                           'Qt6WebSockets.dll', 'Qt6Multimedia.dll', 'platforms/qwindows.dll',
+                          'imageformats/qgif.dll', 'imageformats/qjpeg.dll',
                           'tls/qschannelbackend.dll', 'imageformats/qwebp.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Bundle $required) -PathType Leaf)) {
       Fail "render helper bundle is missing $required"
