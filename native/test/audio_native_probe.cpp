@@ -19,6 +19,11 @@ constexpr auto kCaptureDuration = 2s;
 constexpr auto kPollInterval = 5ms;
 constexpr unsigned kJackChannels = 32;
 constexpr unsigned kJackSampleRate = 48'000;
+// PipeWire brings the capture's ports up across its graph a quantum at a
+// time, so the first non-silent frames can carry only part of the pattern.
+// The pattern starts at the first fully matching frame; partial frames
+// inside this bounded window are startup, and anything later is a mismatch.
+constexpr std::uint64_t kStartupPartialFrameBudget = 4'096;
 
 struct Options {
   bool list = false;
@@ -103,6 +108,7 @@ struct Statistics {
   std::uint64_t cursor_discontinuities = 0;
   std::uint64_t dropped_frames = 0;
   std::uint64_t startup_frames_ignored = 0;
+  std::uint64_t startup_partial_frames = 0;
   std::uint64_t pattern_frames = 0;
   std::uint64_t pattern_mismatches = 0;
   bool have_format = false;
@@ -163,7 +169,9 @@ void inspect_packet(const audio::Packet &packet, bool expect_jack_pattern,
     if (!expect_jack_pattern) continue;
     if (!statistics.pattern_started) {
       if (!frame_matches_pattern) {
-        if (frame_is_silent) {
+        if (frame_is_silent ||
+            statistics.startup_partial_frames < kStartupPartialFrameBudget) {
+          if (!frame_is_silent) ++statistics.startup_partial_frames;
           ++statistics.startup_frames_ignored;
         } else {
           statistics.pattern_mismatches += frame_pattern_mismatches;
