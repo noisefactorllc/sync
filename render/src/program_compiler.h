@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QHash>
 #include <QString>
 
 #include <memory>
@@ -19,6 +20,7 @@ class ProgramCompiler {
     std::shared_ptr<nm::Graph> graph;  // null on failure
     QString error;
     QJsonObject diagnostic;  // structured lexer/parser diagnostic, when there is one
+    QHash<int, QString> shared_images;  // media step index -> persisted image SHA-256
   };
 
   explicit ProgramCompiler(const QString& data_root);

@@ -76,6 +76,7 @@ add_library(sync_render_helper STATIC
   src/render_engine.cpp
   src/seance_client.cpp
   src/seance_document.cpp
+  src/shared_images.cpp
 )
 set_target_properties(sync_render_helper PROPERTIES AUTOMOC ON)
 target_compile_features(sync_render_helper PUBLIC cxx_std_20)
@@ -138,10 +139,12 @@ add_executable(sync_render_helper_tests
   test/render_engine_test.cpp
   test/seance_client_test.cpp
   test/seance_document_test.cpp
+  test/shared_images_test.cpp
 )
 target_include_directories(sync_render_helper_tests PRIVATE ${PROJECT_SOURCE_DIR}/native/test)
 target_compile_definitions(sync_render_helper_tests PRIVATE
   SYNC_RENDER_TEST_DATA_ROOT="${NOISEMAKER_QT_DATA_ROOT}"
+  SYNC_RENDER_IMAGE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/images.json"
 )
 target_link_libraries(sync_render_helper_tests PRIVATE sync_render_helper)
 add_test(NAME sync_render_helper_tests COMMAND sync_render_helper_tests)

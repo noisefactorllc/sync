@@ -117,4 +117,89 @@ SYNC_TEST(an_image_file_reaches_the_media_step_at_its_real_size) {
   QFile::remove(png);
 }
 
+SYNC_TEST(shared_images_render_without_local_sources_and_survive_recompilation) {
+  ProgramCompiler compiler(data_root());
+  RenderEngine::Options options{QSize(64, 48), 60.0, 10.0, data_root(),
+                               temp_path("shared.frames").toStdString()};
+  RenderEngine engine(options);
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+  MediaInputs inputs({});
+  SYNC_REQUIRE(inputs.start(error));
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+    inputs.apply(backend, graph, generation, compiler.registry());
+  });
+  QImage image(96, 32, QImage::Format_RGBA8888);
+  image.fill(QColor(10, 190, 60));
+  inputs.set_shared_images({{0, image}});
+  for (int i = 0; i < 2; ++i) {
+    engine.set_program(compiler.compile(kMedia).graph);
+    engine.freeze_time(0);
+    engine.tick();
+    const auto pixel = engine.read_surface().pixelColor(32, 24);
+    SYNC_REQUIRE(std::abs(pixel.green() - 190) <= 2);
+    SYNC_REQUIRE(std::abs(pixel.red() - 10) <= 2);
+  }
+  inputs.set_shared_images({});
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() < 20);
+}
+
+SYNC_TEST(shared_image_slots_are_not_overwritten_by_local_media) {
+  const QString path = temp_path("local-with-shared.png");
+  QImage local(96, 32, QImage::Format_RGBA8888), shared(96, 32, QImage::Format_RGBA8888);
+  local.fill(Qt::red); shared.fill(Qt::green);
+  SYNC_REQUIRE(local.save(path));
+  ProgramCompiler compiler(data_root());
+  RenderEngine::Options options{QSize(64, 48), 60.0, 10.0, data_root(),
+                               temp_path("mixed.frames").toStdString()};
+  RenderEngine engine(options);
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::File, path}});
+  SYNC_REQUIRE(inputs.start(error));
+  inputs.set_shared_images({{0, shared}});
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+    inputs.apply(backend, graph, generation, compiler.registry());
+  });
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() > 250);
+  inputs.set_shared_images({});
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).red() > 250);
+  QFile::remove(path);
+}
+
+SYNC_TEST(removing_a_shared_image_clears_it_while_local_video_has_no_frame) {
+  const QString path = temp_path("no-frames.mp4");
+  QFile video(path);
+  SYNC_REQUIRE(video.open(QIODevice::WriteOnly));
+  video.write("no decodable video frames");
+  video.close();
+  ProgramCompiler compiler(data_root());
+  RenderEngine engine(RenderEngine::Options{QSize(64, 48), 60.0, 10.0, data_root(),
+                                            temp_path("waiting.frames").toStdString()});
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::File, path}});
+  SYNC_REQUIRE(inputs.start(error));
+  QImage image(96, 32, QImage::Format_RGBA8888);
+  image.fill(Qt::green);
+  inputs.set_shared_images({{0, image}});
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+    inputs.apply(backend, graph, generation, compiler.registry());
+  });
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() > 250);
+  inputs.set_shared_images({});
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() < 20);
+  QFile::remove(path);
+}
+
 }  // namespace

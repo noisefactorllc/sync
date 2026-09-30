@@ -74,6 +74,7 @@ class MediaInputs final : public QObject {
   // changes whenever a new program is swapped in.
   void apply(nm::Backend& backend, nm::Graph& graph, quint64 generation,
              const nm::EffectRegistry& registry);
+  void set_shared_images(QHash<int, QImage> images);
 
   [[nodiscard]] auto source_count() const -> int { return static_cast<int>(sources_.size()); }
 
@@ -97,6 +98,7 @@ class MediaInputs final : public QObject {
     quint64 generation = 0;
   };
   QHash<QString, Uploaded> uploaded_;
+  QHash<int, QImage> shared_images_;
 };
 
 }  // namespace noisefactor::sync::render_helper

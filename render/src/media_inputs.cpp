@@ -208,11 +208,46 @@ void MediaInputs::accept_frame(Source& source, const QVideoFrame& frame) {
   ++source.serial;
 }
 
+void MediaInputs::set_shared_images(QHash<int, QImage> images) {
+  shared_images_ = std::move(images);
+}
+
 void MediaInputs::apply(nm::Backend& backend, nm::Graph& graph, quint64 generation,
                         const nm::EffectRegistry& registry) {
-  if (sources_.empty()) return;
+  const auto upload = [&](const MediaBinding& binding, const QImage& image, int source_index,
+                          quint64 serial) {
+    Uploaded& last = uploaded_[binding.texture_id];
+    if (last.source_index != source_index || last.serial != serial) {
+      nm::ExternalTextureOptions options;
+      options.flipY = false;
+      backend.updateTextureFromSource(binding.texture_id, image, options);
+      last.source_index = source_index;
+      last.serial = serial;
+    }
+    if (last.size == image.size() && last.generation == generation) return;
+    const QJsonObject values{
+        {QStringLiteral("step_%1").arg(binding.step_index),
+         QJsonObject{{QStringLiteral("imageSize"), QJsonArray{image.width(), image.height()}}}}};
+    backend.applyStepParameterValues(graph, registry, values);
+    last.size = image.size();
+    last.generation = generation;
+  };
+  QStringList local_textures;
+  for (const auto& binding : bind_media(nm::Backend::externalTextureIds(graph), 1)) {
+    const auto image = shared_images_.constFind(binding.step_index);
+    if (image != shared_images_.constEnd()) {
+      upload(binding, *image, -2, static_cast<quint64>(image->cacheKey()));
+    } else {
+      local_textures.push_back(binding.texture_id);
+      if (uploaded_.value(binding.texture_id).source_index == -2) {
+        QImage transparent(1, 1, QImage::Format_RGBA8888);
+        transparent.fill(Qt::transparent);
+        upload(binding, transparent, -3, 1);
+      }
+    }
+  }
   const std::vector<MediaBinding> bindings =
-      bind_media(nm::Backend::externalTextureIds(graph), static_cast<int>(sources_.size()));
+      bind_media(local_textures, static_cast<int>(sources_.size()));
   for (const MediaBinding& binding : bindings) {
     Source& source = *sources_.at(static_cast<std::size_t>(binding.source_index));
     const QImage* image = nullptr;
@@ -236,25 +271,10 @@ void MediaInputs::apply(nm::Backend& backend, nm::Graph& graph, quint64 generati
       image = &source.converted;
     }
 
-    Uploaded& last = uploaded_[binding.texture_id];
-    if (last.source_index != binding.source_index || last.serial != serial) {
-      nm::ExternalTextureOptions options;
-      options.flipY = false;
-      backend.updateTextureFromSource(binding.texture_id, *image, options);
-      last.source_index = binding.source_index;
-      last.serial = serial;
-    }
-    if (last.size == image->size() && last.generation == generation) continue;
     // The program text may carry the controller's own imageSize (Noisedeck
     // stores it in the step); the local source's real size wins, and has to
     // be re-applied to every newly compiled graph.
-    const QJsonObject values{
-        {QStringLiteral("step_%1").arg(binding.step_index),
-         QJsonObject{{QStringLiteral("imageSize"),
-                      QJsonArray{image->width(), image->height()}}}}};
-    backend.applyStepParameterValues(graph, registry, values);
-    last.size = image->size();
-    last.generation = generation;
+    upload(binding, *image, binding.source_index, serial);
   }
 }
 

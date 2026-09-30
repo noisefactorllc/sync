@@ -36,6 +36,7 @@
 #include "program_compiler.h"
 #include "render_engine.h"
 #include "seance_client.h"
+#include "shared_images.h"
 
 #include <runtime/audio_state.h>
 #include <runtime/midi_state.h>
@@ -440,7 +441,33 @@ int main(int argc, char** argv) {
     QString source;
     bool queued = false;
   } pending;
+  std::unique_ptr<SeanceClient> client;
+  SharedImages shared_images({QUrl(parser.value(server_opt)), session_id.value_or(QString()),
+                              parser.value(origin_opt)});
+  ProgramCompiler::Result candidate;
+  QJsonObject candidate_fields;
+  QObject::connect(&shared_images, &SharedImages::ready, &app, [&] {
+    if (!candidate.graph) return;
+    const auto images = shared_images.images();
+    QHash<int, QImage> bindings;
+    for (auto it = candidate.shared_images.constBegin(); it != candidate.shared_images.constEnd(); ++it) {
+      bindings.insert(it.key(), images.value(it.value()));
+    }
+    media.set_shared_images(std::move(bindings));
+    engine.set_program(std::move(candidate.graph));
+    candidate_fields.insert(QStringLiteral("ok"), true);
+    events.write(QStringLiteral("program"), candidate_fields);
+    candidate = {};
+  });
+  QObject::connect(&shared_images, &SharedImages::failed, &app, [&](const QString& message) {
+    if (!candidate.graph) return;
+    candidate_fields.insert(QStringLiteral("ok"), false);
+    candidate_fields.insert(QStringLiteral("error"), message);
+    events.write(QStringLiteral("program"), candidate_fields);
+    candidate = {};
+  });
   const auto compile_now = [&] {
+    if (!pending.queued) return;
     pending.queued = false;
     QElapsedTimer timer;
     timer.start();
@@ -450,16 +477,22 @@ int main(int argc, char** argv) {
                        {QStringLiteral("ok"), result.graph != nullptr},
                        {QStringLiteral("compile_ms"), static_cast<double>(timer.nsecsElapsed()) / 1e6}};
     if (result.graph) {
-      engine.set_program(std::move(result.graph));
+      candidate = std::move(result);
+      candidate_fields = fields;
+      // The old graph and its image bindings stay live until every new
+      // attachment has passed authentication, bounds, hash, and decode checks.
+      shared_images.request(candidate.shared_images.values(), client ? client->anon_token() : QString());
     } else {
       fields.insert(QStringLiteral("error"), result.error);
       if (!result.diagnostic.isEmpty()) {
         fields.insert(QStringLiteral("diagnostic"), result.diagnostic);
       }
+      events.write(QStringLiteral("program"), fields);
     }
-    events.write(QStringLiteral("program"), fields);
   };
   const auto submit_program = [&](const QString& text, qint64 rev, const QString& source) {
+    shared_images.cancel();
+    candidate = {};
     pending.text = text;
     pending.rev = rev;
     pending.source = source;
@@ -469,7 +502,6 @@ int main(int argc, char** argv) {
     }
   };
 
-  std::unique_ptr<SeanceClient> client;
   if (from_file) {
     QFile file(parser.value(program_opt));
     if (!file.open(QIODevice::ReadOnly)) {
@@ -490,10 +522,21 @@ int main(int argc, char** argv) {
                        submit_program(text, rev, QStringLiteral("seance"));
                      });
     QObject::connect(client.get(), &SeanceClient::status_changed, &app,
-                     [&events](SeanceClient::Status status, const QString& detail) {
+                     [&](SeanceClient::Status status, const QString& detail) {
                        events.write(QStringLiteral("seance"),
                                     {{QStringLiteral("status"), status_name(status)},
                                      {QStringLiteral("detail"), detail}});
+                       if (status == SeanceClient::Status::Online) {
+                         // Seance deduplicates unchanged snapshots. Retry an
+                         // attachment interrupted by disconnect even when the
+                         // document has not changed since the previous join.
+                         submit_program(client->document().text(), client->document().rev(),
+                                        QStringLiteral("seance"));
+                       } else {
+                         pending.queued = false;
+                         candidate = {};
+                         shared_images.cancel();
+                       }
                      });
     QObject::connect(client.get(), &SeanceClient::server_error, &app,
                      [](const QString& code, const QString& detail) {

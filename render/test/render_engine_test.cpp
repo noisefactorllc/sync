@@ -57,6 +57,70 @@ SYNC_TEST(the_compiler_loads_the_catalogue_and_reports_errors_as_data) {
   SYNC_REQUIRE(!unknown.error.isEmpty());
 }
 
+SYNC_TEST(shared_media_references_compile_without_becoming_shader_parameters) {
+  ProgramCompiler compiler(data_root());
+  const QString id(64, QLatin1Char('a'));
+  const auto result = compiler.compile(QStringLiteral(
+      "search synth\nmedia(url: \"image:%1\", scaleAmt: 50).write(o0)\nrender(o0)\n").arg(id));
+  SYNC_REQUIRE(result.graph != nullptr);
+  SYNC_REQUIRE(result.error.isEmpty());
+  SYNC_REQUIRE(result.shared_images.value(0) == id);
+}
+
+SYNC_TEST(shared_media_binding_uses_validated_steps_for_inline_chains) {
+  ProgramCompiler compiler(data_root());
+  const QString first(64, QLatin1Char('a')), second(64, QLatin1Char('b'));
+  const auto result = compiler.compile(QStringLiteral(
+      "search synth, mixer\n"
+      "gradient().blendMode(tex: media(url: 'image:%1', scaleAmt: 50), mode: mix).write(o0)\n"
+      "media(scaleAmt: 30, url: \"image:%2\").write(o1)\nrender(o0)\n").arg(first, second));
+  SYNC_REQUIRE(result.graph != nullptr);
+  SYNC_REQUIRE(result.shared_images.size() == 2);
+  SYNC_REQUIRE(result.shared_images.value(1) == first);
+  SYNC_REQUIRE(result.shared_images.value(4) == second);
+}
+
+SYNC_TEST(shared_media_urls_are_literal_image_references_and_nonmedia_errors_survive) {
+  ProgramCompiler compiler(data_root());
+  for (const QString& value : {QStringLiteral("https://remote.test/image.png"),
+                               QStringLiteral("data:image/png;base64,AAAA"),
+                               QStringLiteral("image:short"), QStringLiteral("video:abc")}) {
+    const auto result = compiler.compile(QStringLiteral(
+        "search synth\nmedia(url: \"%1\").write(o0)\nrender(o0)\n").arg(value));
+    SYNC_REQUIRE(result.graph == nullptr);
+    SYNC_REQUIRE(!result.error.isEmpty());
+  }
+  const auto unrelated = compiler.compile(QStringLiteral(
+      "search synth\ngradient(url: \"image:%1\").write(o0)\nrender(o0)\n")
+      .arg(QString(64, QLatin1Char('a'))));
+  SYNC_REQUIRE(unrelated.graph == nullptr);
+  const auto comment = compiler.compile(QStringLiteral(
+      "search synth\n// media(url: \"invalid\")\ngradient().write(o0)\nrender(o0)\n"));
+  SYNC_REQUIRE(comment.graph != nullptr);
+  SYNC_REQUIRE(comment.shared_images.isEmpty());
+}
+
+SYNC_TEST(shared_media_stripping_preserves_explicit_other_namespace_errors) {
+  ProgramCompiler compiler(data_root());
+  const auto result = compiler.compile(QStringLiteral(
+      "search synth\nmedia(url: \"image:%1\").write(o0)\n"
+      "from(filter, media(url: \"genuine parameter\")).write(o1)\nrender(o0)\n")
+      .arg(QString(64, QLatin1Char('a'))));
+  SYNC_REQUIRE(result.graph == nullptr);
+  SYNC_REQUIRE(result.error.contains(QStringLiteral("Unknown effect")));
+}
+
+SYNC_TEST(shared_media_stripping_uses_the_outermost_namespace_override) {
+  ProgramCompiler compiler(data_root());
+  const auto id = QString(64, QLatin1Char('a'));
+  const auto result = compiler.compile(QStringLiteral(
+      "search synth\nfrom(synth, from(filter, media(url: \"image:%1\"))).write(o0)\nrender(o0)\n")
+      .arg(id));
+  SYNC_REQUIRE(result.graph != nullptr);
+  SYNC_REQUIRE(result.shared_images.size() == 1);
+  SYNC_REQUIRE(result.shared_images.value(0) == id);
+}
+
 SYNC_TEST(a_frame_in_the_ring_is_the_backends_own_top_down_readback) {
   ProgramCompiler compiler(data_root());
   RenderEngine engine(engine_options("readback"));
