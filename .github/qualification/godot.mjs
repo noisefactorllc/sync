@@ -137,8 +137,8 @@ export function checkProbe(kind, result) {
   return { compiled: Number(matches[0][1]), missing: 0, failed: 0 }
 }
 
-function preserved(host, sha) {
-  check(host?.source_sha === sha && host.runner === 'largeboi-sync-camera' && host.host_preserved === true &&
+function preserved(host, sha, runner) {
+  check(typeof runner === 'string' && runner.length > 0 && host?.source_sha === sha && host.runner === runner && host.host_preserved === true &&
     host.remaining_invocation_processes === 0 && Array.isArray(host.remaining_invocation_identities) && host.remaining_invocation_identities.length === 0 &&
     COMPONENTS.every(key => host.components?.[key] === true))
 }
@@ -150,9 +150,9 @@ function runtimeManifest(manifest, sha) {
   for (const [path, expected] of Object.entries(RUNTIME_HASHES)) check(manifest.files.find(file => file.path === path)?.sha256 === expected)
   return manifest
 }
-export function checkContainment(files, sha) {
+export function checkContainment(files, sha, runner) {
   const manifest = runtimeManifest(json(files.get('source-manifest.json')), sha)
-  preserved(json(files.get('host-preservation.json')), sha)
+  preserved(json(files.get('host-preservation.json')), sha, runner)
   const tap = files.get('windows-process.tap').toString('utf8')
   for (const [field, value] of Object.entries({ tests: 28, pass: 28, fail: 0, cancelled: 0, skipped: 0, todo: 0 })) {
     const matches = [...tap.matchAll(new RegExp('^# ' + field + ' (\\d+)\\s*$', 'gm'))]
@@ -181,7 +181,7 @@ export function precedingAttempts(inventory, current) {
   for (let number = 1; number < current.run_number; number++) check(numbers.has(number))
   return previous
 }
-export function checkPriorEvidence(files, run, attempt) {
+export function checkPriorEvidence(files, run, attempt, runner) {
   check(run.status === 'completed' && ['success', 'failure'].includes(run.conclusion) && run.run_attempt === attempt)
   const receipt = json(files.get('qualification.json'))
   check(receipt.schema_version === 1 && receipt.workflow === '.github/workflows/scaffold-godot-qualification.yml' &&
@@ -199,19 +199,19 @@ export function checkPriorEvidence(files, run, attempt) {
       check(output.path === expected && bytes && bytes.length === output.bytes && hash(bytes) === output.sha256)
     }
   }
-  preserved(json(files.get('host-preservation.json')), receipt.scaffold_sha)
+  preserved(json(files.get('host-preservation.json')), receipt.scaffold_sha, runner)
   return true
 }
 
 // This reviewed source throws at baseline line14 before directory creation or its first child launch.
 const BOOTSTRAP_SOURCE = 'c4ac26bfa36e7742403d7b4276f4e567ec54bbea8d2071b9e5b30268a8e16aab'
-export function checkBootstrapFailure({ run, attempt, job, artifactCount, workflowSha256, log }) {
-  check(workflowSha256 === BOOTSTRAP_SOURCE && artifactCount === 0 && integer(attempt) && run.run_attempt === attempt &&
+export function checkBootstrapFailure({ run, attempt, job, artifactCount, workflowSha256, log, runner }) {
+  check(typeof runner === 'string' && runner.length > 0 && workflowSha256 === BOOTSTRAP_SOURCE && artifactCount === 0 && integer(attempt) && run.run_attempt === attempt &&
     integer(run.id) && SHA.test(run.head_sha) && run.path === '.github/workflows/scaffold-godot-qualification.yml' &&
     run.head_repository?.full_name === 'noisefactorllc/sync' && run.head_branch === 'main' && run.event === 'workflow_dispatch' &&
     run.status === 'completed' && run.conclusion === 'failure')
   check(integer(job.id) && job.run_id === run.id && job.head_sha === run.head_sha && job.status === 'completed' &&
-    job.conclusion === 'failure' && job.runner_id === 21 && job.runner_name === 'largeboi-sync-camera' && job.name === 'Portable Godot4.7.2 diagnostic')
+    job.conclusion === 'failure' && job.runner_id === 21 && job.runner_name === runner && job.name === 'Portable Godot4.7.2 diagnostic')
   const names = ['Set up job', 'Verify the existing host and retain its baseline', 'Fetch only this reviewed qualification helper',
     'Check qualification helper behavior', 'Require complete prior cleanup and exact-source containment qualification',
     'Mint a Scaffold contents-read token', 'Fetch only qualified Job Object runtime source', 'Run only the pinned portable Godot fixtures',
@@ -315,7 +315,7 @@ async function execute(root) {
   check(process.platform === 'win32' && resolve(root) === root && dirname(root).toLowerCase() === resolve(process.env.RUNNER_TEMP).toLowerCase())
   const admission = json(await readFile(join(root, 'admission.json')))
   check(admission.workflow_sha === process.env.GITHUB_SHA && admission.run_id === Number(process.env.GITHUB_RUN_ID) && admission.run_attempt === Number(process.env.GITHUB_RUN_ATTEMPT))
-  checkContainment(readZip(await readFile(join(root, 'containment.zip')), { maxBytes: 8 * 1024 * 1024 }), admission.scaffold_sha)
+  checkContainment(readZip(await readFile(join(root, 'containment.zip')), { maxBytes: 8 * 1024 * 1024 }), admission.scaffold_sha, process.env.RUNNER_NAME)
   for (const [file, expected] of Object.entries(RUNTIME_HASHES)) {
     const path = join(root, file), stat = await lstat(path)
     check(stat.isFile() && !stat.isSymbolicLink() && hash(await readFile(path)) === expected)

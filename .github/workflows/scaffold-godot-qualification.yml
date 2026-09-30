@@ -36,16 +36,21 @@ jobs:
     steps:
       - name: Verify the existing host and retain its baseline
         id: baseline
+        env:
+          EXPECTED_HOST: ${{ secrets.SYNC_CAMERA_HOST }}
+          EXPECTED_RUNNER: ${{ secrets.SYNC_CAMERA_RUNNER }}
+          EXPECTED_ACCOUNT: ${{ secrets.SYNC_CAMERA_ACCOUNT }}
         run: |
           $ErrorActionPreference = 'Stop'
           Set-Location -LiteralPath $env:RUNNER_TEMP
           if ($env:SCAFFOLD_SOURCE_SHA -cnotmatch '^[a-f0-9]{40}$') { throw 'A full reviewed Scaffold SHA is required' }
-          if ($env:COMPUTERNAME -ne 'LARGEBOI' -or $env:RUNNER_NAME -ne 'largeboi-sync-camera') { throw 'Unexpected Windows runner' }
+          if (-not $env:EXPECTED_HOST -or -not $env:EXPECTED_RUNNER -or -not $env:EXPECTED_ACCOUNT) { throw 'The camera runner identity is not configured' }
+          if ($env:COMPUTERNAME -ne $env:EXPECTED_HOST -or $env:RUNNER_NAME -ne $env:EXPECTED_RUNNER) { throw 'Unexpected Windows runner' }
           if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'An interactive session is required' }
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = [Security.Principal.WindowsPrincipal]::new($identity)
           if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Qualification must remain unelevated' }
-          if ($identity.Name -ne 'LARGEBOI\aayar') { throw 'Unexpected runner identity' }
+          if ($identity.Name -ne $env:EXPECTED_ACCOUNT) { throw 'Unexpected runner identity' }
           if ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE) -ne 'C:\actions-runner-sync\_work\sync\sync') { throw 'Unexpected camera workspace' }
           $ancestor = Get-Item -LiteralPath $env:RUNNER_TEMP
           while ($null -ne $ancestor) {
@@ -143,6 +148,8 @@ jobs:
             const root = process.env.SCAFFOLD_WINDOWS_ROOT;
             const helper = await import(pathToFileURL(path.join(root, '.github/qualification/godot.mjs')).href);
             const demand = value => { if (!value) throw new Error('Prior qualification evidence is incomplete or unresolved'); };
+            const runner = process.env.RUNNER_NAME;
+            demand(typeof runner === 'string' && runner.length > 0);
             const workflow = '.github/workflows/scaffold-godot-qualification.yml';
             const checkRun = (run, file) => demand(run.path === file && run.head_repository?.full_name === 'noisefactorllc/sync' && run.head_branch === 'main' && run.event === 'workflow_dispatch');
             const current = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId })).data;
@@ -173,7 +180,7 @@ jobs:
             const jobs = async (run, attempt) => {
               const response = (await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs', {
                 ...context.repo, run_id: run.id, attempt_number: attempt, per_page: 100 })).data;
-              demand(response.total_count === response.jobs.length && response.jobs.length === 1 && response.jobs[0].run_id === run.id && response.jobs[0].runner_id === 21 && response.jobs[0].runner_name === 'largeboi-sync-camera');
+              demand(response.total_count === response.jobs.length && response.jobs.length === 1 && response.jobs[0].run_id === run.id && response.jobs[0].runner_id === 21 && response.jobs[0].runner_name === runner);
               return response.jobs[0];
             };
             const predecessors = [], bootstrapJobs = [];
@@ -197,11 +204,11 @@ jobs:
                 demand(Number.isSafeInteger(job.id) && job.id > 0);
                 const auth = await github.auth();
                 const log = await helper.fetchBootstrapLog(job.id, auth.token, fetch);
-                predecessors.push({ ...helper.checkBootstrapFailure({ run: exact, attempt, job, artifactCount: 0, workflowSha256: digest(bytes), log }), workflow_blob: rows[0].sha });
+                predecessors.push({ ...helper.checkBootstrapFailure({ run: exact, attempt, job, artifactCount: 0, workflowSha256: digest(bytes), log, runner }), workflow_blob: rows[0].sha });
                 bootstrapJobs.push({ run: exact, attempt, job });
                 continue;
               }
-              helper.checkPriorEvidence(proof.files, exact, attempt);
+              helper.checkPriorEvidence(proof.files, exact, attempt, runner);
               for (const name of ['Verify the camera host and workspace were preserved', 'Retain qualification evidence', 'Clean only the proved invocation directory']) {
                 const steps = job.steps.filter(step => step.name === name);
                 demand(steps.length === 1 && steps[0].conclusion === 'success');
@@ -213,7 +220,7 @@ jobs:
             checkRun(contained, '.github/workflows/scaffold-windows-containment.yml');
             demand(contained.id === Number(process.env.CONTAINMENT_RUN_ID) && Number.isSafeInteger(contained.run_attempt) && contained.run_attempt > 0 && contained.status === 'completed' && contained.conclusion === 'success');
             const proof = await artifact(contained, 'windows-containment-' + process.env.SCAFFOLD_SOURCE_SHA + '-' + contained.id + '-' + contained.run_attempt);
-            helper.checkContainment(proof.files, process.env.SCAFFOLD_SOURCE_SHA);
+            helper.checkContainment(proof.files, process.env.SCAFFOLD_SOURCE_SHA, runner);
             const containedJob = await jobs(contained, contained.run_attempt);
             demand(containedJob.conclusion === 'success' && containedJob.name === 'Windows process containment ' + process.env.SCAFFOLD_SOURCE_SHA);
             const fresh = (await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: current.workflow_id, per_page: 100 })).data;

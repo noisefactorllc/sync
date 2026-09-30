@@ -142,8 +142,8 @@ test('engine environment is isolated and excludes service credentials and inheri
   assert.ok(!JSON.stringify(env).includes('private'))
 })
 
-const sha = 'a'.repeat(40), workflowSha = 'b'.repeat(40)
-const host = { source_sha: sha, runner: 'largeboi-sync-camera', host_preserved: true, remaining_invocation_processes: 0,
+const sha = 'a'.repeat(40), workflowSha = 'b'.repeat(40), runner = 'camera-runner'
+const host = { source_sha: sha, runner, host_preserved: true, remaining_invocation_processes: 0,
   remaining_invocation_identities: [], components: { registration: true, workspace: true, camera: true, task: true, listeners: true } }
 function containment() {
   return new Map([
@@ -154,13 +154,14 @@ function containment() {
   ])
 }
 test('containment admission requires exact runtime bindings, complete28-case pass and host preservation', () => {
-  assert.equal(checkContainment(containment(), sha).source_sha, sha)
+  assert.equal(checkContainment(containment(), sha, runner).source_sha, sha)
   for (const mutate of [m => m.delete('source-manifest.json'), m => m.set('windows-process.tap', Buffer.from('# tests 28\n# pass 27\n# fail 1\n# skipped 0\n')),
     m => m.set('host-preservation.json', Buffer.from(JSON.stringify({ ...host, remaining_invocation_processes: 1 }))),
     m => m.set('source-manifest.json', Buffer.from(JSON.stringify({ source_sha: sha, files: [] })))]) {
-    const m = containment(); mutate(m); assert.throws(() => checkContainment(m, sha))
+    const m = containment(); mutate(m); assert.throws(() => checkContainment(m, sha, runner))
   }
-  assert.throws(() => checkContainment(containment(), workflowSha))
+  assert.throws(() => checkContainment(containment(), workflowSha, runner))
+  for (const other of [undefined, '', 'other-runner']) assert.throws(() => checkContainment(containment(), sha, other))
 })
 
 const current = { id: 100, run_number: 1, run_attempt: 2, head_sha: workflowSha }
@@ -185,13 +186,14 @@ test('prior Godot proof requires exact attempt/source identity and complete clea
     run_id: 100, run_attempt: 1, cleanup_confirmed: true, active_command: null, commands: [] }
   const proof = new Map([['qualification.json', Buffer.from(JSON.stringify(receipt))], ['host-preservation.json', Buffer.from(JSON.stringify(host))],
     ['scaffold-source.json', containment().get('source-manifest.json')]])
-  assert.equal(checkPriorEvidence(proof, run, 1), true)
-  for (const r of [{ ...run, conclusion: 'cancelled' }, { ...run, head_sha: sha }, { ...run, status: 'in_progress' }]) assert.throws(() => checkPriorEvidence(proof, r, 1))
-  assert.throws(() => checkPriorEvidence(proof, run, 2))
+  assert.equal(checkPriorEvidence(proof, run, 1, runner), true)
+  assert.throws(() => checkPriorEvidence(proof, run, 1, 'other-runner'))
+  for (const r of [{ ...run, conclusion: 'cancelled' }, { ...run, head_sha: sha }, { ...run, status: 'in_progress' }]) assert.throws(() => checkPriorEvidence(proof, r, 1, runner))
+  assert.throws(() => checkPriorEvidence(proof, run, 2, runner))
   for (const change of [{ cleanup_confirmed: false }, { engine_sha256: '0'.repeat(64) }, { active_command: 'sweep' },
     { commands: [{ id: 'device', cleanup: { cleanup_confirmed: true } }] }, { commands: null }]) {
     proof.set('qualification.json', Buffer.from(JSON.stringify({ ...receipt, ...change })))
-    assert.throws(() => checkPriorEvidence(proof, run, 1))
+    assert.throws(() => checkPriorEvidence(proof, run, 1, runner))
   }
 })
 
@@ -228,14 +230,14 @@ function bootstrapFixture() {
     'Mint a Scaffold contents-read token', 'Fetch only qualified Job Object runtime source', 'Run only the pinned portable Godot fixtures',
     'Verify the camera host and workspace were preserved', 'Retain qualification evidence', 'Clean only the proved invocation directory', 'Complete job']
   const job = { id: 8, run_id: run.id, head_sha: run.head_sha, status: 'completed', conclusion: 'failure', runner_id: 21,
-    runner_name: 'largeboi-sync-camera', name: 'Portable Godot4.7.2 diagnostic', steps: names.map((name, index) => ({ name,
+    runner_name: runner, name: 'Portable Godot4.7.2 diagnostic', steps: names.map((name, index) => ({ name,
       number: index + 1, status: 'completed', conclusion: index === 1 ? 'failure' : [0, 11].includes(index) ? 'success' : 'skipped' })) }
   const lines = ["##[group]Run throw 'Runner temp ancestors must be regular directories'", '##[endgroup]',
     'Exception: C:\\actions-runner-sync\\_work\\_temp\\12345678-1234-1234-1234-123456789abc.ps1:14', 'Line |',
     "  14 |  … sePoint)) { throw 'Runner temp ancestors must be regular directories' …", '     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~',
     '     | Runner temp ancestors must be regular directories', '##[error]Process completed with exit code 1.', 'Cleaning up orphan processes']
   const log = Buffer.from(lines.map(line => '2026-09-25T13:00:15.9634551Z ' + line).join('\r\n') + '\r\n')
-  return { run, attempt: 1, job, artifactCount: 0,
+  return { run, attempt: 1, job, artifactCount: 0, runner,
     workflowSha256: 'c4ac26bfa36e7742403d7b4276f4e567ec54bbea8d2071b9e5b30268a8e16aab', log }
 }
 
@@ -249,6 +251,7 @@ test('bootstrap recovery proves the original source stopped before any owned-dir
   assert.ok(!JSON.stringify(proof).includes('C:\\actions-runner-sync'))
   for (const change of [
     { artifactCount: 1 }, { artifactCount: undefined }, { attempt: 2 }, { workflowSha256: '0'.repeat(64) },
+    { runner: undefined }, { runner: 'other-runner' },
     { run: { ...fixture.run, conclusion: 'cancelled' } }, { run: { ...fixture.run, status: 'in_progress' } },
     { job: { ...fixture.job, conclusion: 'cancelled' } }, { job: { ...fixture.job, status: 'in_progress' } },
     { job: { ...fixture.job, head_sha: sha } }, { job: { ...fixture.job, run_id: 100 } },
@@ -302,7 +305,7 @@ test('the actual workflow admission script binds first-run evidence and refuses 
   const active = { ...base, id: 100, run_number: 1, run_attempt: 1, workflow_id: 10, path: '.github/workflows/scaffold-godot-qualification.yml' }
   const qualified = { ...base, id: 50, run_attempt: 1, status: 'completed', conclusion: 'success', path: '.github/workflows/scaffold-windows-containment.yml' }
   for (const mode of ['first-run', 'safe-prior', 'prior-cleanup-step-failed', 'prior-wrong-attempt', 'prior-cancelled',
-    'partial-inventory', 'duplicate-artifact', 'missing-prior-attempt', 'changed-inventory', 'wrong-source', 'wrong-runner',
+    'partial-inventory', 'duplicate-artifact', 'missing-prior-attempt', 'changed-inventory', 'wrong-source', 'wrong-runner', 'wrong-runner-name',
     'latest-rerun', 'older-rerun-newer-failure', 'older-rerun-newer-running', 'bootstrap-safe', 'bootstrap-wrong-source',
     'bootstrap-log-error', 'bootstrap-artifact-api-error', 'bootstrap-started-engine', 'bootstrap-source-api-error',
     'bootstrap-job-changed', 'bootstrap-attempt-changed', 'bootstrap-artifact-malformed']) {
@@ -311,8 +314,8 @@ test('the actual workflow admission script binds first-run evidence and refuses 
       t.after(() => rm(root, { recursive: true, force: true }))
       await mkdir(join(root, '.github/qualification'), { recursive: true }); await mkdir(join(root, 'evidence'))
       await writeFile(join(root, '.github/qualification/godot.mjs'), helper)
-      const saved = Object.fromEntries(['SCAFFOLD_WINDOWS_ROOT', 'GITHUB_RUN_ATTEMPT', 'SCAFFOLD_SOURCE_SHA', 'CONTAINMENT_RUN_ID'].map(key => [key, process.env[key]]))
-      Object.assign(process.env, { SCAFFOLD_WINDOWS_ROOT: root, GITHUB_RUN_ATTEMPT: '1', SCAFFOLD_SOURCE_SHA: mode === 'wrong-source' ? workflowSha : sha, CONTAINMENT_RUN_ID: '50' })
+      const saved = Object.fromEntries(['SCAFFOLD_WINDOWS_ROOT', 'GITHUB_RUN_ATTEMPT', 'SCAFFOLD_SOURCE_SHA', 'CONTAINMENT_RUN_ID', 'RUNNER_NAME'].map(key => [key, process.env[key]]))
+      Object.assign(process.env, { SCAFFOLD_WINDOWS_ROOT: root, GITHUB_RUN_ATTEMPT: '1', SCAFFOLD_SOURCE_SHA: mode === 'wrong-source' ? workflowSha : sha, CONTAINMENT_RUN_ID: '50', RUNNER_NAME: runner })
       let lists = 0
       const bytes = zip([...containment()].map(([name, body]) => ({ name, body })))
       const item = { id: 7, name: 'windows-containment-' + sha + '-50-1', expired: false, workflow_run: { id: 50 },
@@ -363,7 +366,7 @@ test('the actual workflow admission script binds first-run evidence and refuses 
               ? { ...step, conclusion: 'failure' } : step) }] } }
         }
         return { data: { total_count: 1, jobs: [{ run_id, runner_id: mode === 'wrong-runner' ? 22 : 21,
-        runner_name: 'largeboi-sync-camera', conclusion: 'success', name: 'Windows process containment ' + sha,
+        runner_name: mode === 'wrong-runner-name' ? 'other-runner' : runner, conclusion: 'success', name: 'Windows process containment ' + sha,
         steps: ['Verify the camera host and workspace were preserved', 'Retain qualification evidence', 'Clean only the proved invocation directory'].map(name =>
           ({ name, conclusion: mode === 'prior-cleanup-step-failed' && name.startsWith('Clean') ? 'failure' : 'success' })) }] } } } }
       let logCalls = 0

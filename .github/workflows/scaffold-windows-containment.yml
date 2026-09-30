@@ -30,16 +30,21 @@ jobs:
     steps:
       - name: Verify the existing host and retain its baseline
         id: baseline
+        env:
+          EXPECTED_HOST: ${{ secrets.SYNC_CAMERA_HOST }}
+          EXPECTED_RUNNER: ${{ secrets.SYNC_CAMERA_RUNNER }}
+          EXPECTED_ACCOUNT: ${{ secrets.SYNC_CAMERA_ACCOUNT }}
         run: |
           $ErrorActionPreference = 'Stop'
           Set-Location -LiteralPath $env:RUNNER_TEMP
           if ($env:SCAFFOLD_SOURCE_SHA -cnotmatch '^[a-f0-9]{40}$') { throw 'A full reviewed Scaffold SHA is required' }
-          if ($env:COMPUTERNAME -ne 'LARGEBOI' -or $env:RUNNER_NAME -ne 'largeboi-sync-camera') { throw 'Unexpected Windows runner' }
+          if (-not $env:EXPECTED_HOST -or -not $env:EXPECTED_RUNNER -or -not $env:EXPECTED_ACCOUNT) { throw 'The camera runner identity is not configured' }
+          if ($env:COMPUTERNAME -ne $env:EXPECTED_HOST -or $env:RUNNER_NAME -ne $env:EXPECTED_RUNNER) { throw 'Unexpected Windows runner' }
           if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'An interactive session is required' }
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = [Security.Principal.WindowsPrincipal]::new($identity)
           if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Qualification must remain unelevated' }
-          if ($identity.Name -ne 'LARGEBOI\aayar') { throw 'Unexpected runner identity' }
+          if ($identity.Name -ne $env:EXPECTED_ACCOUNT) { throw 'Unexpected runner identity' }
           if ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE) -ne 'C:\actions-runner-sync\_work\sync\sync') { throw 'Unexpected camera workspace' }
           $root = Join-Path $env:RUNNER_TEMP "scaffold-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Qualification directory already exists' }
