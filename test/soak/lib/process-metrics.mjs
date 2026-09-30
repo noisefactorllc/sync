@@ -139,7 +139,7 @@ function defaultFootprintRunAsync(pid) {
 }
 
 // NEVER READ THIS NUMBER WITH vmmap. `vmmap` (with or without -summary)
-// SUSPENDS ITS TARGET while it walks the address space: measured on spare.lan
+// SUSPENDS ITS TARGET while it walks the address space: measured on a Mac
 // 2026-09-08 against a 300 MB process stamping time every 5 ms, each vmmap
 // call stopped the target for 1.28-1.35 s, and on the camera daemon with a
 // grown pixel-buffer pool for 1.7 s. Sampled every second, that shaved the

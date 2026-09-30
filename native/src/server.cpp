@@ -641,7 +641,7 @@ class Server {
         // consumer's picture freezes permanently while everything reports
         // healthy.
         //
-        // Measured on spare.lan: a transport close, a replacement sender three
+        // Measured on an Apple Silicon Mac: a transport close, a replacement sender three
         // seconds later, five seconds of the old delivery draining, then 954
         // seconds frozen on one frame with the new sender reporting 24.6 fps
         // and its counter climbing 28 -> 102 -> 163.

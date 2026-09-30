@@ -173,7 +173,7 @@ cmake --build build --config Release --target sync_camera_capability_probe
 .\build\Release\sync_camera_capability_probe.exe; $LASTEXITCODE
 ```
 
-Expected on LARGEBOI: `build_22000_or_later=1`, `mfplat=1`, `verdict=virtual_cameras_supported`, exit 0.
+Expected on the Windows 11 test host: `build_22000_or_later=1`, `mfplat=1`, `verdict=virtual_cameras_supported`, exit 0.
 
 - [ ] **Step 4: Add the probe to CI**
 
@@ -2727,7 +2727,7 @@ cmake --build build --config Release
 ctest --test-dir build --build-config Release --output-on-failure -R virtual_camera_e2e
 ```
 
-Expected: PASS on LARGEBOI. This is the moment the feature is real.
+Expected: PASS on the Windows 11 test host. This is the moment the feature is real.
 
 - [ ] **Step 4: Confirm with a third-party consumer**
 
@@ -2751,7 +2751,7 @@ If Task 2's hosted verdict was exit 0, add the test to the existing `windows` jo
 
 - [ ] **Step 6: If the hosted verdict was 2 or 3, add a self-hosted runner**
 
-Register LARGEBOI as a self-hosted runner labelled `sync-camera`, add the job:
+Register the Windows 11 test host as a self-hosted runner labelled `sync-camera`, add the job:
 
 ```yaml
   windows-camera:
@@ -2760,7 +2760,7 @@ Register LARGEBOI as a self-hosted runner labelled `sync-camera`, add the job:
     timeout-minutes: 30
 ```
 
-with the same steps, and document the machine in Scaffold's `docs/runbook/office-lan.md` beside the other desk machines — it is the second self-hosted runner after `spare-mac`.
+with the same steps, and document the machine in Scaffold's runner host runbook — it is the second self-hosted runner after the macOS performance runner.
 
 - [ ] **Step 7: Commit**
 
@@ -2823,7 +2823,7 @@ git commit -m "build(camera): ship and unregister the camera source"
 Cross-repo: `~/platform/scaffold`, not the Sync tree.
 
 **Files:**
-- Modify: `.github/workflows/build-sync-preview.yml`, `scripts/create-sync-windows-release-manifest.mjs`, `scripts/verify-sync-preview-release.mjs`, `scripts/create-sync-release-manifest.test.mjs`, `docs/runbook/office-lan.md` (only if Task 14 Step 6 applied)
+- Modify: `.github/workflows/build-sync-preview.yml`, `scripts/create-sync-windows-release-manifest.mjs`, `scripts/verify-sync-preview-release.mjs`, `scripts/create-sync-release-manifest.test.mjs`, Scaffold's runner host runbook (only if Task 14 Step 6 applied)
 
 **Interfaces:**
 - Consumes: the packaged bundle

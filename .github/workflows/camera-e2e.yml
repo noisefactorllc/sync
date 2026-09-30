@@ -23,7 +23,7 @@ name: Camera end-to-end
 # THE RUNNER IS SOMEONE'S DESK MACHINE, AND IT MAY BE UNDER MEASUREMENT
 #
 # This job does not run in a disposable container. It runs on a real Windows
-# PC in the office, which is also used for long soak runs -- a push to main
+# desktop PC, which is also used for long soak runs -- a push to main
 # lands a source build, a media-source registration and a camera test on a
 # machine that may be eight hours into measuring daemon memory.
 #
@@ -60,7 +60,7 @@ name: Camera end-to-end
 #   4. cmake/ctest and vcpkg on the runner account's PATH. Hosted images have
 #      them; a desktop does not.
 #
-# Host setup is recorded in scaffold's docs/runbook/office-lan.md.
+# Host setup is recorded in Scaffold's runner host runbook.
 
 on:
   push:
@@ -112,7 +112,7 @@ on:
 #
 # If a cancellation ever does strand it, the symptom is the desktop's own Sync
 # camera showing nothing, and the fix is one command -- see the troubleshooting
-# section of office-lan.md in Scaffold.
+# section of Scaffold's runner host runbook.
 concurrency:
   group: sync-camera-e2e
   cancel-in-progress: true
@@ -207,7 +207,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw ("camera registration failed. If this is ERROR_ACCESS_DENIED " +
                    "the host's grant on the CLSID key is gone -- see " +
-                   "office-lan.md; a Sync uninstall removes the key and the " +
+                   "the runner host runbook; a Sync uninstall removes the key and the " +
                    "grant with it.")
           }
 

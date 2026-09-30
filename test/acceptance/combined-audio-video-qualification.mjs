@@ -7,7 +7,7 @@ import { residentKbAsync, footprintKbAsync } from '../soak/lib/process-metrics.m
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SERVER_BIN = path.resolve(ROOT, 'build/sync_audio_test_server');
-const PRODUCER_BIN = '/Users/alex/platform/scaffold/apps/sync-soak/bin/paced-producer.mjs';
+const PRODUCER_BIN = path.resolve(ROOT, '../scaffold/apps/sync-soak/bin/paced-producer.mjs');
 
 function parseArgs() {
   const args = process.argv.slice(2);

@@ -19,7 +19,7 @@ import { residentKb, footprintKb, runLeaks } from './lib/process-metrics.mjs';
 // The sampler is periodic and the sender lifecycle is not, so a sample
 // occasionally lands in the brief gap between one sender closing and the next
 // opening — where the daemon has released its per-sender buffers and reads
-// about 8 MB lighter than it does while streaming. Observed on LARGEBOI: two
+// about 8 MB lighter than it does while streaming. Observed on the Windows soak host: two
 // samples out of 3210, both on cycle boundaries, reading 3056 KiB against a
 // p50 of 11168. Rare, but if one lands on an endpoint it moves growth by the
 // full 8 MB — a phantom leak at the start of the window, or a phantom
@@ -88,12 +88,12 @@ export class ProtocolSoak {
                           leaksEveryMs, onSample, startupTimeoutMs, daemonArgs, publisher,
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
     // PACING. Unpaced (fps 0, the default) this client sends as fast as the
-    // daemon accepts: on spare.lan that is ~200 frames/s of 8 MB frames,
+    // daemon accepts: on the macOS soak host that is ~200 frames/s of 8 MB frames,
     // 800 MB/s or more through the loopback. That is the right shape for a
     // capacity measurement of the daemon alone and the WRONG shape for a
     // co-load: run beside a browser sender at 1080p it starved that sender
     // from 60 to ~40 fps within 100 s on every gauntlet of 2026-09-07/08
-    // (spare bisect, scaffold handoff section 4b). With fps set, the loop
+    // (macOS soak host bisect, scaffold handoff section 4b). With fps set, the loop
     // sends at most one frame per 1000/fps ms and never bursts to catch up
     // after backpressure: a paced client that fell behind resumes at its
     // rate, it does not repay the deficit.

@@ -253,13 +253,13 @@ So branch 3 applies:
   do. On the hosted job it therefore never fails; the job that turns it into a
   gate is the self-hosted one below.
 - **The ship gate is a self-hosted Windows 11 runner, and it now exists.**
-  LARGEBOI — Alienware Aurora R13, Windows 11 Home 26200, with `FrameServer`,
-  `FrameServerMonitor`, and `mfsensorgroup.dll` 10.0.26100.9278 — is
-  registered as `largeboi-sync-camera` with labels
+  A Windows 11 Home 26200 desktop with `FrameServer`,
+  `FrameServerMonitor`, and `mfsensorgroup.dll` 10.0.26100.9278 is
+  registered with labels
   `[self-hosted, Windows, X64, sync-camera]`, mirroring the existing
   `[self-hosted, macOS, ARM64, sync-performance]` job in Scaffold's
   `build-sync-preview.yml`. `.github/workflows/camera-e2e.yml` drives it. Host
-  setup is in Scaffold's `docs/runbook/office-lan.md`.
+  setup is in Scaffold's runner host runbook.
 
 Scaffold's `build-sync-preview.yml` builds Windows on `windows-2022`, which is
 build 20348 and below the floor. What §6.3 concludes applies there too.
@@ -282,7 +282,7 @@ them very easy to confuse for one another — and for a defect in the source.
    why registration itself reports success — and then fails inside the frame
    server, surfacing as `MFCreateVirtualCamera` returning `E_ACCESSDENIED`
    with nothing else to distinguish it from constraint 1. Measured directly:
-   the same build registered from `C:\Users\aayar\platform\sync\build\Release`
+   the same build registered from `%USERPROFILE%\platform\sync\build\Release`
    fails, and from `C:\actions-runner-sync\...` passes, because the drive root
    grants `BUILTIN\Users` read and LOCAL SERVICE is a member of Users.
 3. **The runner does not need to be elevated, and should not be.**

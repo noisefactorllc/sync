@@ -107,7 +107,7 @@ test('summarise ignores the warm-up window when measuring growth', () => {
 });
 
 test('one cycle-gap sample on an endpoint cannot move the growth verdict', () => {
-  // Reproduces what LARGEBOI's Windows run actually produced: a daemon flat at
+  // Reproduces what the Windows soak host's run actually produced: a daemon flat at
   // 11_180 KiB for the whole window, with single samples at two cycle
   // boundaries reading 3056 KiB because the sampler landed between one sender
   // closing and the next opening. One of them falls on the very last sample.

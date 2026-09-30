@@ -17,7 +17,7 @@
 # from a new path opens-or-creates the key in place instead.
 #
 # Host requirements are the four in camera-e2e.yml; the same runner satisfies
-# them. Host setup is recorded in scaffold's docs/runbook/office-lan.md.
+# them. Host setup is recorded in Scaffold's runner host runbook.
 #
 # workflow_dispatch only -- never on push. A long delivery run monopolises the
 # one camera on the one machine, so it is a deliberate, dispatched measurement,
@@ -93,7 +93,7 @@ jobs:
           & "build/$env:BUILD_TYPE/syncd.exe" --register-camera
           if ($LASTEXITCODE -ne 0) {
             throw ("camera registration failed. If this is ERROR_ACCESS_DENIED " +
-                   "the host's grant on the CLSID key is gone -- see office-lan.md.")
+                   "the host's grant on the CLSID key is gone -- see the runner host runbook.")
           }
 
       - name: Measure sustained delivery

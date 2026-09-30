@@ -282,7 +282,7 @@ git commit -m "build: package Sync as a macOS app"
 
 ### Task 5: Public allowlisted installer route
 
-**Repository:** `/Users/aayars/platform/scaffold`
+**Repository:** `../scaffold`
 
 **Files:**
 - Modify: `apps/desktop-downloads/lib/installers.py`
@@ -329,7 +329,7 @@ git commit -m "feat(downloads): serve the public Sync preview"
 
 ### Task 6: Sync downloads card and release metadata updater
 
-**Repository:** `/Users/aayars/platform/scaffold`
+**Repository:** `../scaffold`
 
 **Files:**
 - Modify: `apps/changelist-generator/products.yml`
@@ -383,7 +383,7 @@ git commit -m "feat(downloads): add the Sync preview card"
 
 ### Task 7: Dedicated signed and notarized Sync release workflow
 
-**Repository:** `/Users/aayars/platform/scaffold`
+**Repository:** `../scaffold`
 
 **Files:**
 - Create: `.github/workflows/build-sync-preview.yml`
@@ -441,7 +441,7 @@ git commit -m "build: add signed Sync preview releases"
 
 ### Task 8: Noisedeck installation documentation
 
-**Repository:** `/Users/aayars/platform/noisedeck`
+**Repository:** `../noisedeck`
 
 **Files:**
 - Modify: `app/docs/Sync.md`
