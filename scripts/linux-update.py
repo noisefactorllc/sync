@@ -239,6 +239,15 @@ class Maintenance:
 
     def remove_enrollment(self):
         if self.path(CONFIG).exists(): self.disable()
+        else:
+            # Removal is the only cleanup path for partial enrollment. An
+            # orphaned boot-activation drop-in (its record was already removed
+            # by an administrator) must not keep waking the timer at every
+            # boot just because disable() was skipped, and stopping a timer
+            # that was never started is harmless.
+            self.remove(TIMER_DEPENDENCY)
+            self.run(['/usr/bin/systemctl','stop','noisedeck-sync-update.timer'])
+            self.run(['/usr/bin/systemctl','daemon-reload'])
         for path in (SOURCE, '/etc/apt/preferences.d/noisedeck-sync',
                      '/etc/apt/apt.conf.d/52noisedeck-sync', CONFIG):
             self.remove(path)

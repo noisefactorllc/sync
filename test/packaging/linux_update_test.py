@@ -479,5 +479,21 @@ class LinuxUpdateTests(unittest.TestCase):
         self.engine.remove_enrollment()
         self.assertFalse((self.root/module.CONFIG.lstrip('/')).exists())
         self.assertFalse((self.root/module.SOURCE.lstrip('/')).exists())
+        self.assertFalse((self.root/module.TIMER_DEPENDENCY.lstrip('/')).exists())
+
+    def test_removal_without_enrollment_still_clears_an_orphaned_boot_activation(self):
+        # The enrollment record may already be gone while boot activation
+        # remains (an administrator removed the config). `remove` is the only
+        # cleanup path, so it must tear the drop-in and timer down anyway.
+        self.write(module.TIMER_DEPENDENCY, '[Unit]\nWants=noisedeck-sync-update.timer\n')
+        self.assertFalse((self.root/module.CONFIG.lstrip('/')).exists())
+        self.engine.remove_enrollment()
+        self.assertFalse((self.root/module.TIMER_DEPENDENCY.lstrip('/')).exists())
+        self.assertIn(['/usr/bin/systemctl','stop','noisedeck-sync-update.timer'],
+                      self.runner.calls)
+        self.assertIn(['/usr/bin/systemctl','daemon-reload'], self.runner.calls)
+        for artifact in (module.SOURCE, '/etc/apt/preferences.d/noisedeck-sync',
+                         '/etc/apt/apt.conf.d/52noisedeck-sync', module.CONFIG):
+            self.assertFalse((self.root/artifact.lstrip('/')).exists())
 
 if __name__ == '__main__': unittest.main()
