@@ -1094,19 +1094,31 @@ SYNC_TEST(pairing_store_serializes_cross_process_reload_through_commit_without_l
     if (children[index] == 0) {
       ::close(ready[0]);
       ::close(start[1]);
+      // Busy means the other child held the store lock for the whole bounded
+      // wait, which one slow commit on a loaded CI disk can do. A caller
+      // retries it, and so does each child; a lost update still shows up as
+      // a missing record below.
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
       PairingStore child;
-      const auto opened = child.open({.path = path.string()});
+      auto opened = child.open({.path = path.string()});
+      while (opened == PairingStoreError::Busy && std::chrono::steady_clock::now() < deadline) {
+        opened = child.open({.path = path.string()});
+      }
       const char signal = 'r';
       const bool signaled = ::write(ready[1], &signal, 1) == 1;
       char release = 0;
       const bool released = ::read(start[0], &release, 1) == 1;
       const auto child_origin = origin(index == 0 ? "https://one.example"
                                                    : "https://two.example");
-      const auto issued = child.issue(child_origin);
-      ::_exit(opened == PairingStoreError::None && signaled && released &&
-                      issued.error == PairingStoreError::None
-                  ? 0
-                  : 1);
+      auto issued = child.issue(child_origin);
+      while (issued.error == PairingStoreError::Busy &&
+             std::chrono::steady_clock::now() < deadline) {
+        issued = child.issue(child_origin);
+      }
+      // The exit status names the step that failed and the store error.
+      if (opened != PairingStoreError::None) ::_exit(10 + static_cast<int>(opened));
+      if (!signaled || !released) ::_exit(2);
+      ::_exit(issued.error == PairingStoreError::None ? 0 : 40 + static_cast<int>(issued.error));
     }
   }
   ::close(ready[1]);
@@ -1122,6 +1134,7 @@ SYNC_TEST(pairing_store_serializes_cross_process_reload_through_commit_without_l
     int status = 0;
     SYNC_REQUIRE(::waitpid(child, &status, 0) == child);
     SYNC_REQUIRE(WIFEXITED(status));
+    if (WEXITSTATUS(status) != 0) std::cerr << "child exit status " << WEXITSTATUS(status) << '\n';
     SYNC_REQUIRE(WEXITSTATUS(status) == 0);
   }
   std::array<NormalizedOrigin, 64> listed{};
