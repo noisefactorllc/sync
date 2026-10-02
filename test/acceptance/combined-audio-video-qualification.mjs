@@ -13,7 +13,10 @@
 //     explicitly not delivery;
 //   - audio sample integrity: every (channel, frame) sample of the
 //     synthetic audio_32_tones fixture checked against its deterministic
-//     value, plus cursor continuity and a wall-clock production ledger;
+//     value, plus cursor continuity and a wall-clock production ledger
+//     over the run's full steady-state window (startup and tail
+//     underproduction count); every nonempty packet must match the
+//     fixture format and be fully checked;
 //   - final pixels: absent on this path. The test server's TestPublisher
 //     accepts frames into a queue; nothing decodes final rendered pixels
 //     here, so the delivery criteria are reported as blocked, never
@@ -22,12 +25,23 @@
 // exercised by negative controls in
 // combined-audio-video-qualification.test.mjs (injected duplicate,
 // omitted identity, torn frame, swapped channel, sample gap, zero second,
-// missed wall-clock production): every control fails the verdict.
+// missed wall-clock production, trailing slot omission, mixed-format
+// packet, startup/tail underproduction): every control fails the verdict.
+// The submission ledger's integrity and delivery denominator are bound to
+// the producer summary's framesScheduled, so a torn ledger that drops
+// trailing records cannot shrink the numbers it is judged by.
 //
 // Schema v2: v1's deliveredFps (a submission count presented as delivery)
 // and its first/last-trimmed complete-second statistics are removed;
 // buckets now cover every complete second of the window and the partial
 // tail is reported instead of dropped.
+// Schema v3: the slot ledger's integrity and delivery denominator bind to
+// the producer summary's framesScheduled (trailing omissions count as
+// missing; received/scheduled/unscheduled are separate fields), every
+// nonempty audio packet must match the fixture format and be fully
+// checked, and the production window is the arm's full steady-state
+// window with the first-to-last-data span and the startup gap kept as
+// telemetry.
 import { spawn } from 'node:child_process';
 import { existsSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -158,6 +172,13 @@ async function runArm({ armName, durationSeconds, runAudio, runVideo }) {
   const audioPackets = [];
   let firstDataMs = null;
   let lastDataMs = null;
+  // The steady-state window the production ledger is judged against: from
+  // audio-source open to the read loop's scheduled end. Startup empties
+  // before the first data and stalls after the last data are inside this
+  // window and count as missing production; the first-to-last-data span is
+  // kept separately as telemetry, never as the production window.
+  let audioWindowStartMs = null;
+  let audioWindowEndMs = null;
 
   let audioActive = false;
   let audioPromise = Promise.resolve();
@@ -169,6 +190,7 @@ async function runArm({ armName, durationSeconds, runAudio, runVideo }) {
     await audioControl.nextJson();
     audioControl.sendText(JSON.stringify({ type: 'openAudioSource', sourceId: AUDIO_SOURCE }));
     await audioControl.nextJson();
+    audioWindowStartMs = performance.now();
 
     audioPromise = (async () => {
       while (audioActive) {
@@ -200,6 +222,7 @@ async function runArm({ armName, durationSeconds, runAudio, runVideo }) {
           lastDataMs = now;
         }
       }
+      audioWindowEndMs = performance.now();
       try {
         audioControl.sendText(JSON.stringify({ type: 'closeAudioSource', sourceId: AUDIO_SOURCE }));
         audioControl.close();
@@ -314,7 +337,13 @@ async function runArm({ armName, durationSeconds, runAudio, runVideo }) {
 
   audioMetrics.rttMs.sort((a, b) => a - b);
   const totalAudioFrames = audioPackets.reduce((sum, packet) => sum + packet.frameCount, 0);
-  const productionWindowMs = firstDataMs !== null ? lastDataMs - firstDataMs : null;
+  // Production window: the arm's own steady-state window (source open to
+  // the loop's scheduled end), not the first-to-last-data span.
+  const productionWindowMs = audioWindowStartMs !== null && audioWindowEndMs !== null
+    ? audioWindowEndMs - audioWindowStartMs : null;
+  const firstToLastDataMs = firstDataMs !== null ? lastDataMs - firstDataMs : null;
+  const startupToFirstDataMs = firstDataMs !== null && audioWindowStartMs !== null
+    ? firstDataMs - audioWindowStartMs : null;
   const audioSummary = runAudio ? {
     fixture: AUDIO_SOURCE,
     sourceKind: AUDIO_SOURCES[AUDIO_SOURCE].kind,
@@ -324,6 +353,9 @@ async function runArm({ armName, durationSeconds, runAudio, runVideo }) {
     strayTextReads: audioMetrics.strayText,
     totalFrames: totalAudioFrames,
     productionWindowMs: productionWindowMs === null ? null : Number(productionWindowMs.toFixed(1)),
+    // Telemetry only: where inside the window the data actually flowed.
+    firstToLastDataMs: firstToLastDataMs === null ? null : Number(firstToLastDataMs.toFixed(1)),
+    startupToFirstDataMs: startupToFirstDataMs === null ? null : Number(startupToFirstDataMs.toFixed(1)),
     slowReads10ms: audioMetrics.slowReads10ms,
     slowReads20ms: audioMetrics.slowReads20ms,
     rttPercentilesMs: {
@@ -465,7 +497,7 @@ async function main() {
 
   const combinedArm = results.find(r => r.arm === 'arm_combined_load');
   const output = {
-    schema: 'sync-combined-audio-video-qualification-v2',
+    schema: 'sync-combined-audio-video-qualification-v3',
     suite: 'Sync 1080p60 Combined Audio (32-ch) + Video Load Collector',
     timestampUtc: new Date().toISOString(),
     host: {

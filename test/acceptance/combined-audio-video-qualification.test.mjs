@@ -2,12 +2,14 @@
 // plan 2026-09-29 Revision 10, Priority 2; finding SYNC-CR-004). Every
 // injected defect must fail the verdict: a duplicate identity, an omitted
 // identity, a torn final frame, an out-of-order identity, a zero-delivery
-// second, a swapped audio channel, a cursor gap, server-reported drops and
-// missed wall-clock production. A clean synthetic ledger produces no failed
-// criterion, and the standing blockers (synthetic audio fixture, unadopted
-// jitter epsilon, no final-pixel ledger on the collector path) keep the
-// overall verdict NOT QUALIFIED - which is the honest state of this
-// evidence, never a reason to soften a criterion.
+// second, a swapped audio channel, a cursor gap, server-reported drops,
+// missed wall-clock production, a trailing slot-record omission, a
+// wrong-format packet mixed with valid ones, and startup/tail audio
+// underproduction. A clean synthetic ledger produces no failed
+// criterion, and the standing blockers (synthetic audio fixture,
+// unadopted jitter epsilon, no final-pixel ledger on the collector path)
+// keep the overall verdict NOT QUALIFIED - which is the honest state of
+// this evidence, never a reason to soften a criterion.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -79,14 +81,14 @@ function cleanFinalPixels({ ok = true } = {}) {
   return entries;
 }
 
-function makeTonesPacket({ firstFrame = 0, frames = 120, channels = 32, dropped = 0, mutate = null } = {}) {
+function makeTonesPacket({ firstFrame = 0, frames = 120, channels = 32, rate = 48000, dropped = 0, mutate = null } = {}) {
   const buffer = Buffer.alloc(32 + channels * frames * 4);
   // The wire magic is the big-endian bytes "NAUD", like the daemon writes
   // and the browser client's DataView.getUint32(0) reads.
   buffer.writeUInt32BE(0x4e415544, 0);
   buffer.writeUInt16LE(1, 4);
   buffer.writeUInt16LE(channels, 6);
-  buffer.writeUInt32LE(48000, 8);
+  buffer.writeUInt32LE(rate, 8);
   buffer.writeUInt32LE(frames, 12);
   buffer.writeBigUInt64LE(BigInt(firstFrame), 16);
   buffer.writeBigUInt64LE(BigInt(dropped), 24);
@@ -208,6 +210,44 @@ test('a torn producer ledger fails slot ledger integrity', () => {
   assert.equal(dupLedger.duplicateSeqRecords, 1);
   const dupVerdict = evaluateVideo({ slotLedger: dupLedger, finalPixels: cleanFinalPixels(), ranVideo: true });
   assert.ok(failedNames(dupVerdict).includes('slot_ledger_integrity'));
+});
+
+test('negative control: trailing omitted slot records fail integrity and cannot shrink the denominator', () => {
+  // Drop the last 60 frame records while the summary still schedules 600
+  // slots: the ledger must count them as missing against framesScheduled
+  // and must keep the delivery denominator at 600.
+  const { lines } = producerLines();
+  const trailing = lines.slice(0, 1 + SLOTS - 60);
+  trailing.push(lines[lines.length - 1]);
+  const ledger = buildSlotLedger(parseProducerRecords(trailing));
+  assert.equal(ledger.scheduledSlots, SLOTS);
+  assert.equal(ledger.scheduledBySummary, true);
+  assert.equal(ledger.receivedSlotRecords, SLOTS - 60);
+  assert.equal(ledger.missingSeqRecords, 60);
+  // A receiver that only ever saw the 540 submitted slots still has its
+  // delivery fraction judged against all 600 scheduled slots.
+  const pixels = cleanFinalPixels().slice(0, SLOTS - 60);
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: pixels, ranVideo: true });
+  const names = failedNames(video);
+  assert.ok(names.includes('slot_ledger_integrity'));
+  assert.ok(names.includes('delivery_fraction'));
+  const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
+  assert.equal(fraction.measured.denominator, SLOTS);
+  assert.ok(fraction.measured.fraction < 0.99);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
+test('negative control: slot records beyond the scheduled range fail integrity', () => {
+  const { lines } = producerLines();
+  const extra = lines.slice();
+  // Insert a record for a sequence the producer never scheduled (before
+  // the summary line).
+  extra.splice(extra.length - 1, 0, slotLine(SLOTS + 5));
+  const ledger = buildSlotLedger(parseProducerRecords(extra));
+  assert.equal(ledger.unscheduledSeqRecords, 1);
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: cleanFinalPixels(), ranVideo: true });
+  assert.ok(failedNames(video).includes('slot_ledger_integrity'));
+  assert.equal(verdictFor(video, null).qualified, false);
 });
 
 test('a clean synthetic video ledger passes every criterion and still cannot qualify', () => {
@@ -350,6 +390,67 @@ test('negative control: server-reported drops fail the verdict', () => {
   const packets = [verifyTonesPacket(makeTonesPacket({ firstFrame: 0, frames: 480, dropped: 3 }))];
   const audio = evaluateAudio({ packets, production: { windowMs: 10, totalFrames: 480 }, ranAudio: true });
   assert.ok(failedNames(audio).includes('server_reported_drops'));
+});
+
+test('negative control: a wrong-format packet mixed with valid packets fails the format and sample criteria', () => {
+  // A 24-channel packet between valid 32-channel packets: aggregate
+  // maxima would still report 32 channels and pass; every nonempty
+  // packet must match the fixture format and be fully checked.
+  const packets = [
+    verifyTonesPacket(makeTonesPacket({ firstFrame: 0, frames: 480 })),
+    verifyTonesPacket(makeTonesPacket({ firstFrame: 480, frames: 240, channels: 24 })),
+    verifyTonesPacket(makeTonesPacket({ firstFrame: 720, frames: 240 })),
+  ];
+  const audio = evaluateAudio({
+    packets,
+    production: { windowMs: 1000, totalFrames: 480 + 240 + 240 },
+    ranAudio: true,
+  });
+  const names = failedNames(audio);
+  assert.ok(names.includes('channel_count'));
+  assert.ok(names.includes('sample_values'));
+  const sampleValues = audio.criteria.find((item) => item.name === 'sample_values');
+  assert.ok(sampleValues.measured.packetsNotFullyChecked >= 1, 'mixed packet not reported as unchecked');
+  assert.equal(verdictFor(null, audio).qualified, false);
+
+  // A wrong-rate packet fails the rate criterion the same way even with
+  // the right channel count.
+  const wrongRate = [
+    verifyTonesPacket(makeTonesPacket({ firstFrame: 0, frames: 480 })),
+    verifyTonesPacket(makeTonesPacket({ firstFrame: 480, frames: 480, rate: 44100 })),
+  ];
+  const rateAudio = evaluateAudio({
+    packets: wrongRate,
+    production: { windowMs: 1000, totalFrames: 960 },
+    ranAudio: true,
+  });
+  const rateNames = failedNames(rateAudio);
+  assert.ok(rateNames.includes('sample_rate'));
+  assert.ok(rateNames.includes('sample_values'));
+});
+
+test('negative control: startup and tail underproduction fail the full-window production ledger', () => {
+  // The production window is the run's steady-state window, not the
+  // first-to-last-data span: frames missing before the first nonempty
+  // read (startup stall) or after the last one (tail stall) are missing
+  // production. 48000 frames span 1000 ms; a window of 1000 ms with a
+  // 100 ms startup gap produces only 90%.
+  const packets = [];
+  for (let index = 0; index < 90; index += 1) {
+    packets.push(verifyTonesPacket(makeTonesPacket({ firstFrame: index * 480, frames: 480 })));
+  }
+  const startup = evaluateAudio({
+    packets,
+    production: { windowMs: 1000, totalFrames: 90 * 480 },
+    ranAudio: true,
+  });
+  const startupProduction = startup.criteria.find((item) => item.name === 'wall_clock_production');
+  assert.equal(startupProduction.status, 'fail');
+  assert.equal(startupProduction.measured.expectedFrames, 48000);
+  assert.ok(startupProduction.measured.ratio < 0.99);
+  // The cursor stays contiguous: only the production ledger catches it.
+  assert.equal(startup.criteria.find((item) => item.name === 'cursor_continuity').status, 'pass');
+  assert.equal(verdictFor(null, startup).qualified, false);
 });
 
 test('negative control: missed wall-clock production fails despite a contiguous cursor', () => {

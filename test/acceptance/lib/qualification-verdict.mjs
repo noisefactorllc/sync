@@ -186,7 +186,22 @@ export function buildSlotLedger({ start, slots, summary }) {
   }
   const seqs = [...bySeq.keys()].sort((a, b) => a - b);
   const maxSeq = seqs.length > 0 ? seqs[seqs.length - 1] : -1;
-  const missingSeqRecords = maxSeq + 1 - bySeq.size;
+  // The sequence space every integrity and delivery number is judged
+  // against is the producer summary's framesScheduled: a record missing
+  // anywhere in [0, framesScheduled) - interior gap or trailing omission -
+  // is a missing record, and the delivery denominator can never shrink to
+  // the records that happened to arrive. Without a summary the largest
+  // observed sequence is the only remaining bound; that fallback is
+  // reported, never treated as a pass.
+  const scheduledCount = summary
+    && Number.isFinite(Number(summary.framesScheduled))
+    && Number(summary.framesScheduled) >= 0
+    ? Number(summary.framesScheduled) : null;
+  const expectedSeqCount = scheduledCount !== null ? scheduledCount : maxSeq + 1;
+  const withinSchedule = seqs.filter((seq) => seq >= 0 && seq < expectedSeqCount).length;
+  const missingSeqRecords = Math.max(0, expectedSeqCount - withinSchedule);
+  const unscheduledSeqRecords = seqs.length - withinSchedule;
+  const scheduledBySummary = scheduledCount !== null;
   const secondOf = (slot) => Number((slot.deadlineNs - t0Ns) / 1_000_000_000n);
   const maxSecond = maxSeq >= 0 ? secondOf(bySeq.get(maxSeq)) : -1;
   // A second is complete when the run covered its full extent: the
@@ -196,12 +211,10 @@ export function buildSlotLedger({ start, slots, summary }) {
   const completeSeconds = Math.max(0, Math.floor(wallSeconds));
   const secondBuckets = Array.from({ length: completeSeconds }, (_, second) => ({ second, submitted: 0 }));
   const tailSlots = [];
-  let scheduledSlots = 0;
   let submittedSlots = 0;
   let skippedSlots = 0;
   for (const seq of seqs) {
     const slot = bySeq.get(seq);
-    scheduledSlots += 1;
     const second = secondOf(slot);
     if (slot.skipped) skippedSlots += 1;
     else {
@@ -231,7 +244,13 @@ export function buildSlotLedger({ start, slots, summary }) {
     fps,
     periodNs: periodNs.toString(),
     t0Ns: t0Ns.toString(),
-    scheduledSlots,
+    // The scheduled denominator: the producer summary's framesScheduled
+    // when present, else the largest observed sequence + 1 (reported via
+    // scheduledBySummary so a fallback is visible, never a silent pass).
+    scheduledSlots: expectedSeqCount,
+    scheduledBySummary,
+    receivedSlotRecords: seqs.length,
+    unscheduledSeqRecords,
     submittedSlots,
     skippedSlots,
     completeSeconds,
@@ -246,7 +265,7 @@ export function buildSlotLedger({ start, slots, summary }) {
     // Submission telemetry only: the offered rate at the sender. This is
     // not delivery and no verdict criterion reads it as one.
     submittedPerSecond: coveredSeconds > 0 ? Number((submittedSlots / coveredSeconds).toFixed(3)) : 0,
-    offeredFraction: scheduledSlots > 0 ? Number((submittedSlots / scheduledSlots).toFixed(5)) : 0,
+    offeredFraction: expectedSeqCount > 0 ? Number((submittedSlots / expectedSeqCount).toFixed(5)) : 0,
   };
 }
 
@@ -281,15 +300,23 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
 
   const integrityProblems = [
     slotLedger.duplicateSeqRecords > 0 ? `${slotLedger.duplicateSeqRecords} duplicate slot records` : null,
-    slotLedger.missingSeqRecords > 0 ? `${slotLedger.missingSeqRecords} slot records missing from the sequence` : null,
+    slotLedger.missingSeqRecords > 0 ? `${slotLedger.missingSeqRecords} slot record(s) missing from the ${slotLedger.scheduledSlots} scheduled` : null,
+    slotLedger.unscheduledSeqRecords > 0 ? `${slotLedger.unscheduledSeqRecords} slot record(s) beyond the scheduled range` : null,
+    slotLedger.scheduledBySummary === false ? 'no producer summary: the scheduled count is only the largest observed sequence, so trailing omissions cannot be seen' : null,
   ].filter(Boolean);
   criteria.push(criterion(
     'slot_ledger_integrity',
     integrityProblems.length === 0 ? 'pass' : 'fail',
     integrityProblems.length === 0
-      ? 'every scheduled slot has exactly one record'
+      ? `every one of the ${slotLedger.scheduledSlots} scheduled slots has exactly one record`
       : integrityProblems.join('; '),
-    { duplicateSeqRecords: slotLedger.duplicateSeqRecords, missingSeqRecords: slotLedger.missingSeqRecords },
+    {
+      duplicateSeqRecords: slotLedger.duplicateSeqRecords,
+      missingSeqRecords: slotLedger.missingSeqRecords,
+      unscheduledSeqRecords: slotLedger.unscheduledSeqRecords,
+      scheduledSlots: slotLedger.scheduledSlots,
+      scheduledBySummary: slotLedger.scheduledBySummary,
+    },
   ));
 
   criteria.push(criterion(
@@ -420,10 +447,12 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
 }
 
 // packets: summaries from verifyTonesPacket, in read order. production:
-// { windowMs, totalFrames } measured over the wall clock between the first
-// and last non-empty read. sourceKind comes from the fixture table, so a
-// synthetic fixture is tagged and can never qualify physical 32-channel
-// integrity.
+// { windowMs, totalFrames } measured over the run's defined steady-state
+// window - from audio-source open to the arm's scheduled end - so startup
+// and tail underproduction count as missing production. A window trimmed
+// to the first and last nonempty read would hide both and is never used.
+// sourceKind comes from the fixture table, so a synthetic fixture is
+// tagged and can never qualify physical 32-channel integrity.
 export function evaluateAudio({ packets, production, fixture = AUDIO_SOURCES.audio_32_tones, ranAudio = true }) {
   const criteria = [];
   const blockers = [];
@@ -445,35 +474,54 @@ export function evaluateAudio({ packets, production, fixture = AUDIO_SOURCES.aud
   let checkedSamples = 0;
   let worstAbsError = 0;
   let serverDropped = 0;
-  let observedChannels = 0;
-  let observedRate = 0;
-  let fixtureMismatches = 0;
+  let nonemptyPackets = 0;
+  // Every nonempty packet must match the fixture format and be fully
+  // checked: a wrong-format packet mixed in with valid ones is a failure
+  // of its own, never averaged away by the valid packets (the aggregate-
+  // with-maxima trap: maxima can only report the best packet).
+  let formatDeviations = 0;
+  let channelDeviations = 0;
+  let rateDeviations = 0;
   for (const packet of packets) {
-    observedChannels = Math.max(observedChannels, packet.channelCount);
-    observedRate = Math.max(observedRate, packet.sampleRate);
-    if (packet.fixtureMismatch) fixtureMismatches += 1;
+    serverDropped = Math.max(serverDropped, packet.droppedFrames);
     if (packet.frameCount === 0) continue;
+    nonemptyPackets += 1;
+    const wrongChannels = packet.channelCount !== fixture.channels;
+    const wrongRate = packet.sampleRate !== fixture.sampleRate;
+    if (wrongChannels) channelDeviations += 1;
+    if (wrongRate) rateDeviations += 1;
+    if (wrongChannels || wrongRate || packet.fixtureMismatch) {
+      formatDeviations += 1;
+      continue;
+    }
     totalFrames += packet.frameCount;
     mismatches += packet.mismatches;
     nonfinite += packet.nonfinite;
     checkedSamples += packet.checkedSamples;
     worstAbsError = Math.max(worstAbsError, packet.worstAbsError);
-    serverDropped = Math.max(serverDropped, packet.droppedFrames);
     if (nextExpected !== null && packet.firstFrame !== nextExpected) discontinuities += 1;
     nextExpected = packet.firstFrame + packet.frameCount;
   }
 
   criteria.push(criterion(
     'channel_count',
-    observedChannels === fixture.channels ? 'pass' : 'fail',
-    `observed ${observedChannels} of ${fixture.channels} expected channels`,
-    { observedChannels, expectedChannels: fixture.channels },
+    nonemptyPackets > 0 && channelDeviations === 0 ? 'pass' : 'fail',
+    nonemptyPackets === 0
+      ? 'no nonempty packet was read; channel identity was never observed'
+      : channelDeviations === 0
+        ? `every nonempty packet carried ${fixture.channels} of ${fixture.channels} expected channels`
+        : `${channelDeviations} nonempty packet(s) did not carry the expected ${fixture.channels} channels`,
+    { nonemptyPackets, channelDeviations, expectedChannels: fixture.channels },
   ));
   criteria.push(criterion(
     'sample_rate',
-    observedRate === fixture.sampleRate ? 'pass' : 'fail',
-    `observed ${observedRate} Hz of ${fixture.sampleRate} expected`,
-    { observedRate, expectedRate: fixture.sampleRate },
+    nonemptyPackets > 0 && rateDeviations === 0 ? 'pass' : 'fail',
+    nonemptyPackets === 0
+      ? 'no nonempty packet was read; the sample rate was never observed'
+      : rateDeviations === 0
+        ? `every nonempty packet ran at ${fixture.sampleRate} of ${fixture.sampleRate} expected Hz`
+        : `${rateDeviations} nonempty packet(s) did not run at the expected ${fixture.sampleRate} Hz`,
+    { nonemptyPackets, rateDeviations, expectedRate: fixture.sampleRate },
   ));
   criteria.push(criterion(
     'cursor_continuity',
@@ -485,11 +533,13 @@ export function evaluateAudio({ packets, production, fixture = AUDIO_SOURCES.aud
   ));
   criteria.push(criterion(
     'sample_values',
-    mismatches === 0 && nonfinite === 0 ? 'pass' : 'fail',
-    `${checkedSamples} samples across all ${fixture.channels} channels checked against the fixture values`
-      + `; ${mismatches} mismatched, ${nonfinite} nonfinite${fixtureMismatches > 0 ? `; ${fixtureMismatches} packet(s) did not match the expected fixture format` : ''}`
-      + `; worst absolute error ${worstAbsError.toExponential(3)}`,
-    { checkedSamples, mismatches, nonfinite, worstAbsError },
+    formatDeviations === 0 && mismatches === 0 && nonfinite === 0 ? 'pass' : 'fail',
+    formatDeviations > 0
+      ? `${formatDeviations} nonempty packet(s) did not match the expected fixture format and were not fully checked`
+      : `${checkedSamples} samples across all ${fixture.channels} channels checked against the fixture values`
+        + `; ${mismatches} mismatched, ${nonfinite} nonfinite`
+        + `; worst absolute error ${worstAbsError.toExponential(3)}`,
+    { checkedSamples, mismatches, nonfinite, formatDeviations, packetsNotFullyChecked: formatDeviations },
   ));
   criteria.push(criterion(
     'server_reported_drops',
@@ -505,9 +555,9 @@ export function evaluateAudio({ packets, production, fixture = AUDIO_SOURCES.aud
     criteria.push(criterion(
       'wall_clock_production',
       ratio >= PRODUCTION_RATIO_MIN ? 'pass' : 'fail',
-      `${produced} sample frames read over a ${production.windowMs.toFixed(0)} ms wall window`
+      `${produced} sample frames read over the run's ${production.windowMs.toFixed(0)} ms steady-state window`
         + ` = ${(ratio * 100).toFixed(3)}% of the ${(PRODUCTION_RATIO_MIN * 100).toFixed(0)}% source-rate floor`
-        + ' (a contiguous cursor cannot substitute for this ledger)',
+        + ' (startup and tail underproduction count; a contiguous cursor cannot substitute for this ledger)',
       { produced, expectedFrames: Math.round(expectedFrames), ratio: Number(ratio.toFixed(5)) },
     ));
   } else {
