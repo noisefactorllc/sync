@@ -4,8 +4,10 @@
 // identity, a torn final frame, an out-of-order identity, a zero-delivery
 // second, a swapped audio channel, a cursor gap, server-reported drops,
 // missed wall-clock production, a trailing slot-record omission, a
-// wrong-format packet mixed with valid ones, and startup/tail audio
-// underproduction. A clean synthetic ledger produces no failed
+// wrong-format packet mixed with valid ones, startup/tail audio
+// underproduction, and out-of-range final-pixel identities that must not
+// inflate the delivery numerator. A clean synthetic ledger produces no
+// failed
 // criterion, and the standing blockers (synthetic audio fixture,
 // unadopted jitter epsilon, no final-pixel ledger on the collector path)
 // keep the overall verdict NOT QUALIFIED - which is the honest state of
@@ -290,6 +292,51 @@ test('negative control: omitted identities fail the delivery fraction against th
   assert.equal(fraction.measured.uniqueDelivered, 590);
   assert.equal(fraction.measured.denominator, 600);
   assert.ok(fraction.measured.fraction < 0.99);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
+test('negative control: out-of-range identities cannot inflate the delivery numerator', () => {
+  const { lines } = producerLines();
+  const ledger = ledgerFromLines(lines);
+  const pixels = cleanFinalPixels();
+  // Ten scheduled identities are never delivered; ten unique identities
+  // beyond the scheduled range (SLOTS..SLOTS+9, each with its own
+  // arrival) are appended in their place. A numerator that counts every
+  // unique sequence scores this ledger 600/600 and passes; the verdict
+  // must reject the unscheduled identities and keep the numerator at
+  // the in-range deliveries only.
+  pixels.splice(300, 10);
+  for (let offset = 0; offset < 10; offset += 1) {
+    pixels.push({ sequence: SLOTS + offset, ok: true, arrivalMs: 5000 + offset * (1000 / FPS) });
+  }
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: pixels, ranVideo: true });
+  const names = failedNames(video);
+  assert.ok(names.includes('delivery_fraction'));
+  const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
+  assert.equal(fraction.measured.uniqueDelivered, 590);
+  assert.equal(fraction.measured.denominator, SLOTS);
+  assert.equal(fraction.measured.unscheduledIdentities, 10);
+  assert.ok(fraction.measured.fraction < 0.99);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
+test('negative control: a final-pixel ledger of only out-of-range identities delivers nothing', () => {
+  const { lines } = producerLines();
+  const ledger = ledgerFromLines(lines);
+  const pixels = [];
+  for (let seq = 0; seq < SLOTS; seq += 1) {
+    pixels.push({ sequence: SLOTS + seq, ok: true, arrivalMs: seq * (1000 / FPS) });
+  }
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: pixels, ranVideo: true });
+  const names = failedNames(video);
+  assert.ok(names.includes('delivery_fraction'));
+  assert.ok(names.includes('zero_delivery_seconds'));
+  const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
+  assert.equal(fraction.measured.uniqueDelivered, 0);
+  assert.equal(fraction.measured.denominator, SLOTS);
+  assert.equal(fraction.measured.unscheduledIdentities, SLOTS);
+  const zero = video.criteria.find((item) => item.name === 'zero_delivery_seconds');
+  assert.equal(zero.measured.zeroDeliverySeconds, ledger.completeSeconds);
   assert.equal(verdictFor(video, null).qualified, false);
 });
 

@@ -352,9 +352,21 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     let tornFrames = 0;
     let reorderedPairs = 0;
     let lastSequence = null;
+    // An identity the schedule never issued is not delivery. Sequences
+    // outside [0, scheduledSlots) - or not integers at all - are counted
+    // as unscheduled identities and excluded from every delivery number,
+    // so they can neither inflate the numerator nor mask a
+    // zero-delivery second.
+    let unscheduledIdentities = 0;
+    const isScheduledIdentity = (sequence) => Number.isInteger(sequence)
+      && sequence >= 0 && sequence < slotLedger.scheduledSlots;
     for (const entry of finalPixels) {
       if (entry.ok !== true) {
         tornFrames += 1;
+        continue;
+      }
+      if (!isScheduledIdentity(entry.sequence)) {
+        unscheduledIdentities += 1;
         continue;
       }
       if (deliveredSequences.has(entry.sequence)) duplicates += 1;
@@ -367,10 +379,18 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     const fraction = denominator > 0 ? uniqueDelivered / denominator : 0;
     criteria.push(criterion(
       'delivery_fraction',
-      fraction >= DELIVERY_FRACTION_MIN ? 'pass' : 'fail',
+      fraction >= DELIVERY_FRACTION_MIN && unscheduledIdentities === 0 ? 'pass' : 'fail',
       `${uniqueDelivered} of ${denominator} scheduled slots delivered uniquely `
-        + `(${(fraction * 100).toFixed(3)}% vs the ${(DELIVERY_FRACTION_MIN * 100).toFixed(0)}% target)`,
-      { uniqueDelivered, denominator, fraction: Number(fraction.toFixed(5)) },
+        + `(${(fraction * 100).toFixed(3)}% vs the ${(DELIVERY_FRACTION_MIN * 100).toFixed(0)}% target)`
+        + (unscheduledIdentities === 0
+          ? ''
+          : `; ${unscheduledIdentities} unscheduled identit${unscheduledIdentities === 1 ? 'y was' : 'ies were'} rejected from the numerator`),
+      {
+        uniqueDelivered,
+        denominator,
+        fraction: Number(fraction.toFixed(5)),
+        unscheduledIdentities,
+      },
     ));
     criteria.push(criterion(
       'duplicate_identities',
@@ -395,6 +415,7 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     const arrivals = [];
     for (const entry of finalPixels) {
       if (entry.ok !== true || !Number.isFinite(entry.arrivalMs)) continue;
+      if (!isScheduledIdentity(entry.sequence)) continue;
       arrivals.push(entry.arrivalMs);
       const second = Math.floor(entry.arrivalMs / 1000);
       if (second < slotLedger.completeSeconds) {
