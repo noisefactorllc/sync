@@ -193,9 +193,21 @@ struct LinuxCameraSink::Impl {
   }
 
   void close_ring() noexcept {
-    if (shm_writer) shm_writer.reset();
+    // Scrub through the frame-ring reader protocol, not a raw memset over
+    // the mapping: a consumer mid-read in another process is outside this
+    // process's writer lock, and a plain zeroing leaves an even, zeroed
+    // slot sequence that its torn-frame check accepts, so a scrubbed frame
+    // validates as complete. The protocol scrub retires the publication
+    // count first and marks every slot torn before its pixels clear.
+    if (shm_writer) {
+      shm_writer->scrub();
+      shm_writer.reset();
+    } else if (ring_view != nullptr && ring_view != MAP_FAILED) {
+      FrameRingWriter(
+          std::span<std::byte>(static_cast<std::byte*>(ring_view), ring_bytes))
+          .scrub();
+    }
     if (ring_view != nullptr && ring_view != MAP_FAILED) {
-      std::memset(ring_view, 0, ring_bytes);
       ::msync(ring_view, ring_bytes, MS_SYNC);
       ::munmap(ring_view, ring_bytes);
       ring_view = nullptr;

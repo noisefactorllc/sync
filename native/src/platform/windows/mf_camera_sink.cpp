@@ -303,14 +303,27 @@ struct MfCameraSink::Impl {
   }
 
   void close_shm() noexcept {
-    if (shm_writer) shm_writer.reset();
+    // Scrub through the frame-ring reader protocol, not a raw memset over
+    // the view: a consumer mid-read in another process is outside this
+    // process's writer lock, and a plain zeroing leaves an even, zeroed
+    // slot sequence that its torn-frame check accepts, so a scrubbed frame
+    // validates as complete. The protocol scrub retires the publication
+    // count first and marks every slot torn before its pixels clear.
     if (shm_view != nullptr) {
       const std::size_t ring_bytes = frame_ring_bytes();
-      std::memset(shm_view, 0, ring_bytes);
+      if (shm_writer) {
+        shm_writer->scrub();
+        shm_writer.reset();
+      } else {
+        FrameRingWriter(
+            std::span<std::byte>(static_cast<std::byte*>(shm_view), ring_bytes))
+            .scrub();
+      }
       ::FlushViewOfFile(shm_view, ring_bytes);
       ::UnmapViewOfFile(shm_view);
       shm_view = nullptr;
     }
+    shm_writer.reset();
     if (shm_mapping != nullptr) {
       ::CloseHandle(shm_mapping);
       shm_mapping = nullptr;

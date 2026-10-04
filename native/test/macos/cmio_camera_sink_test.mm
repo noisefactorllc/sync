@@ -476,3 +476,103 @@ SYNC_TEST(frame_ring_writer_gates_publication_on_consumer_demand) {
   const auto future_us = now_us + noisefactor::sync::camera::kFrameRingDemandTimeoutUs + 500'000;
   SYNC_REQUIRE(!writer.has_demand(future_us));
 }
+
+// The sink's shutdown scrub must run through the frame-ring reader
+// protocol. A consumer mid-read when the sink closes cannot be excluded by
+// this process's writer lock, and a raw zeroing of the mapping would leave
+// an even, zeroed slot sequence that its torn-frame check accepts -- so a
+// scrubbed frame validates as complete. Reproduce the deschedule
+// deterministically: the consumer loads the publication count, the sink
+// closes and scrubs, then the consumer validates its slot. Mirrors the
+// frame-ring and Linux camera sink paused-reader regressions.
+SYNC_TEST(cmio_camera_sink_close_scrub_cannot_validate_a_frame_for_a_paused_reader) {
+  const std::string test_path =
+      "/tmp/SyncCamera.paused." + std::to_string(::getpid()) + ".frames";
+  ::unlink(test_path.c_str());
+
+  int fd_keep = -1;
+  void* view_keep = nullptr;
+  const std::size_t ring_bytes = noisefactor::sync::camera::frame_ring_bytes();
+  std::uint32_t paused_index = 0;
+  {
+    CmioCameraSink sink({.device_uid = "io.noisefactor.sync.camera.does-not-exist",
+                         .shm_path = test_path,
+                         .enable_shm = true});
+
+    fd_keep = ::open(test_path.c_str(), O_RDWR | O_NOFOLLOW);
+    SYNC_REQUIRE(fd_keep >= 0);
+    view_keep = ::mmap(nullptr, ring_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd_keep, 0);
+    SYNC_REQUIRE(view_keep != MAP_FAILED);
+
+    // syncd publishes into the ring it owns; stand that up directly so the
+    // consumer has a complete frame to be caught reading.
+    noisefactor::sync::camera::FrameRingWriter writer(
+        {static_cast<std::byte*>(view_keep), ring_bytes});
+    SYNC_REQUIRE(writer.valid());
+    const std::size_t row_stride =
+        static_cast<std::size_t>(noisefactor::sync::camera::kCanvas.width) * 4;
+    const std::vector<std::byte> frame(noisefactor::sync::camera::kFrameRingSlotBytes,
+                                       std::byte{0x5A});
+    SYNC_REQUIRE(writer.write(frame, row_stride, 42));
+
+    noisefactor::sync::camera::FrameRingReader reader(
+        {static_cast<const std::byte*>(view_keep), ring_bytes});
+    SYNC_REQUIRE(reader.valid());
+    std::vector<std::byte> out(noisefactor::sync::camera::kFrameRingSlotBytes);
+    std::uint64_t presentation = 0;
+    SYNC_REQUIRE(reader.read(out, row_stride, presentation));
+    SYNC_REQUIRE(static_cast<unsigned char>(out[0]) == 0x5A);
+
+    // The consumer is descheduled between the publication-count load and
+    // its slot validation -- across the sink's whole shutdown scrub. These
+    // are the opening steps of FrameRingReader::read(), verbatim.
+    auto* header =
+        reinterpret_cast<noisefactor::sync::camera::FrameRingHeader*>(view_keep);
+    const std::uint64_t newest = header->newest.load(std::memory_order_acquire);
+    SYNC_REQUIRE(newest != 0);
+    paused_index = static_cast<std::uint32_t>(
+        newest % noisefactor::sync::camera::kFrameRingSlots);
+  }  // the sink closes: the ring scrubs through the reader protocol
+
+  struct stat st{};
+  SYNC_REQUIRE(::stat(test_path.c_str(), &st) != 0);
+
+  auto* header =
+      reinterpret_cast<noisefactor::sync::camera::FrameRingHeader*>(view_keep);
+  const std::byte* payload = static_cast<const std::byte*>(view_keep) +
+                             sizeof(noisefactor::sync::camera::FrameRingHeader) +
+                             static_cast<std::size_t>(paused_index) *
+                                 noisefactor::sync::camera::kFrameRingSlotBytes;
+
+  // The consumer resumes: the remaining read() steps, verbatim. A scrubbed
+  // slot must not validate as a complete frame.
+  std::vector<std::byte> torn(noisefactor::sync::camera::kFrameRingSlotBytes);
+  const std::uint64_t before =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  std::memcpy(torn.data(), payload, noisefactor::sync::camera::kFrameRingSlotBytes);
+  const std::uint64_t after =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  const bool would_complete = ((before & 1U) == 0) && (before == after);
+  SYNC_REQUIRE(!would_complete);
+
+  // The retry the protocol prescribes fails as well: the ring is retired,
+  // and a reader constructed on the scrubbed mapping rejects it outright.
+  noisefactor::sync::camera::FrameRingReader retired(
+      {static_cast<const std::byte*>(view_keep), ring_bytes});
+  SYNC_REQUIRE(!retired.valid());
+
+  // The scrub still scrubs: the paused consumer's copy holds no retained
+  // pixels, and the header is unusable.
+  bool all_zero = true;
+  for (const std::byte byte : torn) {
+    if (byte != std::byte{0}) {
+      all_zero = false;
+      break;
+    }
+  }
+  SYNC_REQUIRE(all_zero);
+  SYNC_REQUIRE(header->magic == 0);
+
+  ::munmap(view_keep, ring_bytes);
+  ::close(fd_keep);
+}

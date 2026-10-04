@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <sys/mman.h>
@@ -664,4 +665,97 @@ SYNC_TEST(linux_camera_sink_preserves_a_replacement_file_on_close) {
   ::unlink(original_path.c_str());
   SYNC_REQUIRE(count == sizeof(canary));
   SYNC_REQUIRE(std::memcmp(actual, canary, sizeof(canary)) == 0);
+}
+
+// The sink's shutdown scrub must run through the frame-ring reader
+// protocol. A consumer in another process that is mid-read when the sink
+// closes cannot be excluded by this process's writer lock, and a raw
+// zeroing of the mapping leaves a zeroed -- and therefore even -- slot
+// sequence behind, so the consumer's torn-frame check accepts it and a
+// scrubbed frame validates as complete. Reproduce that deschedule
+// deterministically: the consumer loads the publication count, the sink
+// closes and scrubs the ring, then the consumer validates its slot.
+SYNC_TEST(linux_camera_sink_close_scrub_cannot_validate_a_frame_for_a_paused_reader) {
+  const auto shm_file = test_temp_path();
+  DeviceOps operations;
+  const std::size_t stride =
+      static_cast<std::size_t>(camera::kCanvas.width) * 4U;
+
+  std::optional<PosixShmReaderMapping> mapping;
+  std::uint32_t paused_index = 0;
+  {
+    camera::LinuxCameraSink sink({
+        .shm_path = shm_file,
+        .enable_shm = true,
+        .device_operations = &operations,
+    });
+    SYNC_REQUIRE(sink.available());
+
+    mapping.emplace(shm_file);
+    SYNC_REQUIRE(mapping->valid());
+    camera::FrameRingReader reader(mapping->mapping());
+    SYNC_REQUIRE(reader.valid());
+
+    // A live consumer records demand, so submit() publishes into the ring.
+    reader.record_demand(camera::camera_clock_us());
+    SYNC_REQUIRE(sink.submit(sink_frame(frame(std::byte{0x5A}))) ==
+                 camera::CameraSinkSubmit::Accepted);
+
+    // The last complete frame is readable while the writer is live: the
+    // teardown must not take that away from a consumer that finishes its
+    // read before the scrub starts.
+    std::vector<std::byte> out(stride * camera::kCanvas.height);
+    std::uint64_t presentation = 0;
+    SYNC_REQUIRE(reader.read(out, stride, presentation));
+    SYNC_REQUIRE(out[0] == std::byte{0x5A});
+
+    // The consumer is descheduled between the publication-count load and
+    // its slot validation -- across the sink's whole shutdown scrub. These
+    // are the opening steps of FrameRingReader::read(), verbatim.
+    auto* header = reinterpret_cast<camera::FrameRingHeader*>(
+        mapping->mapping().data());
+    const std::uint64_t newest =
+        header->newest.load(std::memory_order_acquire);
+    SYNC_REQUIRE(newest != 0);
+    paused_index = static_cast<std::uint32_t>(newest % camera::kFrameRingSlots);
+  }  // the sink closes: the writer joins, the device closes, the ring scrubs
+
+  auto* header = reinterpret_cast<camera::FrameRingHeader*>(
+      mapping->mapping().data());
+  const std::byte* payload = mapping->mapping().data() +
+                             sizeof(camera::FrameRingHeader) +
+                             static_cast<std::size_t>(paused_index) *
+                                 camera::kFrameRingSlotBytes;
+
+  // The consumer resumes: the remaining read() steps, verbatim. A scrubbed
+  // slot must not validate as a complete frame.
+  std::vector<std::byte> torn(camera::kFrameRingSlotBytes);
+  const std::uint64_t before =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  std::memcpy(torn.data(), payload, camera::kFrameRingSlotBytes);
+  const std::uint64_t after =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  const bool would_complete = ((before & 1U) == 0) && (before == after);
+  SYNC_REQUIRE(!would_complete);
+
+  // The retry the protocol prescribes fails as well: the ring is retired,
+  // and a reader constructed on the scrubbed mapping rejects it outright.
+  camera::FrameRingReader retired_reader(mapping->mapping());
+  SYNC_REQUIRE(!retired_reader.valid());
+  std::vector<std::byte> again(camera::kFrameRingSlotBytes);
+  std::uint64_t discarded = 0;
+  SYNC_REQUIRE(!retired_reader.read(again, stride, discarded));
+
+  // The scrub still scrubs: the paused consumer's copy holds no retained
+  // pixels, and the pathname is gone.
+  bool all_zero = true;
+  for (const std::byte byte : torn) {
+    if (byte != std::byte{0}) {
+      all_zero = false;
+      break;
+    }
+  }
+  SYNC_REQUIRE(all_zero);
+  struct stat st{};
+  SYNC_REQUIRE(::stat(shm_file.c_str(), &st) != 0);
 }

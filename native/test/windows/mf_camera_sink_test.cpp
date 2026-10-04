@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -793,6 +795,89 @@ SYNC_TEST(concurrent_multi_reader_shm_and_virtual_camera_seqlock_consistency) {
   SYNC_REQUIRE(vcam_reads.load(std::memory_order_acquire) > 0);
   SYNC_REQUIRE(shm_reads_1.load(std::memory_order_acquire) > 0);
   SYNC_REQUIRE(shm_reads_2.load(std::memory_order_acquire) > 0);
+}
+
+// The sink's shutdown scrub must run through the frame-ring reader
+// protocol. A consumer mid-read when the sink closes cannot be excluded by
+// this process's writer lock, and a raw zeroing of the view would leave an
+// even, zeroed slot sequence that its torn-frame check accepts -- so a
+// scrubbed frame validates as complete. Reproduce the deschedule
+// deterministically: the consumer loads the publication count, the sink
+// closes and scrubs, then the consumer validates its slot. Mirrors the
+// frame-ring and Linux camera sink paused-reader regressions.
+SYNC_TEST(close_scrub_cannot_validate_a_frame_for_a_paused_reader) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  std::optional<ShmMapping> mapping;
+  std::uint32_t paused_index = 0;
+  {
+    MfCameraSink sink(opts);
+    mapping.emplace(shm_file);
+    SYNC_REQUIRE(mapping.has_value() && mapping->view != nullptr);
+    FrameRingReader reader(mapping->span());
+    SYNC_REQUIRE(reader.valid());
+
+    reader.record_demand(now_us());
+    SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x5A), 5001)) ==
+                 CameraSinkSubmit::Accepted);
+
+    // The last complete frame is readable while the writer is live.
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    std::uint64_t presentation = 0;
+    SYNC_REQUIRE(reader.read(out, kStride, presentation));
+    SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x5A);
+
+    // The consumer is descheduled between the publication-count load and
+    // its slot validation -- across the sink's whole shutdown scrub. These
+    // are the opening steps of FrameRingReader::read(), verbatim.
+    FrameRingHeader* header = mapping->header();
+    const std::uint64_t newest = header->newest.load(std::memory_order_acquire);
+    SYNC_REQUIRE(newest != 0);
+    paused_index = static_cast<std::uint32_t>(
+        newest % noisefactor::sync::camera::kFrameRingSlots);
+  }  // the sink closes: the shm ring scrubs through the reader protocol
+
+  FrameRingHeader* header = mapping->header();
+  const std::byte* payload = static_cast<const std::byte*>(mapping->view) +
+                             sizeof(FrameRingHeader) +
+                             static_cast<std::size_t>(paused_index) *
+                                 kFrameRingSlotBytes;
+
+  // The consumer resumes: the remaining read() steps, verbatim. A scrubbed
+  // slot must not validate as a complete frame.
+  std::vector<std::byte> torn(kFrameRingSlotBytes);
+  const std::uint64_t before =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  std::memcpy(torn.data(), payload, kFrameRingSlotBytes);
+  const std::uint64_t after =
+      header->slot[paused_index].sequence.load(std::memory_order_acquire);
+  const bool would_complete = ((before & 1U) == 0) && (before == after);
+  SYNC_REQUIRE(!would_complete);
+
+  // The retry the protocol prescribes fails as well: the ring is retired,
+  // and a reader constructed on the scrubbed mapping rejects it outright.
+  FrameRingReader retired(mapping->span());
+  SYNC_REQUIRE(!retired.valid());
+  std::vector<std::byte> again(kFrameRingSlotBytes);
+  std::uint64_t discarded = 0;
+  SYNC_REQUIRE(!retired.read(again, kStride, discarded));
+
+  // The scrub still scrubs: the paused consumer's copy holds no retained
+  // pixels, and the pathname is gone.
+  bool all_zero = true;
+  for (const std::byte byte : torn) {
+    if (byte != std::byte{0}) {
+      all_zero = false;
+      break;
+    }
+  }
+  SYNC_REQUIRE(all_zero);
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
 }
 
 }  // namespace

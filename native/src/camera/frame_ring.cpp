@@ -119,6 +119,48 @@ auto FrameRingWriter::write(std::span<const std::byte> bgra, std::size_t row_str
   return write_with(copy, &context, presentation_time_us);
 }
 
+void FrameRingWriter::scrub() noexcept {
+  if (header_ == nullptr) return;
+  // Retire the publication count first, behind a release fence: every read
+  // started after this point, and every retry of a reader that just
+  // discarded a torn slot, sees "nothing published" and fails instead of
+  // wandering over the scrubbed slots.
+  header_->newest.store(0, std::memory_order_release);
+  // Mark every slot as a write in progress before touching any payload,
+  // exactly as write_with() does: a reader that already loaded a slot's
+  // even sequence sees the changed odd one on its confirming load and
+  // discards the copy, and one that arrives afterwards never treats a
+  // scrubbed slot as complete. The mark is never closed -- the writer is
+  // going away, so the slot must not look publishable again.
+  for (auto& slot : header_->slot) {
+    slot.sequence.store(1, std::memory_order_release);
+    slot.presentation_time_us = 0;
+    slot.width = 0;
+    slot.height = 0;
+    slot.row_stride = 0;
+    slot.reserved = 0;
+  }
+  // Only now may the retained pixels clear: every sequence already stands
+  // odd, so no reader can validate a copy that straddles this zeroing.
+  for (std::uint32_t index = 0; index < kFrameRingSlots; ++index) {
+    std::memset(payload_ + static_cast<std::size_t>(index) * kFrameRingSlotBytes,
+                0, kFrameRingSlotBytes);
+  }
+  header_->last_demand_us.store(0, std::memory_order_relaxed);
+  header_->slot_bytes = 0;
+  header_->slots = 0;
+  header_->version = 0;
+  // Magic last: while it stands, a reader constructed on the still-mapped
+  // section holds a consistent, empty view; once it clears, new readers
+  // reject the mapping outright.
+  header_->magic = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  // The writer is spent: nothing it can still be asked to write may land
+  // in a mapping that no longer describes a ring.
+  header_ = nullptr;
+  payload_ = nullptr;
+}
+
 FrameRingReader::FrameRingReader(std::span<const std::byte> mapping) noexcept {
   if (!mapping_is_ring(mapping.data(), mapping.size())) return;
   header_ = reinterpret_cast<const FrameRingHeader*>(mapping.data());

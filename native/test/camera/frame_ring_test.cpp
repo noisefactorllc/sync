@@ -380,4 +380,103 @@ SYNC_TEST(a_stale_same_epoch_reader_cannot_regress_live_demand) {
   SYNC_REQUIRE(!writer.has_demand(now + kFrameRingDemandTimeoutUs + 1));
 }
 
+// The shutdown scrub a closing writer runs (the platform sinks' close paths)
+// must go through this protocol, so a reader descheduled across it cannot
+// validate a scrubbed slot as a complete frame: it loads the publication
+// count before the scrub and validates its slot after it, which is the
+// interleaving a plain zeroing of the mapping gets wrong (a zeroed sequence
+// is an even, self-consistent value).
+SYNC_TEST(a_paused_reader_cannot_validate_a_frame_over_a_shutdown_scrub) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+  const auto frame = canvas_filled(0x5A);
+  SYNC_REQUIRE(writer.write(frame, kStride, 42));
+
+  // The last complete frame stands while the writer lives.
+  std::vector<std::byte> out(kFrameRingSlotBytes);
+  std::uint64_t presentation = 0;
+  SYNC_REQUIRE(reader.read(out, kStride, presentation));
+  SYNC_REQUIRE(std::memcmp(out.data(), frame.data(), frame.size()) == 0);
+
+  // The consumer is descheduled between the publication-count load and its
+  // slot validation -- across the writer's whole scrub. These are the
+  // opening steps of FrameRingReader::read(), verbatim.
+  auto* header = reinterpret_cast<FrameRingHeader*>(mapping.data());
+  const std::uint64_t newest = header->newest.load(std::memory_order_acquire);
+  SYNC_REQUIRE(newest != 0);
+  const auto index = static_cast<std::uint32_t>(newest % kFrameRingSlots);
+
+  writer.scrub();
+
+  // The consumer resumes: the remaining read() steps, verbatim. A scrubbed
+  // slot must not validate as a complete frame.
+  std::vector<std::byte> torn(kFrameRingSlotBytes);
+  const std::byte* payload =
+      mapping.data() + sizeof(FrameRingHeader) +
+      static_cast<std::size_t>(index) * kFrameRingSlotBytes;
+  const std::uint64_t before =
+      header->slot[index].sequence.load(std::memory_order_acquire);
+  std::memcpy(torn.data(), payload, kFrameRingSlotBytes);
+  const std::uint64_t after =
+      header->slot[index].sequence.load(std::memory_order_acquire);
+  const bool would_complete = ((before & 1U) == 0) && (before == after);
+  SYNC_REQUIRE(!would_complete);
+
+  // The retry the protocol prescribes fails: the ring is retired, and a
+  // reader constructed on the scrubbed mapping rejects it outright.
+  std::uint64_t discarded = 0;
+  SYNC_REQUIRE(!reader.read(out, kStride, discarded));
+  const FrameRingReader late(mapping);
+  SYNC_REQUIRE(!late.valid());
+
+  // The scrub still scrubs: no retained pixels and no usable header.
+  bool all_zero = true;
+  for (const std::byte byte : torn) {
+    if (byte != std::byte{0}) {
+      all_zero = false;
+      break;
+    }
+  }
+  SYNC_REQUIRE(all_zero);
+  SYNC_REQUIRE(header->magic == 0);
+  SYNC_REQUIRE(!writer.valid());
+}
+
+// A consumer paused between its slot validation and its payload copy must
+// discard the copy rather than return a half-scrubbed frame: the scrub marks
+// every slot torn before any pixel clears, so the confirming load the
+// protocol prescribes cannot match the one the consumer already accepted.
+SYNC_TEST(a_reader_paused_inside_its_copy_discards_a_scrubbed_slot) {
+  std::vector<std::byte> mapping(frame_ring_bytes());
+  FrameRingWriter writer(mapping);
+  const FrameRingReader reader(mapping);
+  const auto frame = canvas_filled(0x77);
+  SYNC_REQUIRE(writer.write(frame, kStride, 7));
+
+  auto* header = reinterpret_cast<FrameRingHeader*>(mapping.data());
+  const std::uint64_t newest = header->newest.load(std::memory_order_acquire);
+  const auto index = static_cast<std::uint32_t>(newest % kFrameRingSlots);
+  // The consumer's slot validation succeeds, and it is descheduled inside
+  // the copy that follows -- across the writer's whole scrub.
+  const std::uint64_t before =
+      header->slot[index].sequence.load(std::memory_order_acquire);
+  SYNC_REQUIRE((before & 1U) == 0);
+
+  writer.scrub();
+
+  std::vector<std::byte> torn(kFrameRingSlotBytes);
+  const std::byte* payload =
+      mapping.data() + sizeof(FrameRingHeader) +
+      static_cast<std::size_t>(index) * kFrameRingSlotBytes;
+  std::memcpy(torn.data(), payload, kFrameRingSlotBytes);
+  const std::uint64_t after =
+      header->slot[index].sequence.load(std::memory_order_acquire);
+  // The confirming load the protocol prescribes rejects the copy as torn,
+  // whatever half of it landed before the scrub.
+  SYNC_REQUIRE(before != after);
+  std::uint64_t discarded = 0;
+  SYNC_REQUIRE(!reader.read(torn, kStride, discarded));
+}
+
 }  // namespace

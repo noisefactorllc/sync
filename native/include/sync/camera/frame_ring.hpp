@@ -94,6 +94,15 @@ class FrameRingWriter {
                                 std::size_t stride) noexcept;
   [[nodiscard]] auto write_with(DirectWriter writer, void* context,
                                 std::uint64_t presentation_time_us) noexcept -> bool;
+  // Tears the ring down for a closing writer: retires the publication count
+  // first, then scrubs every slot behind its own in-progress mark and the
+  // header last. A reader in another process cannot be excluded by the
+  // writer's own cleanup, so a plain zeroing of the mapping would leave an
+  // even, self-consistent sequence that a reader caught mid-read validates
+  // as a complete -- scrubbed -- frame. Through the protocol it either keeps
+  // the frame it already validated or fails the read cleanly. The writer is
+  // spent afterwards: further writes are rejected.
+  void scrub() noexcept;
 
  private:
   FrameRingHeader* header_ = nullptr;
