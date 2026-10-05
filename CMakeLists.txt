@@ -195,6 +195,7 @@ endif()
 
 add_executable(sync_protocol_tests
   native/test/audio_capture_test.cpp
+  native/test/audio_fixture_test.cpp
   native/test/control_test.cpp
   native/test/frame_receiver_test.cpp
   native/test/publisher_hub_test.cpp

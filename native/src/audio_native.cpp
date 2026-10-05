@@ -2,11 +2,11 @@
 #include <RtAudio.h>
 #include <openssl/sha.h>
 
+#include "audio_fixture_producer.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <stdexcept>
@@ -131,58 +131,14 @@ private:
   std::unique_ptr<RtAudio> driver_;
 };
 
-enum class WaveformPattern {
-  LinearRamp,
-  OrthogonalTones,
-  SteppedPulse,
-};
-
 class FixtureCapture final : public Capture {
 public:
-  FixtureCapture(unsigned channels, WaveformPattern pattern = WaveformPattern::LinearRamp)
+  FixtureCapture(unsigned channels, fixture::WaveformPattern pattern = fixture::WaveformPattern::LinearRamp)
       : channels_(channels), pattern_(pattern),
-        buffer_(48000, channels, 65536),
+        buffer_(fixture::kFixtureSampleRate, channels, fixture::kFixtureRingFrames),
         producer_([this] {
-          std::vector<float> samples(240 * channels_);
-          auto fill_samples = [this, &samples](std::uint64_t frame_offset) {
-            if (pattern_ == WaveformPattern::LinearRamp) {
-              for (unsigned frame = 0; frame < 240; ++frame)
-                for (unsigned channel = 0; channel < channels_; ++channel)
-                  samples[frame * channels_ + channel] = static_cast<float>(channel + 1) / 32.0f;
-            } else if (pattern_ == WaveformPattern::OrthogonalTones) {
-              constexpr double kPi = 3.14159265358979323846;
-              for (unsigned frame = 0; frame < 240; ++frame) {
-                const double t = static_cast<double>(frame_offset + frame) / 48000.0;
-                for (unsigned channel = 0; channel < channels_; ++channel) {
-                  const double freq = 100.0 * (channel + 1);
-                  samples[frame * channels_ + channel] = static_cast<float>(std::sin(2.0 * kPi * freq * t));
-                }
-              }
-            } else if (pattern_ == WaveformPattern::SteppedPulse) {
-              for (unsigned frame = 0; frame < 240; ++frame) {
-                const unsigned active_ch = static_cast<unsigned>(((frame_offset + frame) / 4800) % channels_);
-                for (unsigned channel = 0; channel < channels_; ++channel) {
-                  samples[frame * channels_ + channel] = (channel == active_ch) ? 1.0f : 0.0f;
-                }
-              }
-            }
-          };
-          std::uint64_t total_frames = 0;
-          fill_samples(total_frames);
-          buffer_.push(samples);
-          total_frames += 240;
-          auto next_time = std::chrono::steady_clock::now();
-          while (!stop_.load(std::memory_order_acquire)) {
-            next_time += std::chrono::milliseconds(5);
-            const auto now = std::chrono::steady_clock::now();
-            if (next_time < now) {
-              next_time = now + std::chrono::milliseconds(5);
-            }
-            std::this_thread::sleep_until(next_time);
-            fill_samples(total_frames);
-            total_frames += 240;
-            buffer_.push(samples);
-          }
+          fixture::SteadyClock clock;
+          fixture::produce(buffer_, channels_, pattern_, stop_, clock);
         }) {}
   ~FixtureCapture() override {
     stop_.store(true, std::memory_order_release);
@@ -193,7 +149,7 @@ public:
   }
 private:
   unsigned channels_;
-  WaveformPattern pattern_{WaveformPattern::LinearRamp};
+  fixture::WaveformPattern pattern_{fixture::WaveformPattern::LinearRamp};
   CaptureBuffer buffer_;
   std::atomic<bool> stop_{false};
   std::thread producer_;
@@ -237,13 +193,13 @@ public:
     std::lock_guard lock(mutex_);
     if (test_fixtures_enabled()) {
       if (id == "audio_32") {
-        return std::make_unique<FixtureCapture>(32, WaveformPattern::LinearRamp);
+        return std::make_unique<FixtureCapture>(32, fixture::WaveformPattern::LinearRamp);
       }
       if (id == "audio_32_tones") {
-        return std::make_unique<FixtureCapture>(32, WaveformPattern::OrthogonalTones);
+        return std::make_unique<FixtureCapture>(32, fixture::WaveformPattern::OrthogonalTones);
       }
       if (id == "audio_32_pulse") {
-        return std::make_unique<FixtureCapture>(32, WaveformPattern::SteppedPulse);
+        return std::make_unique<FixtureCapture>(32, fixture::WaveformPattern::SteppedPulse);
       }
     }
     for (const auto api : apis()) {
