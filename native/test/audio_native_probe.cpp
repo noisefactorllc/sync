@@ -1,6 +1,8 @@
 #include <sync/audio_capture.hpp>
 #include <sync/control.hpp>
 
+#include "../src/audio_probe_report.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -13,6 +15,7 @@
 
 namespace {
 namespace audio = noisefactor::sync::audio;
+namespace probe = noisefactor::sync::audio::probe;
 using namespace std::chrono_literals;
 
 constexpr auto kCaptureDuration = 2s;
@@ -187,7 +190,9 @@ void inspect_packet(const audio::Packet &packet, bool expect_jack_pattern,
 
 std::string capture_report(std::string_view source_id,
                            const Statistics &statistics,
-                           bool expect_jack_pattern, bool qualified) {
+                           bool expect_jack_pattern, bool qualified,
+                           probe::FailureClass failure_class,
+                           std::string_view failure) {
   std::string output = "{\"type\":\"audioNativeProbe\",\"sourceId\":";
   append_json_string(output, source_id);
   output.append(",\"captureMilliseconds\":2000,\"sampleRate\":");
@@ -223,6 +228,12 @@ std::string capture_report(std::string_view source_id,
     output.append(std::to_string(statistics.pattern_mismatches));
     output.push_back('}');
   }
+  if (!qualified) {
+    output.append(",\"failureClass\":\"");
+    output.append(probe::failure_class_name(failure_class));
+    output.append("\",\"failure\":");
+    append_json_string(output, failure);
+  }
   output.append(",\"qualified\":");
   output.append(qualified ? "true}" : "false}");
   return output;
@@ -237,22 +248,35 @@ int capture_source(audio::InputBackend &backend, const Options &options) {
 
   auto capture = backend.open(options.source_id);
   Statistics statistics;
-  const auto deadline = std::chrono::steady_clock::now() + kCaptureDuration;
-  while (std::chrono::steady_clock::now() < deadline) {
-    inspect_packet(capture->read(), options.expect_jack_pattern, statistics);
-    std::this_thread::sleep_for(kPollInterval);
+  std::string thrown_failure;
+  try {
+    const auto deadline = std::chrono::steady_clock::now() + kCaptureDuration;
+    while (std::chrono::steady_clock::now() < deadline) {
+      inspect_packet(capture->read(), options.expect_jack_pattern, statistics);
+      std::this_thread::sleep_for(kPollInterval);
+    }
+  } catch (const std::exception &error) {
+    // The report still goes out: the driver retains and classifies every
+    // attempt, so a thrown capture is evidence, not a swallowed run.
+    thrown_failure = error.what();
   }
 
-  bool qualified = statistics.have_format && statistics.received_frames != 0 &&
-                   statistics.nonfinite_samples == 0 &&
-                   statistics.cursor_discontinuities == 0 &&
-                   statistics.dropped_frames == 0;
-  std::string failure;
-  if (!statistics.have_format || statistics.received_frames == 0)
+  // A capture whose read threw partway through the window is partial: the
+  // statistics collected before the throw can never qualify it, and the
+  // thrown text is carried in the report's failure field.
+  bool qualified = probe::capture_qualified(
+      statistics.have_format && statistics.received_frames != 0 &&
+          statistics.nonfinite_samples == 0 &&
+          statistics.cursor_discontinuities == 0 &&
+          statistics.dropped_frames == 0,
+      thrown_failure);
+  std::string failure = thrown_failure;
+  if (failure.empty() && (!statistics.have_format || statistics.received_frames == 0))
     failure = "Native audio produced no frames";
-  else if (statistics.nonfinite_samples != 0)
+  else if (failure.empty() && statistics.nonfinite_samples != 0)
     failure = "Native audio produced nonfinite samples";
-  else if (statistics.cursor_discontinuities != 0 || statistics.dropped_frames != 0)
+  else if (failure.empty() &&
+           (statistics.cursor_discontinuities != 0 || statistics.dropped_frames != 0))
     failure = "Native audio capture was discontinuous";
 
   if (options.expect_jack_pattern) {
@@ -272,8 +296,12 @@ int capture_source(audio::InputBackend &backend, const Options &options) {
       failure = "JACK pattern contained sample mismatches";
   }
 
+  const auto failure_class =
+      probe::classify_failure(qualified, statistics.have_format,
+                              statistics.received_frames);
   std::cout << capture_report(options.source_id, statistics,
-                              options.expect_jack_pattern, qualified) << '\n';
+                              options.expect_jack_pattern, qualified,
+                              failure_class, failure) << '\n';
   if (!qualified) {
     std::cerr << "sync_audio_native_probe: " << failure << '\n';
     return 1;

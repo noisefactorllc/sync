@@ -5,7 +5,11 @@
   Starts necessary Windows audio services, verifies application microphone
   permissions, enumerates real WASAPI input endpoints via sync_audio_native_probe,
   and executes a live 2-second capture qualification verifying format negotiation,
-  packet continuity, and zero dropped frames.
+  packet continuity, and zero dropped frames. Every capture attempt's report is
+  retained under audio-qualification/wasapi/capture-attempts/, and only startup
+  unavailability (an endpoint that produced no frames) is retried: a substantive
+  integrity failure fails the qualification immediately, because a later clean
+  capture cannot qualify a source whose samples were bad.
 #>
 [CmdletBinding()]
 param(
@@ -23,19 +27,26 @@ if (-not (Test-Path $probe)) {
   throw "sync_audio_native_probe.exe not found in $BuildDir"
 }
 
-# 1. Ensure Windows audio services are running and refreshed to detect newly installed hardware.
-Write-Output "Refreshing Windows Audio services to discover endpoints..."
-Restart-Service AudioEndpointBuilder -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-Start-Service Audiosrv -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
+# The service refresh and the AppPrivacy policy exist only on Windows. The
+# enumeration and qualification logic below is cross-platform: it runs against
+# the audio fixture backend and scripted probe responses elsewhere.
+$isWindowsOs = ($PSVersionTable.Platform -eq 'Win32NT') -or ($env:OS -eq 'Windows_NT')
 
-# 2. Allow microphone access via AppPrivacy policy.
-$privacyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
-if (-not (Test-Path $privacyPath)) {
-  New-Item -Path $privacyPath -Force | Out-Null
+# 1. Ensure Windows audio services are running and refreshed to detect newly installed hardware.
+if ($isWindowsOs) {
+  Write-Output "Refreshing Windows Audio services to discover endpoints..."
+  Restart-Service AudioEndpointBuilder -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  Start-Service Audiosrv -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+
+  # 2. Allow microphone access via AppPrivacy policy.
+  $privacyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy"
+  if (-not (Test-Path $privacyPath)) {
+    New-Item -Path $privacyPath -Force | Out-Null
+  }
+  New-ItemProperty -Path $privacyPath -Name "LetAppsAccessMicrophone" -Value 1 -PropertyType DWord -Force | Out-Null
 }
-New-ItemProperty -Path $privacyPath -Name "LetAppsAccessMicrophone" -Value 1 -PropertyType DWord -Force | Out-Null
 
 # 3. Inventory WASAPI audio devices with retry for endpoint initialization.
 $inventoryPath = Join-Path $ArtifactDir "inventory.json"
@@ -66,22 +77,41 @@ if (-not $inventory -or -not $inventory.sources -or $inventory.sources.Count -eq
   throw "WASAPI audio inventory returned 0 sources; virtual audio loopback driver is required"
 }
 
-# 4. Qualify real capture from the first enumerated source with retry for endpoint warmup.
+# 4. Qualify real capture from the first enumerated source. Only startup
+#    unavailability is retried (endpoint warmup); a substantive integrity
+#    failure is not, and every attempt's report is retained.
 $source = $inventory.sources[0]
 Write-Output "Qualifying WASAPI capture from source: $($source.name) ($($source.id))"
 
-$capturePath = Join-Path $ArtifactDir "capture.json"
+$captureDir = Join-Path $ArtifactDir "capture-attempts"
+New-Item -ItemType Directory -Path $captureDir -Force | Out-Null
 $qualified = $false
 $probeExitCode = 1
 for ($attempt = 1; $attempt -le 5; $attempt++) {
   $captureOutput = & $probe --source-id $source.id
   $probeExitCode = $LASTEXITCODE
+  $attemptPath = Join-Path $captureDir ("attempt-{0}.json" -f $attempt)
   if ($captureOutput) {
-    $captureOutput | Out-File -FilePath $capturePath -Encoding utf8
+    $captureOutput | Out-File -FilePath $attemptPath -Encoding utf8
   }
-  if ($probeExitCode -eq 0 -and (Test-Path $capturePath)) {
+  $attemptClass = $null
+  if (Test-Path $attemptPath) {
     try {
-      $capture = Get-Content $capturePath -Raw | ConvertFrom-Json
+      $attemptReport = Get-Content $attemptPath -Raw | ConvertFrom-Json
+      $attemptClass = $attemptReport.failureClass
+    } catch {
+      Write-Warning "Attempt ${attempt}: failed to parse capture output: $_"
+    }
+  }
+  if ($attemptClass -eq 'integrity') {
+    # A real sample integrity failure cannot become qualification through a
+    # later retry, so the qualification stops here with the report retained.
+    Write-Output "PROBE: $captureOutput"
+    throw "WASAPI capture integrity failure on attempt ${attempt} (exit code $probeExitCode); not retryable"
+  }
+  if ($probeExitCode -eq 0 -and (Test-Path $attemptPath)) {
+    try {
+      $capture = Get-Content $attemptPath -Raw | ConvertFrom-Json
       if ($capture.qualified) {
         $qualified = $true
         break
@@ -91,15 +121,19 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
     }
   }
   if ($attempt -lt 5) {
-    Write-Output "WASAPI capture qualification attempt $attempt/5 did not qualify; retrying in 2s..."
+    # An absent or unparseable report ($attemptClass is null) is retried
+    # conservatively, but the retained output says so instead of labeling
+    # missing evidence as startup.
+    $attemptClassLabel = if ($attemptClass) { $attemptClass } else { 'unclassified' }
+    Write-Output "WASAPI capture qualification attempt $attempt/5 did not qualify ($attemptClassLabel, exit code $probeExitCode); retrying in 2s..."
     Start-Sleep -Seconds 2
   }
 }
 
 if (-not $qualified) {
   Write-Output "sync_audio_native_probe failed to qualify (exit code $probeExitCode)"
-  if (Test-Path $capturePath) {
-    Get-Content $capturePath | ForEach-Object { Write-Output "PROBE: $_" }
+  Get-ChildItem -Path $captureDir -Filter 'attempt-*.json' | Sort-Object Name | ForEach-Object {
+    Write-Output "PROBE ($($_.Name)): $(Get-Content -Raw $_.FullName)"
   }
   throw "WASAPI audio capture qualification failed with exit code $probeExitCode"
 }
