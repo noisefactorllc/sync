@@ -23,15 +23,25 @@ SYNC_TEST(probe_failure_class_names_are_stable_strings) {
 SYNC_TEST(probe_classifies_unqualified_captures_as_startup_or_integrity) {
   // No format and no frames: the endpoint never delivered anything, so the
   // attempt is retryable startup behavior.
-  SYNC_REQUIRE(probe::classify_failure(false, false, 0) == probe::FailureClass::kStartup);
-  // A format but no frames: the stream opened and produced nothing.
-  SYNC_REQUIRE(probe::classify_failure(false, true, 0) == probe::FailureClass::kStartup);
+  SYNC_REQUIRE(probe::classify_failure(false, false, 0, 0) == probe::FailureClass::kStartup);
+  // A format but no frames and no drops: the stream opened and produced
+  // nothing, losing nothing.
+  SYNC_REQUIRE(probe::classify_failure(false, true, 0, 0) == probe::FailureClass::kStartup);
   // Frames were produced and a check failed: the failure is substantive.
-  SYNC_REQUIRE(probe::classify_failure(false, true, 480) ==
+  SYNC_REQUIRE(probe::classify_failure(false, true, 480, 0) ==
+               probe::FailureClass::kIntegrity);
+  // Drops were recorded with no frames delivered: the ring counted a
+  // retention shortfall even for empty packets (the ring's dropped-frames
+  // counter updates before the empty-packet return), so the stream produced
+  // and lost real data. Retrying it could qualify a source whose samples
+  // were dropped through a later clean attempt.
+  SYNC_REQUIRE(probe::classify_failure(false, true, 0, 480) ==
+               probe::FailureClass::kIntegrity);
+  SYNC_REQUIRE(probe::classify_failure(false, true, 456, 480) ==
                probe::FailureClass::kIntegrity);
   // A qualified capture is never a failure.
-  SYNC_REQUIRE(probe::classify_failure(true, true, 480) == probe::FailureClass::kQualified);
-  SYNC_REQUIRE(probe::classify_failure(true, false, 0) == probe::FailureClass::kQualified);
+  SYNC_REQUIRE(probe::classify_failure(true, true, 480, 0) == probe::FailureClass::kQualified);
+  SYNC_REQUIRE(probe::classify_failure(true, false, 0, 0) == probe::FailureClass::kQualified);
 }
 
 SYNC_TEST(probe_never_qualifies_a_capture_that_threw_partway_through) {

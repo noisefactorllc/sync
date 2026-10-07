@@ -22,17 +22,22 @@ inline constexpr const char* failure_class_name(FailureClass klass) {
   return "startup";
 }
 
-// A capture that never produced a format or never produced any frame never
-// delivered samples, so the endpoint was unavailable and the attempt is
-// retryable startup behavior. Any capture that did produce frames and still
-// failed checked real samples and is a substantive integrity failure: it must
-// not be retried, because a later clean attempt cannot qualify the source
-// whose samples were bad.
+// A capture that never produced a format never delivered anything, so the
+// endpoint was unavailable and the attempt is retryable startup behavior.
+// A capture that did produce a format but delivered no frames AND recorded
+// no drops also never lost anything, so it is startup as well. Any capture
+// that still failed after delivering frames -- or after recording dropped
+// frames, which the ring counts even for empty packets -- checked real
+// stream data and is a substantive integrity failure: it must not be
+// retried, because a later clean attempt cannot qualify a source whose
+// samples were dropped or bad.
 inline constexpr FailureClass classify_failure(bool qualified, bool have_format,
-                                               std::uint64_t received_frames) {
+                                               std::uint64_t received_frames,
+                                               std::uint64_t dropped_frames) {
   if (qualified) return FailureClass::kQualified;
-  return (have_format && received_frames != 0) ? FailureClass::kIntegrity
-                                                : FailureClass::kStartup;
+  if (!have_format) return FailureClass::kStartup;
+  return (received_frames != 0 || dropped_frames != 0) ? FailureClass::kIntegrity
+                                                       : FailureClass::kStartup;
 }
 
 // A capture whose read threw partway through the window is not qualified,

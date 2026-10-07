@@ -298,7 +298,8 @@ int capture_source(audio::InputBackend &backend, const Options &options) {
 
   const auto failure_class =
       probe::classify_failure(qualified, statistics.have_format,
-                              statistics.received_frames);
+                              statistics.received_frames,
+                              statistics.dropped_frames);
   std::cout << capture_report(options.source_id, statistics,
                               options.expect_jack_pattern, qualified,
                               failure_class, failure) << '\n';
