@@ -16,10 +16,8 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/camera-*.yml'
       - '.github/workflows/release.yml'
-      - 'docs/protocol*.md'
-      - 'docs/audio-input.md'
-      - 'docs/developers.md'
       - '.github/workflows/downstream.yml'
+      - '!**.md'
 
 permissions: {}
 
