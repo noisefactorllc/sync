@@ -60,9 +60,9 @@ struct CameraDevice {
   QString description;
 };
 
-// Chooses the camera for a media() step: the system default when nothing is
-// named, else the zero-based position named, else the first device whose
-// description contains the text (case-insensitive).
+// Chooses the camera for a named media() step: the zero-based position
+// named, else the first device whose description contains the text
+// (case-insensitive). An unnamed step uses the backend's default device.
 [[nodiscard]] auto choose_camera_device(const QList<CameraDevice>& devices,
                                         const QString& wanted) -> std::optional<CameraDevice>;
 
@@ -88,6 +88,9 @@ class CameraBackend {
   virtual ~CameraBackend() = default;
   // The cameras on this machine now. Cheap enough to call every search.
   [[nodiscard]] virtual auto inputs() const -> QList<CameraDevice> = 0;
+  // The machine's default camera, the one the platform would open for an
+  // unnamed request; nullopt when it has none.
+  [[nodiscard]] virtual auto default_device() const -> std::optional<CameraDevice> = 0;
   // Calls on_change whenever the machine's camera list changes, until
   // receiver is destroyed.
   virtual void watch(QObject* receiver, std::function<void()> on_change) = 0;

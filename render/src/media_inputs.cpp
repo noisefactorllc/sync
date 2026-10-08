@@ -97,8 +97,7 @@ auto bind_media(const QStringList& external_texture_ids, int source_count)
 
 auto choose_camera_device(const QList<CameraDevice>& devices, const QString& wanted)
     -> std::optional<CameraDevice> {
-  if (devices.isEmpty()) return std::nullopt;
-  if (wanted.isEmpty()) return devices.front();
+  if (wanted.isEmpty()) return std::nullopt;  // unnamed steps take the backend's default
   bool numeric = false;
   const int position = wanted.toInt(&numeric);
   if (numeric && position >= 0 && position < devices.size()) return devices.at(position);
@@ -149,6 +148,11 @@ class QMediaCameraBackend final : public CameraBackend {
       devices.push_back({device.id(), device.description()});
     }
     return devices;
+  }
+  auto default_device() const -> std::optional<CameraDevice> override {
+    const QCameraDevice device = QMediaDevices::defaultVideoInput();
+    if (device.isNull()) return std::nullopt;
+    return CameraDevice{device.id(), device.description()};
   }
   void watch(QObject* receiver, std::function<void()> on_change) override {
     // One QMediaDevices per watch: it tracks the OS device list and turns its
@@ -297,7 +301,12 @@ auto MediaInputs::start(QString& error) -> bool {
 void MediaInputs::open_camera(Source& source) {
   if (!source.permitted) return;  // the search does not outrun the permission
   const int index = source.index_in(sources_);
-  const auto device = choose_camera_device(backend_->inputs(), source.spec.value);
+  // An unnamed step opens the platform's default camera, exactly as before
+  // the reopen fix; a named step searches the list by position, then
+  // description.
+  const auto device = source.spec.value.isEmpty() ? backend_->default_device()
+                                                  : choose_camera_device(backend_->inputs(),
+                                                                         source.spec.value);
   if (!device.has_value()) {
     // Not a failure the helper reports once: the source waits, and the
     // search re-runs the same selection when a camera may have arrived.

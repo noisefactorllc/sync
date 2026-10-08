@@ -1,6 +1,8 @@
 #include "test_harness.hpp"
 
 #include <QColor>
+
+#include <algorithm>
 #include <QFile>
 #include <QCoreApplication>
 #include <QDir>
@@ -207,6 +209,8 @@ SYNC_TEST(removing_a_shared_image_clears_it_while_local_video_has_no_frame) {
 // helper shows a lost or missing camera is observable without hardware.
 struct FakeCamera {
   QList<CameraDevice> devices;
+  std::optional<CameraDevice> default_device;
+  std::optional<CameraDevice> opened;
   int opens = 0;
   bool open_fails = false;
   bool stopped = false;
@@ -219,6 +223,17 @@ class FakeCameraBackend final : public CameraBackend {
  public:
   explicit FakeCameraBackend(FakeCamera& camera) : camera_(camera) {}
   auto inputs() const -> QList<CameraDevice> override { return camera_.devices; }
+  auto default_device() const -> std::optional<CameraDevice> override {
+    // A platform default is one of the listed devices; it is gone when the
+    // list no longer carries it.
+    if (camera_.default_device &&
+        std::any_of(camera_.devices.begin(), camera_.devices.end(), [&](const CameraDevice& d) {
+          return d.id == camera_.default_device->id;
+        })) {
+      return camera_.default_device;
+    }
+    return std::nullopt;
+  }
   void watch(QObject*, std::function<void()> on_change) override {
     camera_.on_change = std::move(on_change);
   }
@@ -229,10 +244,11 @@ class FakeCameraBackend final : public CameraBackend {
       override {
     on_result(CameraPermission::Status::Granted);
   }
-  auto open(const CameraDevice&, const std::function<void(const QVideoFrame&)>& on_frame,
+  auto open(const CameraDevice& device, const std::function<void(const QVideoFrame&)>& on_frame,
             const std::function<void(const QString&)>& on_error)
       -> std::unique_ptr<CameraStream> override {
     ++camera_.opens;
+    camera_.opened = device;
     if (camera_.open_fails) return nullptr;
     camera_.on_frame = on_frame;
     camera_.on_error = on_error;
@@ -260,10 +276,8 @@ class FakeCameraBackend final : public CameraBackend {
   return QVideoFrame(image);
 }
 
-SYNC_TEST(camera_devices_are_chosen_by_position_then_description_then_default) {
+SYNC_TEST(camera_devices_are_chosen_by_position_then_description) {
   const QList<CameraDevice> devices{{"cam-0", "FaceTime HD Camera"}, {"cam-1", "Scarlett Cam"}};
-  SYNC_REQUIRE(choose_camera_device(devices, {}).value().description ==
-               QStringLiteral("FaceTime HD Camera"));
   SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("1")).value().description ==
                QStringLiteral("Scarlett Cam"));
   SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("scarlett")).value().id ==
@@ -271,8 +285,54 @@ SYNC_TEST(camera_devices_are_chosen_by_position_then_description_then_default) {
   SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("facetime")).value().id ==
                QStringLiteral("cam-0"));
   SYNC_REQUIRE(!choose_camera_device(devices, QStringLiteral("none")).has_value());
-  SYNC_REQUIRE(!choose_camera_device({}, {}).has_value());
+  // An unnamed step does not fall back to the first device: the backend's
+  // default is the platform's choice.
+  SYNC_REQUIRE(!choose_camera_device(devices, {}).has_value());
   SYNC_REQUIRE(!choose_camera_device({}, QStringLiteral("2")).has_value());
+}
+
+SYNC_TEST(an_unnamed_step_opens_the_backend_default_not_the_first_device) {
+  FakeCamera camera;
+  camera.devices.push_back({QStringLiteral("cam-0"), QStringLiteral("Built-in Camera")});
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.default_device = CameraDevice{QStringLiteral("cam-1"), QStringLiteral("Test Camera")};
+  auto backend = std::make_unique<FakeCameraBackend>(camera);
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
+  std::vector<std::pair<QString, QString>> statuses;
+  QObject::connect(&inputs, &MediaInputs::status,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  QString error;
+  SYNC_REQUIRE(inputs.start(error));
+  SYNC_REQUIRE(camera.opens == 1);
+  SYNC_REQUIRE(camera.opened.value().id == QStringLiteral("cam-1"));
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("camera"));
+  camera.on_frame = nullptr;
+  camera.on_error = nullptr;
+
+  // Without a default the unnamed step waits even though devices are listed,
+  // and opens once the platform names its default.
+  FakeCamera unnamed;
+  unnamed.devices.push_back({QStringLiteral("cam-0"), QStringLiteral("Built-in Camera")});
+  auto backend2 = std::make_unique<FakeCameraBackend>(unnamed);
+  FakeCameraBackend* backend2_ptr = backend2.get();
+  MediaInputs inputs2({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend2));
+  QObject::connect(&inputs2, &MediaInputs::status,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  SYNC_REQUIRE(inputs2.start(error));
+  SYNC_REQUIRE(unnamed.opens == 0);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("waiting"));
+  SYNC_REQUIRE(statuses.back().second == QStringLiteral("no camera"));
+  unnamed.default_device = CameraDevice{QStringLiteral("cam-0"), QStringLiteral("Built-in Camera")};
+  backend2_ptr->fire_change();
+  SYNC_REQUIRE(unnamed.opens == 1);
+  SYNC_REQUIRE(unnamed.opened.value().id == QStringLiteral("cam-0"));
+  unnamed.on_frame = nullptr;
+  unnamed.on_error = nullptr;
+  statuses.clear();
 }
 
 SYNC_TEST(a_camera_missing_at_start_is_waited_for_and_opened_when_it_appears) {
@@ -304,6 +364,7 @@ SYNC_TEST(a_camera_missing_at_start_is_waited_for_and_opened_when_it_appears) {
 
   // The camera arrives: the same source opens it, without a helper restart.
   camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.default_device = CameraDevice{QStringLiteral("cam-1"), QStringLiteral("Test Camera")};
   backend_ptr->fire_change();
   SYNC_REQUIRE(camera.opens == 1);
   SYNC_REQUIRE(statuses.size() == 2);
@@ -338,6 +399,7 @@ SYNC_TEST(an_unplugged_camera_is_reopened_when_it_returns) {
 
   FakeCamera camera;
   camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.default_device = CameraDevice{QStringLiteral("cam-1"), QStringLiteral("Test Camera")};
   auto backend = std::make_unique<FakeCameraBackend>(camera);
   FakeCameraBackend* backend_ptr = backend.get();
   MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
@@ -388,6 +450,7 @@ SYNC_TEST(an_unplugged_camera_is_reopened_when_it_returns) {
 SYNC_TEST(a_camera_that_fails_to_open_is_searched_for_again) {
   FakeCamera camera;
   camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.default_device = CameraDevice{QStringLiteral("cam-1"), QStringLiteral("Test Camera")};
   camera.open_fails = true;
   auto backend = std::make_unique<FakeCameraBackend>(camera);
   FakeCameraBackend* backend_ptr = backend.get();
@@ -413,6 +476,7 @@ SYNC_TEST(a_camera_that_fails_to_open_is_searched_for_again) {
 SYNC_TEST(a_camera_gone_from_the_device_list_is_retired_and_reopened) {
   FakeCamera camera;
   camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.default_device = CameraDevice{QStringLiteral("cam-1"), QStringLiteral("Test Camera")};
   auto backend = std::make_unique<FakeCameraBackend>(camera);
   FakeCameraBackend* backend_ptr = backend.get();
   MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
