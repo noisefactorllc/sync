@@ -202,4 +202,243 @@ SYNC_TEST(removing_a_shared_image_clears_it_while_local_video_has_no_frame) {
   QFile::remove(path);
 }
 
+// The OS camera stack, stood in for: the test plugs and unplugs the camera,
+// delivers its frames, and reports its failures, so the reopen behavior the
+// helper shows a lost or missing camera is observable without hardware.
+struct FakeCamera {
+  QList<CameraDevice> devices;
+  int opens = 0;
+  bool open_fails = false;
+  bool stopped = false;
+  std::function<void(const QVideoFrame&)> on_frame;
+  std::function<void(const QString&)> on_error;
+  std::function<void()> on_change;
+};
+
+class FakeCameraBackend final : public CameraBackend {
+ public:
+  explicit FakeCameraBackend(FakeCamera& camera) : camera_(camera) {}
+  auto inputs() const -> QList<CameraDevice> override { return camera_.devices; }
+  void watch(QObject*, std::function<void()> on_change) override {
+    camera_.on_change = std::move(on_change);
+  }
+  auto check_permission() const -> CameraPermission::Status override {
+    return CameraPermission::Status::Granted;
+  }
+  void request_permission(QObject*, std::function<void(CameraPermission::Status)> on_result)
+      override {
+    on_result(CameraPermission::Status::Granted);
+  }
+  auto open(const CameraDevice&, const std::function<void(const QVideoFrame&)>& on_frame,
+            const std::function<void(const QString&)>& on_error)
+      -> std::unique_ptr<CameraStream> override {
+    ++camera_.opens;
+    if (camera_.open_fails) return nullptr;
+    camera_.on_frame = on_frame;
+    camera_.on_error = on_error;
+    class Stream final : public CameraStream {
+     public:
+      explicit Stream(FakeCamera& camera) : camera_(camera) {}
+      void stop() override { camera_.stopped = true; }
+      FakeCamera& camera_;
+    };
+    return std::make_unique<Stream>(camera_);
+  }
+
+ private:
+  FakeCamera& camera_;
+
+ public:
+  void fire_change() {
+    if (camera_.on_change) camera_.on_change();
+  }
+};
+
+[[nodiscard]] auto red_frame(int width, int height, QColor color) -> QVideoFrame {
+  QImage image(width, height, QImage::Format_RGBA8888);
+  image.fill(color);
+  return QVideoFrame(image);
+}
+
+SYNC_TEST(camera_devices_are_chosen_by_position_then_description_then_default) {
+  const QList<CameraDevice> devices{{"cam-0", "FaceTime HD Camera"}, {"cam-1", "Scarlett Cam"}};
+  SYNC_REQUIRE(choose_camera_device(devices, {}).value().description ==
+               QStringLiteral("FaceTime HD Camera"));
+  SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("1")).value().description ==
+               QStringLiteral("Scarlett Cam"));
+  SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("scarlett")).value().id ==
+               QStringLiteral("cam-1"));
+  SYNC_REQUIRE(choose_camera_device(devices, QStringLiteral("facetime")).value().id ==
+               QStringLiteral("cam-0"));
+  SYNC_REQUIRE(!choose_camera_device(devices, QStringLiteral("none")).has_value());
+  SYNC_REQUIRE(!choose_camera_device({}, {}).has_value());
+  SYNC_REQUIRE(!choose_camera_device({}, QStringLiteral("2")).has_value());
+}
+
+SYNC_TEST(a_camera_missing_at_start_is_waited_for_and_opened_when_it_appears) {
+  ProgramCompiler compiler(data_root());
+  RenderEngine engine(RenderEngine::Options{QSize(64, 48), 60.0, 10.0, data_root(),
+                                            temp_path("camera-late.frames").toStdString()});
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+
+  FakeCamera camera;
+  auto backend = std::make_unique<FakeCameraBackend>(camera);
+  FakeCameraBackend* backend_ptr = backend.get();
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
+  std::vector<std::pair<QString, QString>> statuses;
+  QObject::connect(&inputs, &MediaInputs::status, &engine,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  SYNC_REQUIRE(inputs.start(error));
+  // Missing is a state, not a one-shot error: the source waits, and the
+  // search keeps running.
+  SYNC_REQUIRE(statuses.size() == 1);
+  SYNC_REQUIRE(statuses[0].first == QStringLiteral("waiting"));
+  SYNC_REQUIRE(statuses[0].second == QStringLiteral("no camera"));
+
+  // A device-list change with still no camera is quiet.
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(statuses.size() == 1);
+
+  // The camera arrives: the same source opens it, without a helper restart.
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.opens == 1);
+  SYNC_REQUIRE(statuses.size() == 2);
+  SYNC_REQUIRE(statuses[1].first == QStringLiteral("camera"));
+  SYNC_REQUIRE(statuses[1].second == QStringLiteral("Test Camera"));
+
+  // Its frames reach the media step, at the frame's real size.
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+    inputs.apply(backend, graph, generation, compiler.registry());
+  });
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.freeze_time(0.0);
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).red() < 20);
+  camera.on_frame(red_frame(96, 32, QColor(200, 40, 30)));
+  engine.tick();
+  const QColor centre = engine.read_surface().pixelColor(32, 24);
+  SYNC_REQUIRE(std::abs(centre.red() - 200) <= 2);
+  SYNC_REQUIRE(std::abs(centre.green() - 40) <= 2);
+  // A later frame replaces the earlier one.
+  camera.on_frame(red_frame(96, 32, QColor(10, 190, 60)));
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() > 180);
+}
+
+SYNC_TEST(an_unplugged_camera_is_reopened_when_it_returns) {
+  ProgramCompiler compiler(data_root());
+  RenderEngine engine(RenderEngine::Options{QSize(64, 48), 60.0, 10.0, data_root(),
+                                            temp_path("camera-unplug.frames").toStdString()});
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+
+  FakeCamera camera;
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  auto backend = std::make_unique<FakeCameraBackend>(camera);
+  FakeCameraBackend* backend_ptr = backend.get();
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
+  std::vector<std::pair<QString, QString>> statuses;
+  QObject::connect(&inputs, &MediaInputs::status, &engine,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+    inputs.apply(backend, graph, generation, compiler.registry());
+  });
+  engine.set_program(compiler.compile(kMedia).graph);
+  engine.freeze_time(0.0);
+  SYNC_REQUIRE(inputs.start(error));
+  SYNC_REQUIRE(camera.opens == 1);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("camera"));
+
+  camera.on_frame(red_frame(96, 32, QColor(200, 40, 30)));
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).red() > 180);
+
+  // The driver reports the unplug: the stream is retired at once, the source
+  // waits with the reason, and the picture keeps its last frame.
+  camera.on_error(QStringLiteral("the camera was disconnected"));
+  SYNC_REQUIRE(camera.stopped);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("waiting"));
+  SYNC_REQUIRE(statuses.back().second == QStringLiteral("the camera was disconnected"));
+  camera.devices.clear();
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.opens == 1);
+  SYNC_REQUIRE(statuses.size() == 2);
+
+  // The camera is plugged back in: the same source reopens it.
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.opens == 2);
+  SYNC_REQUIRE(statuses.size() == 3);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("camera"));
+
+  // And its frames come back.
+  camera.on_frame(red_frame(96, 32, QColor(10, 190, 60)));
+  engine.tick();
+  SYNC_REQUIRE(engine.read_surface().pixelColor(32, 24).green() > 180);
+  camera.on_error = nullptr;
+  camera.on_frame = nullptr;
+}
+
+SYNC_TEST(a_camera_that_fails_to_open_is_searched_for_again) {
+  FakeCamera camera;
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  camera.open_fails = true;
+  auto backend = std::make_unique<FakeCameraBackend>(camera);
+  FakeCameraBackend* backend_ptr = backend.get();
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
+  std::vector<std::pair<QString, QString>> statuses;
+  QObject::connect(&inputs, &MediaInputs::status,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  QString error;
+  SYNC_REQUIRE(inputs.start(error));
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("waiting"));
+  SYNC_REQUIRE(statuses.back().second == QStringLiteral("the camera did not open"));
+  // The next device-list change tries the same camera again.
+  camera.open_fails = false;
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.opens == 2);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("camera"));
+  camera.on_frame = nullptr;
+  camera.on_error = nullptr;
+}
+
+SYNC_TEST(a_camera_gone_from_the_device_list_is_retired_and_reopened) {
+  FakeCamera camera;
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  auto backend = std::make_unique<FakeCameraBackend>(camera);
+  FakeCameraBackend* backend_ptr = backend.get();
+  MediaInputs inputs({MediaSpec{MediaSpec::Kind::Camera, {}}}, nullptr, std::move(backend));
+  std::vector<std::pair<QString, QString>> statuses;
+  QObject::connect(&inputs, &MediaInputs::status,
+                   [&statuses](int, const QString& state, const QString& detail) {
+                     statuses.push_back({state, detail});
+                   });
+  QString error;
+  SYNC_REQUIRE(inputs.start(error));
+  SYNC_REQUIRE(camera.opens == 1);
+  // The stream never reported an error, but the machine's camera list no
+  // longer carries the device: retire it, wait, and reopen when it is listed
+  // again.
+  camera.devices.clear();
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.stopped);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("waiting"));
+  SYNC_REQUIRE(statuses.back().second == QStringLiteral("the camera left"));
+  SYNC_REQUIRE(camera.opens == 1);
+  camera.devices.push_back({QStringLiteral("cam-1"), QStringLiteral("Test Camera")});
+  backend_ptr->fire_change();
+  SYNC_REQUIRE(camera.opens == 2);
+  SYNC_REQUIRE(statuses.back().first == QStringLiteral("camera"));
+  camera.on_frame = nullptr;
+  camera.on_error = nullptr;
+}
+
 }  // namespace

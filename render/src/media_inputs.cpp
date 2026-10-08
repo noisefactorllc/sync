@@ -13,6 +13,7 @@
 #include <QMutexLocker>
 #include <QPermissions>
 #include <QRegularExpression>
+#include <QTimer>
 #include <QUrl>
 #include <QVideoFrame>
 #include <QVideoSink>
@@ -30,12 +31,20 @@ struct MediaInputs::Source {
   MediaSpec spec;
   QImage still;  // a still-image file, uploaded once per texture
   std::unique_ptr<QVideoSink> sink;
-  std::unique_ptr<QCamera> camera;
-  std::unique_ptr<QMediaCaptureSession> session;
   std::unique_ptr<QMediaPlayer> player;
 
-  // Written by the sink, which may call from a media thread; read by apply()
-  // on the render thread.
+  // Camera. Empty while the source looks for its device or waits for it to
+  // come back.
+  std::unique_ptr<CameraStream> stream;
+  CameraDevice device;
+  // Permission was granted, so the search may open the device when it can.
+  bool permitted = false;
+  // The event channel carries the waiting state once per loss, not once per
+  // search: every half-second retry of the same absence is quiet.
+  bool waiting_announced = false;
+
+  // Written by the sink or the stream's frame callback, which may call from a
+  // media thread; read by apply() on the render thread.
   QMutex mutex;
   QVideoFrame frame;
   quint64 serial = 0;
@@ -43,6 +52,13 @@ struct MediaInputs::Source {
   // The newest frame as RGBA8, converted once however many steps share it.
   QImage converted;
   quint64 converted_serial = 0;
+
+  [[nodiscard]] auto index_in(const std::vector<std::unique_ptr<Source>>& sources) const -> int {
+    return static_cast<int>(std::find_if(sources.begin(), sources.end(),
+                                         [&](const auto& s) { return s.get() == this; }) -
+                            sources.begin());
+  }
+  [[nodiscard]] auto live() const -> bool { return stream != nullptr; }
 };
 
 auto parse_media_spec(const QString& text) -> std::optional<MediaSpec> {
@@ -79,17 +95,125 @@ auto bind_media(const QStringList& external_texture_ids, int source_count)
   return bindings;
 }
 
-MediaInputs::MediaInputs(QList<MediaSpec> specs, QObject* parent)
-    : QObject(parent), specs_(std::move(specs)) {}
+auto choose_camera_device(const QList<CameraDevice>& devices, const QString& wanted)
+    -> std::optional<CameraDevice> {
+  if (devices.isEmpty()) return std::nullopt;
+  if (wanted.isEmpty()) return devices.front();
+  bool numeric = false;
+  const int position = wanted.toInt(&numeric);
+  if (numeric && position >= 0 && position < devices.size()) return devices.at(position);
+  for (const CameraDevice& candidate : devices) {
+    if (candidate.description.contains(wanted, Qt::CaseInsensitive)) return candidate;
+  }
+  return std::nullopt;
+}
+
+// The camera stack over Qt's multimedia backend, what the helper runs with.
+namespace {
+
+// One camera over Qt's capture stack. The sink and the callbacks it holds
+// live with the stream, so a frame or an error is never delivered after the
+// stream is gone.
+class QMediaCameraStream final : public CameraStream {
+ public:
+  QMediaCameraStream(const QCameraDevice& device,
+                     std::function<void(const QVideoFrame&)> on_frame,
+                     std::function<void(const QString&)> on_error)
+      : camera_(device) {
+    QObject::connect(sink_.get(), &QVideoSink::videoFrameChanged, sink_.get(),
+            [on_frame = std::move(on_frame)](const QVideoFrame& frame) { on_frame(frame); },
+            Qt::DirectConnection);
+    // Errors arrive queued: the handler retires the stream, and destroying a
+    // QCamera from inside its own errorOccurred emission is not safe.
+    QObject::connect(&camera_, &QCamera::errorOccurred, sink_.get(),
+                     [on_error = std::move(on_error)](QCamera::Error, const QString& message) {
+                       on_error(message);
+                     }, Qt::QueuedConnection);
+    session_.setCamera(&camera_);
+    session_.setVideoSink(sink_.get());
+    camera_.start();
+  }
+  void stop() override { camera_.stop(); }
+
+ private:
+  QCamera camera_;
+  QMediaCaptureSession session_;
+  std::unique_ptr<QVideoSink> sink_ = std::make_unique<QVideoSink>();
+};
+
+class QMediaCameraBackend final : public CameraBackend {
+ public:
+  auto inputs() const -> QList<CameraDevice> override {
+    QList<CameraDevice> devices;
+    for (const QCameraDevice& device : QMediaDevices::videoInputs()) {
+      devices.push_back({device.id(), device.description()});
+    }
+    return devices;
+  }
+  void watch(QObject* receiver, std::function<void()> on_change) override {
+    // One QMediaDevices per watch: it tracks the OS device list and turns its
+    // changes into the callback. Parented to the receiver, so it lives only
+    // as long as the watching MediaInputs.
+    auto* devices = new QMediaDevices(receiver);
+    QObject::connect(devices, &QMediaDevices::videoInputsChanged, receiver,
+                     [on_change = std::move(on_change)] { on_change(); });
+  }
+  auto open(const CameraDevice& device, const std::function<void(const QVideoFrame&)>& on_frame,
+            const std::function<void(const QString&)>& on_error)
+      -> std::unique_ptr<CameraStream> override {
+    // The device was listed by inputs() a moment ago; match it again by id,
+    // because a QCameraDevice cannot be carried across the seam.
+    for (const QCameraDevice& candidate : QMediaDevices::videoInputs()) {
+      if (candidate.id() != device.id) continue;
+      return std::make_unique<QMediaCameraStream>(candidate, on_frame, on_error);
+    }
+    return nullptr;
+  }
+  auto check_permission() const -> CameraPermission::Status override {
+    switch (qApp->checkPermission(QCameraPermission())) {
+      case Qt::PermissionStatus::Granted: return CameraPermission::Status::Granted;
+      case Qt::PermissionStatus::Denied: return CameraPermission::Status::Denied;
+      case Qt::PermissionStatus::Undetermined: return CameraPermission::Status::Undetermined;
+    }
+    return CameraPermission::Status::Undetermined;
+  }
+  void request_permission(QObject* receiver,
+                          std::function<void(CameraPermission::Status)> on_result) override {
+    qApp->requestPermission(QCameraPermission(), receiver,
+                            [on_result = std::move(on_result)](const QPermission& result) {
+                              on_result(result.status() == Qt::PermissionStatus::Granted
+                                            ? CameraPermission::Status::Granted
+                                            : CameraPermission::Status::Denied);
+                            });
+  }
+};
+
+// How often a source without a camera looks again. The same half second the
+// audio capture waits, so a camera the OS never announced (or whose loss was
+// never announced) is still heard within half a second of arriving.
+constexpr int kSearchIntervalMs = 500;
+
+}  // namespace
+
+MediaInputs::MediaInputs(QList<MediaSpec> specs, QObject* parent,
+                         std::unique_ptr<CameraBackend> backend)
+    : QObject(parent), specs_(std::move(specs)), backend_(std::move(backend)) {
+  if (!backend_ && std::any_of(specs_.begin(), specs_.end(), [](const MediaSpec& spec) {
+        return spec.kind == MediaSpec::Kind::Camera;
+      })) {
+    backend_ = std::make_unique<QMediaCameraBackend>();
+  }
+}
 
 MediaInputs::~MediaInputs() {
   for (auto& source : sources_) {
-    if (source->camera) source->camera->stop();
+    if (source->stream) source->stream->stop();
     if (source->player) source->player->stop();
   }
 }
 
 auto MediaInputs::start(QString& error) -> bool {
+  bool watching = false;
   for (const MediaSpec& spec : specs_) {
     auto source = std::make_unique<Source>();
     source->spec = spec;
@@ -135,70 +259,104 @@ auto MediaInputs::start(QString& error) -> bool {
     // Camera: capture needs the user's permission. Qt asks the OS; on macOS
     // the executable must carry a camera usage description for the request
     // to be shown at all.
-    s.sink = std::make_unique<QVideoSink>();
-    connect(s.sink.get(), &QVideoSink::videoFrameChanged, this,
-            [this, &s](const QVideoFrame& frame) { accept_frame(s, frame); },
-            Qt::DirectConnection);
-    const QCameraPermission permission;
-    switch (qApp->checkPermission(permission)) {
-      case Qt::PermissionStatus::Granted:
-        start_camera(s);
+    switch (backend_->check_permission()) {
+      case CameraPermission::Status::Granted:
+        s.permitted = true;
+        open_camera(s);
         break;
-      case Qt::PermissionStatus::Denied:
+      case CameraPermission::Status::Denied:
         emit status(index, QStringLiteral("denied"), QStringLiteral("camera permission denied"));
         break;
-      case Qt::PermissionStatus::Undetermined:
+      case CameraPermission::Status::Undetermined:
         emit status(index, QStringLiteral("waiting"), QStringLiteral("camera permission requested"));
-        qApp->requestPermission(permission, this, [this, &s, index](const QPermission& result) {
-          if (result.status() == Qt::PermissionStatus::Granted) {
-            start_camera(s);
+        backend_->request_permission(this, [this, &s](CameraPermission::Status granted) {
+          if (granted == CameraPermission::Status::Granted) {
+            s.permitted = true;
+            open_camera(s);
           } else {
-            emit status(index, QStringLiteral("denied"), QStringLiteral("camera permission denied"));
+            emit status(s.index_in(sources_), QStringLiteral("denied"),
+                        QStringLiteral("camera permission denied"));
           }
         });
         break;
+    }
+    if (!watching) {
+      watching = true;
+      backend_->watch(this, [this] { reopen_missing_cameras(); });
+      // The timer keeps the search alive where the OS never announces a
+      // device change; the announcement, when it comes, is the fast path.
+      auto* search = new QTimer(this);
+      search->setInterval(kSearchIntervalMs);
+      connect(search, &QTimer::timeout, this, [this] { reopen_missing_cameras(); });
+      search->start();
     }
   }
   return true;
 }
 
-void MediaInputs::start_camera(Source& source) {
-  const int index = static_cast<int>(std::find_if(sources_.begin(), sources_.end(),
-                                                  [&](const auto& s) { return s.get() == &source; }) -
-                                     sources_.begin());
-  const QList<QCameraDevice> devices = QMediaDevices::videoInputs();
-  QCameraDevice device = QMediaDevices::defaultVideoInput();
-  const QString wanted = source.spec.value;
-  if (!wanted.isEmpty()) {
-    bool numeric = false;
-    const int position = wanted.toInt(&numeric);
-    device = QCameraDevice();
-    if (numeric && position >= 0 && position < devices.size()) {
-      device = devices.at(position);
-    } else {
-      for (const QCameraDevice& candidate : devices) {
-        if (candidate.description().contains(wanted, Qt::CaseInsensitive)) {
-          device = candidate;
-          break;
-        }
-      }
-    }
-  }
-  if (device.isNull()) {
-    emit status(index, QStringLiteral("error"),
-                wanted.isEmpty() ? QStringLiteral("no camera") : QStringLiteral("no camera matches %1").arg(wanted));
+void MediaInputs::open_camera(Source& source) {
+  if (!source.permitted) return;  // the search does not outrun the permission
+  const int index = source.index_in(sources_);
+  const auto device = choose_camera_device(backend_->inputs(), source.spec.value);
+  if (!device.has_value()) {
+    // Not a failure the helper reports once: the source waits, and the
+    // search re-runs the same selection when a camera may have arrived.
+    announce_waiting(source, index,
+                     source.spec.value.isEmpty() ? QStringLiteral("no camera")
+                                                 : QStringLiteral("no camera matches %1").arg(
+                                                       source.spec.value));
     return;
   }
-  source.camera = std::make_unique<QCamera>(device);
-  source.session = std::make_unique<QMediaCaptureSession>();
-  source.session->setCamera(source.camera.get());
-  source.session->setVideoSink(source.sink.get());
-  connect(source.camera.get(), &QCamera::errorOccurred, this,
-          [this, index](QCamera::Error, const QString& message) {
-            emit status(index, QStringLiteral("error"), message);
-          });
-  source.camera->start();
-  emit status(index, QStringLiteral("camera"), device.description());
+  auto on_frame = [this, &source](const QVideoFrame& frame) { accept_frame(source, frame); };
+  auto on_error = [this, &source](const QString& message) {
+    // A camera that reports an error may still be listed; retire it and let
+    // the search decide whether the same device can serve again.
+    close_camera(source, message);
+  };
+  auto stream = backend_->open(*device, std::move(on_frame), std::move(on_error));
+  if (!stream) {
+    announce_waiting(source, index, QStringLiteral("the camera did not open"));
+    return;
+  }
+  source.device = *device;
+  source.stream = std::move(stream);
+  source.waiting_announced = false;
+  emit status(index, QStringLiteral("camera"), device->description);
+}
+
+void MediaInputs::announce_waiting(Source& source, int index, const QString& reason) {
+  if (source.waiting_announced) return;
+  source.waiting_announced = true;
+  emit status(index, QStringLiteral("waiting"), reason);
+}
+
+void MediaInputs::close_camera(Source& source, const QString& reason) {
+  if (source.stream) {
+    source.stream->stop();
+    source.stream.reset();
+  }
+  announce_waiting(source, source.index_in(sources_), reason);
+}
+
+void MediaInputs::reopen_missing_cameras() {
+  const QList<CameraDevice> devices = backend_->inputs();
+  for (auto& source : sources_) {
+    if (source->spec.kind != MediaSpec::Kind::Camera) continue;
+    if (source->live()) {
+      // The device list is the ground truth: a camera that no longer
+      // appears on it is gone even if the stream has not reported an error
+      // (macOS can retire a device without a QCamera error).
+      const bool still_listed = std::any_of(devices.begin(), devices.end(),
+                                            [&](const CameraDevice& device) {
+                                              return device.id == source->device.id;
+                                            });
+      if (still_listed) continue;
+      close_camera(*source, QStringLiteral("the camera left"));
+    }
+    // Frame callbacks capture `source`, which outlives the stream: the old
+    // stream is already destroyed above, so the reopen cannot double-feed.
+    open_camera(*source);
+  }
 }
 
 void MediaInputs::accept_frame(Source& source, const QVideoFrame& frame) {
