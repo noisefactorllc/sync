@@ -25,8 +25,16 @@ export class RgbaExportQueue extends ExportQueue {
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     if (bytes.byteLength < requiredBytes) throw new RangeError('data does not contain all source rows');
     const output = this._output;
-    for (let row = 0; row < height; row += 1) {
-      output.set(bytes.subarray(row * rowStride, row * rowStride + width * 4), row * width * 4);
+    // A source whose row stride already equals width * 4 (the common case: an
+    // unpadded RGBA readback) is one contiguous block. Copying it in a single
+    // set() avoids height subarray allocations and dispatches per frame, which
+    // a 1080p60 stream pays 1080 times a second.
+    if (rowStride === width * 4) {
+      output.set(bytes.subarray(0, width * height * 4));
+    } else {
+      for (let row = 0; row < height; row += 1) {
+        output.set(bytes.subarray(row * rowStride, row * rowStride + width * 4), row * width * 4);
+      }
     }
     this._busy = true;
     try { onFrame(frameFrom(descriptor, output), timestamp, sequence); }

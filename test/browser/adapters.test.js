@@ -34,6 +34,25 @@ test('RGBA admission is synchronous and copies only active bytes from padded row
   assert.equal(queue.available, false);
 });
 
+test('RGBA coalesces a contiguous source into one copy per frame', () => {
+  const queue = new RgbaExportQueue();
+  // Distinct rows prove every row of the contiguous block lands on its own
+  // output row, unlike the padded-row test above which strips trailing bytes.
+  const source = new Uint8Array(3 * 4);
+  for (let i = 0; i < 3; i += 1) {
+    source.set([i, i * 2, i * 3, 255], i * 4);
+  }
+  const contiguous = { width: 1, height: 3, rowStride: 4, data: source };
+  queue.configure({ ...descriptor, height: 3 });
+  let frame;
+  assert.equal(queue.enqueue(contiguous, 1, (value) => { frame = value; }, 1), true);
+  assert.equal(frame.rowStride, 4);
+  assert.deepEqual([...frame.data], [...source]);
+  source.fill(7);
+  assert.deepEqual([...frame.data], [0, 0, 0, 255, 1, 2, 3, 255, 2, 4, 6, 255],
+                   'admission copied the contiguous block');
+});
+
 test('RGBA rejects invalid bounds, metadata, and frame bytes before admission', () => {
   const queue = new RgbaExportQueue();
   for (const override of [{width:0}, {height:1.5}, {width:0xffffffff}, {format:'bgra8unorm'}, {colorSpace:'linear'}, {alphaMode:'unknown'}, {fps:Infinity}]) {
