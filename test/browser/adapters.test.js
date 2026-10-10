@@ -171,7 +171,8 @@ test('WebGL2 drops old frames on configure and releases resources after read err
   assert.ok(buffers.every(buffer=>buffer.deleted));
 });
 
-function gpuFixture() {
+function gpuFixture({width = 1, height = 2, pixels = new Uint8Array([0,0,255,255,255,0,0,128])} = {}) {
+  const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
   const buffers=[];
   const device={limits:{maxBufferSize:1024*1024},lost:new Promise(()=>{}),pushErrorScope(){},popErrorScope(){return Promise.resolve(null);},createBuffer({size,usage}){
     assert.equal(usage,9);
@@ -181,9 +182,14 @@ function gpuFixture() {
       unmap(){this.mapState='unmapped';},destroy(){this.destroyed=true;this.mapState='unmapped';},
     };buffers.push(buffer);return buffer;
   },createCommandEncoder(){return {copyTextureToBuffer(source,target,extent){this.copy={source,target,extent};},finish(){return this.copy;}};},
-    queue:{submit(commands){for(const {source,target,extent} of commands){assert.equal(target.bytesPerRow,256);assert.equal(extent.width,1);target.buffer.bytes.set(source.texture.pixels.slice(0,4));target.buffer.bytes.set(source.texture.pixels.slice(4),256);}}},
+    queue:{submit(commands){for(const {source,target,extent} of commands){
+      assert.equal(target.bytesPerRow,bytesPerRow);
+      assert.equal(extent.width,width);
+      assert.equal(extent.height,height);
+      for(let row=0;row<height;row+=1) target.buffer.bytes.set(source.texture.pixels.subarray(row*width*4,(row+1)*width*4),row*bytesPerRow);
+    }}},
   };
-  const texture={width:1,height:2,depthOrArrayLayers:1,dimension:'2d',sampleCount:1,format:'bgra8unorm',usage:1,pixels:new Uint8Array([0,0,255,255,255,0,0,128])};
+  const texture={width,height,depthOrArrayLayers:1,dimension:'2d',sampleCount:1,format:'bgra8unorm',usage:1,pixels};
   return {device,buffers,texture};
 }
 
@@ -204,6 +210,33 @@ test('WebGPU bounds slots and strips row padding with BGRA conversion only after
   assert.deepEqual([...frame.data],topDown);
   assert.equal(buffers[0].mapState,'unmapped');
   assert.equal(queue.available,true);
+  queue.close();
+  assert.ok(buffers.every(buffer=>buffer.destroyed));
+});
+
+test('WebGPU coalesces a contiguous readback into one copy per frame', async () => {
+  // 64 pixels fill a 256-byte row exactly, so bytesPerRow equals the packed
+  // stride and the mapped readback is one contiguous block. Distinct rows
+  // prove every row of the block lands on its own output row, unlike the
+  // padded-row test above which strips trailing bytes.
+  const width = 64;
+  const height = 2;
+  const expected = new Uint8Array(width * height * 4);
+  const pixels = new Uint8Array(width * height * 4);
+  for (let k = 0; k < width * height; k += 1) {
+    expected.set([k & 255, (k * 2) & 255, 255 - (k & 255), 255], k * 4);
+    // The texture holds BGRA bytes; poll swaps R and B into RGBA.
+    pixels.set([255 - (k & 255), (k * 2) & 255, k & 255, 255], k * 4);
+  }
+  const {device,buffers,texture}=gpuFixture({width,height,pixels});
+  const queue=new WebGPUExportQueue({device,slots:1});
+  queue.configure({width,height,format:'rgba8unorm',colorSpace:'srgb',alphaMode:'straight',fps:60});
+  let frame;
+  assert.equal(queue.enqueue(texture,7,value=>{frame=value;},1),true);
+  buffers[0].resolve();await flush();
+  queue.poll();
+  assert.deepEqual([...frame.data],[...expected]);
+  assert.equal(frame.rowStride,width*4);
   queue.close();
   assert.ok(buffers.every(buffer=>buffer.destroyed));
 });

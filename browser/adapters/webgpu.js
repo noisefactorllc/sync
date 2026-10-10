@@ -121,9 +121,23 @@ export class WebGPUExportQueue extends ExportQueue {
         const {width,height} = pending.descriptor;
         const stride = width * 4;
         output = slot.output;
-        for (let row = 0; row < height; row += 1) output.set(raw.subarray(row * slot.bytesPerRow, row * slot.bytesPerRow + stride), row * stride);
+        // A bytesPerRow that already equals the packed stride (the common case:
+        // a width that is a multiple of 64) is one contiguous block. Copying it
+        // in a single set() avoids height subarray allocations and dispatches
+        // per frame, which a 1080p60 stream pays 1080 times a second.
+        if (slot.bytesPerRow === stride) {
+          output.set(raw.subarray(0, width * height * 4));
+        } else {
+          for (let row = 0; row < height; row += 1) output.set(raw.subarray(row * slot.bytesPerRow, row * slot.bytesPerRow + stride), row * stride);
+        }
         if (pending.bgra) {
-          for (let i = 0; i < output.length; i += 4) [output[i], output[i + 2]] = [output[i + 2], output[i]];
+          // Swap channels without a per-pixel pair allocation: a destructuring
+          // swap allocates two arrays per pixel, over 2M per 1080p frame.
+          for (let i = 0; i < output.length; i += 4) {
+            const blue = output[i];
+            output[i] = output[i + 2];
+            output[i + 2] = blue;
+          }
         }
       } finally { slot.buffer.unmap(); }
       if (!this._closed && pending.generation === this._generation) {
