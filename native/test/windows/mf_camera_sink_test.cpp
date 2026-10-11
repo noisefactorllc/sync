@@ -288,10 +288,16 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
   return out;
 }
 
-// EqualSid takes PSID (void*), so the SID bytes the helpers below read from
-// owned vectors cross through this one const_cast.
-[[nodiscard]] auto sid_of(const std::vector<std::byte>& bytes) -> PSID {
-  return reinterpret_cast<PSID>(const_cast<std::byte*>(bytes.data()));
+// The bytes GetTokenInformation(TokenUser) returns hold a TOKEN_USER
+// struct whose first member is a POINTER to the SID; the SID itself lives
+// at that pointer, inside the same buffer. Casting the buffer start to
+// PSID compares the struct (whose first bytes are the pointer value) as if
+// it were a SID - EqualSid then reads garbage and never matches. Every
+// comparison below must go through this extraction.
+[[nodiscard]] auto sid_of(const std::vector<std::byte>& token_user) -> PSID {
+  if (token_user.empty()) return nullptr;
+  const auto* const info = reinterpret_cast<const TOKEN_USER*>(token_user.data());
+  return info->User.Sid;
 }
 
 // Mirrors the pairing store's verify_owner_only_security: the file is owned
@@ -323,8 +329,8 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
   } const descriptor_guard{descriptor};
 
   const std::vector<std::byte> user = test_current_user_sid();
-  if (user.empty() || owner == nullptr ||
-      !::EqualSid(owner, sid_of(user))) {
+  const PSID user_sid = sid_of(user);
+  if (user_sid == nullptr || owner == nullptr || !::EqualSid(owner, user_sid)) {
     return false;
   }
 
@@ -347,7 +353,7 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
   const auto* const ace_sid_bytes =
       reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
   return ::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
-                    sid_of(user)) != FALSE;
+                    user_sid) != FALSE;
 }
 
 // Detects a widened DACL: some access-allowed ACE grants a non-empty mask to
@@ -377,9 +383,10 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
     ~DescriptorGuard() { ::LocalFree(descriptor); }
   } const descriptor_guard{descriptor};
   const std::vector<std::byte> user = test_current_user_sid();
+  const PSID user_sid = sid_of(user);
   bool widened = false;
-  if (!user.empty() && owner != nullptr &&
-      ::EqualSid(owner, sid_of(user)) && dacl != nullptr) {
+  if (user_sid != nullptr && owner != nullptr &&
+      ::EqualSid(owner, user_sid) && dacl != nullptr) {
     ACL_SIZE_INFORMATION size_info{};
     if (::GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation)) {
       for (DWORD i = 0; i < size_info.AceCount; i += 1) {
@@ -391,7 +398,7 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
         const auto* const ace_sid_bytes =
             reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
         if (!::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
-                        sid_of(user)) &&
+                        user_sid) &&
             allowed->Mask != 0) {
           widened = true;  // an access grant to somebody other than this user
         }
