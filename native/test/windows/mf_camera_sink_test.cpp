@@ -528,6 +528,56 @@ SYNC_TEST(a_sink_creates_an_owner_only_shm_ring_file) {
   SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
 }
 
+// Creates a pre-existing ring file with a deliberately widened DACL
+// (Everyone full control too, via a two-ACE DACL applied at creation),
+// owned by this process's user exactly as the sink would name it -- an
+// elevated runner's default owner is the Administrators group, which would
+// make the owner-side assertions fail for reasons that have nothing to do
+// with the DACL under test.
+static void make_widened_shm_file(const std::wstring& path) {
+  const std::vector<std::byte> user = test_current_user_sid();
+  SYNC_REQUIRE(!user.empty());
+  const auto* const user_info = reinterpret_cast<const TOKEN_USER*>(user.data());
+  SYNC_REQUIRE(user_info->User.Sid != nullptr);
+  SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
+  PSID everyone = nullptr;
+  SYNC_REQUIRE(::AllocateAndInitializeSid(&world, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                                          &everyone) != 0);
+  struct SidGuard {
+    PSID sid;
+    ~SidGuard() { ::FreeSid(sid); }
+  } const everyone_guard{everyone};
+
+  constexpr DWORD kMaximumSidBytes = 68;
+  std::array<unsigned char,
+             sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes)>
+      acl_buffer{};
+  auto* const acl = reinterpret_cast<PACL>(acl_buffer.data());
+  SYNC_REQUIRE(::InitializeAcl(acl, static_cast<DWORD>(acl_buffer.size()), ACL_REVISION) != 0);
+  SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS,
+                                     user_info->User.Sid) != 0);
+  SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, everyone) != 0);
+  SECURITY_DESCRIPTOR descriptor{};
+  SYNC_REQUIRE(::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) != 0);
+  SYNC_REQUIRE(::SetSecurityDescriptorOwner(&descriptor, user_info->User.Sid, FALSE) != 0);
+  SYNC_REQUIRE(::SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) != 0);
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.lpSecurityDescriptor = &descriptor;
+  attributes.bInheritHandle = FALSE;
+
+  const HANDLE loose =
+      ::CreateFileW(path.c_str(), GENERIC_ALL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &attributes,
+                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  SYNC_REQUIRE(loose != INVALID_HANDLE_VALUE);
+  ::CloseHandle(loose);
+
+  // Precondition: the fixture really is wider than owner-only.
+  SYNC_REQUIRE(shm_file_is_widened(path));
+  SYNC_REQUIRE(!shm_file_is_owner_only(path));
+}
+
 // A pre-existing ring file with a deliberately widened DACL (Everyone full
 // control beside this user) is adopted only by being tightened back to
 // owner-only before the ring is truncated, mapped or published -- the
@@ -542,55 +592,7 @@ SYNC_TEST(a_sink_tightens_a_pre_existing_widened_shm_ring_file) {
   opts.shm_path = shm_file;
   opts.enable_shm = true;
 
-  {
-    // The widened fixture: this user full control and Everyone full control,
-    // via a two-ACE DACL applied at creation.
-    const std::vector<std::byte> user = test_current_user_sid();
-    SYNC_REQUIRE(!user.empty());
-    const auto* const user_info = reinterpret_cast<const TOKEN_USER*>(user.data());
-    SYNC_REQUIRE(user_info->User.Sid != nullptr);
-    SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
-    PSID everyone = nullptr;
-    SYNC_REQUIRE(::AllocateAndInitializeSid(&world, 1, 0, 0, 0, 0, 0, 0, 0, 0,
-                                            &everyone) != 0);
-    struct SidGuard {
-      PSID sid;
-      ~SidGuard() { ::FreeSid(sid); }
-    } const everyone_guard{everyone};
-
-    constexpr DWORD kMaximumSidBytes = 68;
-    std::array<unsigned char,
-               sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes)>
-        acl_buffer{};
-    auto* const acl = reinterpret_cast<PACL>(acl_buffer.data());
-    SYNC_REQUIRE(::InitializeAcl(acl, static_cast<DWORD>(acl_buffer.size()), ACL_REVISION) != 0);
-    SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS,
-                                       user_info->User.Sid) != 0);
-    SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, everyone) != 0);
-    SECURITY_DESCRIPTOR descriptor{};
-    SYNC_REQUIRE(::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) != 0);
-    // Name this process's user as the owner, exactly as the sink does: an
-    // elevated runner's default owner is the Administrators group, which
-    // would make the owner-side assertions below fail for reasons that have
-    // nothing to do with the DACL under test.
-    SYNC_REQUIRE(::SetSecurityDescriptorOwner(&descriptor, user_info->User.Sid, FALSE) != 0);
-    SYNC_REQUIRE(::SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) != 0);
-    SECURITY_ATTRIBUTES attributes{};
-    attributes.nLength = sizeof(attributes);
-    attributes.lpSecurityDescriptor = &descriptor;
-    attributes.bInheritHandle = FALSE;
-
-    const HANDLE loose =
-        ::CreateFileW(shm_file.c_str(), GENERIC_ALL,
-                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &attributes,
-                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    SYNC_REQUIRE(loose != INVALID_HANDLE_VALUE);
-    ::CloseHandle(loose);
-
-    // Precondition: the fixture really is wider than owner-only.
-    SYNC_REQUIRE(shm_file_is_widened(shm_file));
-    SYNC_REQUIRE(!shm_file_is_owner_only(shm_file));
-  }
+  make_widened_shm_file(shm_file);
 
   {
     MfCameraSink sink(opts);
@@ -611,6 +613,64 @@ SYNC_TEST(a_sink_tightens_a_pre_existing_widened_shm_ring_file) {
     SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x53);
   }
   SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
+}
+
+// When the owner-only descriptor cannot be built, the sink must fail closed:
+// no file may be created with the directory's inherited (widened) security,
+// and no pre-existing widened file may be taken over -- neither tightened
+// nor locked -- because the sink never opens it. The writer lock probe
+// distinguishes refusal from the fail-open behavior of opening and skipping
+// enforcement: a sink that had opened the file would hold the exclusive
+// writer range, and the probe's LockFileEx would fail.
+SYNC_TEST(a_sink_fails_closed_when_owner_only_security_cannot_be_built) {
+  // Fresh path: nothing may be created at all.
+  {
+    const std::wstring shm_file = test_temp_path();
+    MfCameraSink::Options opts;
+    opts.section = kTestSection;
+    opts.create_virtual_camera = false;
+    opts.shm_path = shm_file;
+    opts.enable_shm = true;
+    opts.fail_owner_only_security_setup = true;
+
+    MfCameraSink sink(opts);
+    const DWORD attrs = ::GetFileAttributesW(shm_file.c_str());
+    const DWORD attrs_error = ::GetLastError();
+    SYNC_REQUIRE(attrs == INVALID_FILE_ATTRIBUTES);
+    SYNC_REQUIRE(attrs_error == ERROR_FILE_NOT_FOUND);
+  }
+
+  // Pre-existing widened file: left exactly as found, and free -- no sink
+  // holds the writer range over it.
+  {
+    const std::wstring shm_file = test_temp_path();
+    make_widened_shm_file(shm_file);
+    MfCameraSink::Options opts;
+    opts.section = kTestSection;
+    opts.create_virtual_camera = false;
+    opts.shm_path = shm_file;
+    opts.enable_shm = true;
+    opts.fail_owner_only_security_setup = true;
+
+    MfCameraSink sink(opts);
+    SYNC_REQUIRE(shm_file_is_widened(shm_file));
+
+    const HANDLE probe = ::CreateFileW(
+        shm_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    SYNC_REQUIRE(probe != INVALID_HANDLE_VALUE);
+    OVERLAPPED writer_range{};
+    writer_range.Offset = 0x40000000;
+    const BOOL locked = ::LockFileEx(probe, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                                     0, 0x10000, 0, &writer_range);
+    SYNC_REQUIRE(locked != 0);
+    OVERLAPPED unlock_range{};
+    unlock_range.Offset = 0x40000000;
+    ::UnlockFileEx(probe, 0, 0x10000, 0, &unlock_range);
+    ::CloseHandle(probe);
+    SYNC_REQUIRE(::DeleteFileW(shm_file.c_str()) != 0);
+  }
 }
 
 // A second sink opening an occupied shared-frame file must read as having

@@ -242,14 +242,22 @@ struct MfCameraSink::Impl {
     // grants only that user full access (see build_owner_only_file_security)
     // so the strict owner check below accepts the file this sink itself
     // creates even under an elevated token, whose default owner is the
-    // Administrators group.
+    // Administrators group. Fail closed before the open: if the owner-only
+    // descriptor cannot be built, nothing is opened or created -- a fallback
+    // open with default attributes would create the file with the
+    // directory's inherited security and would leave a pre-existing file's
+    // DACL untightened, so no such fallback exists.
     OwnerOnlyFileSecurity owner_at_creation;
-    const bool owner_named = build_owner_only_file_security(owner_at_creation);
+    if (options.fail_owner_only_security_setup ||
+        !build_owner_only_file_security(owner_at_creation)) {
+      resolved_shm_path.clear();
+      return;
+    }
     shm_file = ::CreateFileW(
         resolved_shm_path.c_str(),
         GENERIC_READ | GENERIC_WRITE | DELETE | WRITE_DAC,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        owner_named ? &owner_at_creation.attributes : nullptr,
+        &owner_at_creation.attributes,
         OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
@@ -312,7 +320,7 @@ struct MfCameraSink::Impl {
     // than mapped shared. The second-writer case never reaches this point:
     // its open fails at the writer lock above, so the first writer's ring
     // and its DACL are never touched by it.
-    if (owner_named && !enforce_owner_only_dacl(shm_file, owner_at_creation)) {
+    if (!enforce_owner_only_dacl(shm_file, owner_at_creation)) {
       reject_shm_file();
       return;
     }

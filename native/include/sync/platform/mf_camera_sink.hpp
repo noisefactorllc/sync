@@ -43,6 +43,13 @@ class MfCameraSink final : public CameraSink {
     std::wstring shm_path = L"";
     // Whether to initialize the shared memory ring buffer for desktop bypass.
     bool enable_shm = true;
+    // Test seam for the fail-closed owner-only path: when set, building the
+    // owner-only file security fails, so the sink must refuse the ring file
+    // (create nothing, take nothing over) exactly as it would if the real
+    // security setup had failed. Production leaves this false; the sink
+    // never opens or creates the shared-frame file without a valid
+    // owner-only descriptor.
+    bool fail_owner_only_security_setup = false;
   };
 
   MfCameraSink();
