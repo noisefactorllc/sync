@@ -350,10 +350,12 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
   if (header->AceType != ACCESS_ALLOWED_ACE_TYPE || header->AceFlags != 0) return false;
   const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
   if (allowed->Mask != FILE_ALL_ACCESS) return false;
-  const auto* const ace_sid_bytes =
-      reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
-  return ::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
-                    user_sid) != FALSE;
+  // SidStart is a plain DWORD in the Windows headers, not an array: the SID
+  // lives at its address (the pairing store's verify_owner_only_security
+  // takes exactly this address-of form).
+  const PSID ace_sid =
+      const_cast<PSID>(static_cast<const void*>(&allowed->SidStart));
+  return ::EqualSid(ace_sid, user_sid) != FALSE;
 }
 
 // Detects a widened DACL: some access-allowed ACE grants a non-empty mask to
@@ -395,11 +397,9 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
         const auto* header = static_cast<const ACE_HEADER*>(ace);
         if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
         const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
-        const auto* const ace_sid_bytes =
-            reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
-        if (!::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
-                        user_sid) &&
-            allowed->Mask != 0) {
+        const PSID ace_sid =
+            const_cast<PSID>(static_cast<const void*>(&allowed->SidStart));
+        if (!::EqualSid(ace_sid, user_sid) && allowed->Mask != 0) {
           widened = true;  // an access grant to somebody other than this user
         }
       }
