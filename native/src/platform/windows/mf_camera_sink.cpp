@@ -8,6 +8,7 @@
 #include <winternl.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -61,30 +62,48 @@ using Microsoft::WRL::ComPtr;
   return ::GetTokenInformation(token, TokenUser, out.data(), size, &size) != 0;
 }
 
-// Security attributes that name this process's user as the owner of the
-// file CreateFileW creates. The owner must be set explicitly rather than
-// left to the token default: a security descriptor without an owner takes
-// the creating token's default owner (TokenOwner), which is not always
-// the token user -- an elevated process, including the CI runners, gets the
-// Administrators group -- and the strict owner check below would then
-// reject the file this sink itself just created. Naming the owner to one's
-// own token-user SID is always permitted and needs no privilege; the
-// pairing store does the same (pairing_store_fs.cpp,
-// build_owner_only_security). Only the owner is named; the DACL is left
-// to inheritance, as before.
-struct OwnerAtCreation {
-  SECURITY_DESCRIPTOR descriptor{};
-  std::vector<std::byte> sid_bytes;
-  SECURITY_ATTRIBUTES attributes{};
+// A well-known max SID (S-1-5-21-<3x32bit>-32bit RID) is well under this;
+// sized locally (the pairing store does the same) rather than relying on an
+// SDK-version-dependent macro.
+constexpr DWORD kMaximumSidBytes = 68;
 
-  OwnerAtCreation() = default;
-  OwnerAtCreation(const OwnerAtCreation&) = delete;
-  OwnerAtCreation& operator=(const OwnerAtCreation&) = delete;
-  OwnerAtCreation(OwnerAtCreation&&) = delete;
-  OwnerAtCreation& operator=(OwnerAtCreation&&) = delete;
+// The owner-only security the shared-frame file is created with and forced
+// back to: this process's user owns the file, and a protected DACL with a
+// single access-allowed ACE grants that user -- and nobody else -- full
+// access. This is the Windows analogue of the mode-0600 ring files the
+// macOS and POSIX sinks create and enforce (their fail-closed fchmod(0600)
+// on a pre-existing file), and of the pairing store's owner-only objects on
+// this platform (pairing_store_fs.cpp, build_owner_only_security). The
+// owner must be set explicitly rather than left to the token default: a
+// security descriptor without an owner takes the creating token's default
+// owner (TokenOwner), which is not always the token user (TokenUser) -- an
+// elevated process, including the CI runners, gets the Administrators
+// group -- and the strict owner check below would then reject the file this
+// sink itself just created. Naming the owner to one's own token-user SID is
+// always permitted and needs no privilege. SE_DACL_PROTECTED stops the
+// parent directory from widening the file through an inheritable ACE;
+// leaving the DACL to inheritance (the previous behavior) let a custom ring
+// path under a permissive directory -- or a pre-existing ring file with a
+// loose DACL -- stay accessible to accounts the owner never granted.
+struct OwnerOnlyFileSecurity {
+  SECURITY_DESCRIPTOR descriptor{};
+  std::array<unsigned char, sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes>
+      acl_buffer{};
+  SECURITY_ATTRIBUTES attributes{};
+  std::vector<std::byte> sid_bytes;
+
+  // Every pointer in here is self-referential or owned elsewhere: attributes
+  // points at descriptor, the descriptor at acl_buffer and at a SID inside
+  // sid_bytes. A copy or a move would carry those pointers over unchanged
+  // and leave them aimed at the original object, so both are compile errors.
+  OwnerOnlyFileSecurity() = default;
+  OwnerOnlyFileSecurity(const OwnerOnlyFileSecurity&) = delete;
+  OwnerOnlyFileSecurity& operator=(const OwnerOnlyFileSecurity&) = delete;
+  OwnerOnlyFileSecurity(OwnerOnlyFileSecurity&&) = delete;
+  OwnerOnlyFileSecurity& operator=(OwnerOnlyFileSecurity&&) = delete;
 };
 
-[[nodiscard]] auto build_owner_at_creation(OwnerAtCreation& out) -> bool {
+[[nodiscard]] auto build_owner_only_file_security(OwnerOnlyFileSecurity& out) -> bool {
   if (!current_user_sid(out.sid_bytes)) return false;
   const auto* const user = reinterpret_cast<const TOKEN_USER*>(out.sid_bytes.data());
   if (user->User.Sid == nullptr) return false;
@@ -92,10 +111,35 @@ struct OwnerAtCreation {
     return false;
   }
   if (!::SetSecurityDescriptorOwner(&out.descriptor, user->User.Sid, FALSE)) return false;
+  auto* const acl = reinterpret_cast<PACL>(out.acl_buffer.data());
+  if (!::InitializeAcl(acl, static_cast<DWORD>(out.acl_buffer.size()), ACL_REVISION)) {
+    return false;
+  }
+  if (!::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, user->User.Sid)) return false;
+  if (!::SetSecurityDescriptorDacl(&out.descriptor, TRUE, acl, FALSE)) return false;
+  if (!::SetSecurityDescriptorControl(&out.descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
+    return false;
+  }
   out.attributes.nLength = sizeof(out.attributes);
   out.attributes.lpSecurityDescriptor = &out.descriptor;
   out.attributes.bInheritHandle = FALSE;
   return true;
+}
+
+// Forces an existing file's DACL to exactly the owner-only DACL built above.
+// PROTECTED_DACL_SECURITY_INFORMATION also stops further inheritance. This
+// is the fail-closed tightening the POSIX sinks perform with fchmod(0600):
+// a pre-existing ring file with a looser DACL is made owner-only before any
+// truncation, mapping, publication or scrub, and a file that cannot be
+// tightened is refused outright rather than mapped shared.
+[[nodiscard]] auto enforce_owner_only_dacl(HANDLE file,
+                                            const OwnerOnlyFileSecurity& security) -> bool {
+  return ::SetSecurityInfo(
+             file, SE_FILE_OBJECT,
+             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
+             nullptr, reinterpret_cast<PACL>(const_cast<unsigned char*>(
+                         security.acl_buffer.data())),
+             nullptr) == ERROR_SUCCESS;
 }
 
 [[nodiscard]] auto file_owner_is_current_user(HANDLE file) -> bool {
@@ -191,15 +235,19 @@ struct MfCameraSink::Impl {
     const std::size_t ring_bytes = frame_ring_bytes();
     // DELETE is requested up front: the by-handle POSIX delete in close_shm
     // needs it, and GENERIC_READ | GENERIC_WRITE alone does not include it.
-    // The creation names this process's user as the file's owner so the
-    // strict owner check below accepts the file this sink itself creates
-    // even under an elevated token, whose default owner is the
+    // WRITE_DAC is requested up front with it: the fail-closed DACL
+    // tightening below needs it, and the owner holds that right implicitly
+    // even on a file whose DACL grants nothing, so an owner-open never fails
+    // on it. The creation names this process's user as the file's owner and
+    // grants only that user full access (see build_owner_only_file_security)
+    // so the strict owner check below accepts the file this sink itself
+    // creates even under an elevated token, whose default owner is the
     // Administrators group.
-    OwnerAtCreation owner_at_creation;
-    const bool owner_named = build_owner_at_creation(owner_at_creation);
+    OwnerOnlyFileSecurity owner_at_creation;
+    const bool owner_named = build_owner_only_file_security(owner_at_creation);
     shm_file = ::CreateFileW(
         resolved_shm_path.c_str(),
-        GENERIC_READ | GENERIC_WRITE | DELETE,
+        GENERIC_READ | GENERIC_WRITE | DELETE | WRITE_DAC,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         owner_named ? &owner_at_creation.attributes : nullptr,
         OPEN_ALWAYS,
@@ -251,6 +299,20 @@ struct MfCameraSink::Impl {
     lock_range.Offset = 0x40000000;
     if (!::LockFileEx(shm_file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
                       0x10000, 0, &lock_range)) {
+      reject_shm_file();
+      return;
+    }
+
+    // Enforce the owner-only DACL on whatever this open landed on, fresh or
+    // pre-existing, before any truncation, mapping, publication or scrub --
+    // the fail-closed fchmod(0600) of the POSIX sinks. A pre-existing file
+    // with a looser DACL (an older build's ring, or a file whose parent
+    // directory propagated a wider inheritable ACE) is tightened to exactly
+    // this user here; a file that cannot be tightened is refused rather
+    // than mapped shared. The second-writer case never reaches this point:
+    // its open fails at the writer lock above, so the first writer's ring
+    // and its DACL are never touched by it.
+    if (owner_named && !enforce_owner_only_dacl(shm_file, owner_at_creation)) {
       reject_shm_file();
       return;
     }

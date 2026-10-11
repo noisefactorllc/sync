@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -265,6 +267,139 @@ SYNC_TEST(a_sink_picks_up_a_consumer_that_arrives_after_it_started) {
          std::to_wstring(id) + L".frames";
 }
 
+// This process's token-user SID, for the owner-only verifications below.
+[[nodiscard]] auto test_current_user_sid() -> std::vector<std::byte> {
+  std::vector<std::byte> out;
+  HANDLE token = nullptr;
+  if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return out;
+  struct TokenGuard {
+    HANDLE token;
+    ~TokenGuard() { ::CloseHandle(token); }
+  } const token_guard{token};
+  DWORD size = 0;
+  if (!::GetTokenInformation(token, TokenUser, nullptr, 0, &size) &&
+      ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    return out;
+  }
+  if (size == 0) return out;
+  out.assign(size, std::byte{});
+  if (!::GetTokenInformation(token, TokenUser, out.data(), size, &size)) out.clear();
+  return out;
+}
+
+// EqualSid takes PSID (void*), so the SID bytes the helpers below read from
+// owned vectors cross through this one const_cast.
+[[nodiscard]] auto sid_of(const std::vector<std::byte>& bytes) -> PSID {
+  return reinterpret_cast<PSID>(const_cast<std::byte*>(bytes.data()));
+}
+
+// Mirrors the pairing store's verify_owner_only_security: the file is owned
+// by this process's user, its DACL is protected from inheritance, and the
+// DACL holds exactly one access-allowed ACE granting exactly FILE_ALL_ACCESS
+// to exactly that user. On the Windows DACL there is no mode-bit analogue
+// below it to check separately.
+[[nodiscard]] auto shm_file_is_owner_only(const std::wstring& path) -> bool {
+  const HANDLE file =
+      ::CreateFileW(path.c_str(), READ_CONTROL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  struct FileGuard {
+    HANDLE file;
+    ~FileGuard() { ::CloseHandle(file); }
+  } const file_guard{file};
+
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (::GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS) {
+    return false;
+  }
+  struct DescriptorGuard {
+    PSECURITY_DESCRIPTOR descriptor;
+    ~DescriptorGuard() { ::LocalFree(descriptor); }
+  } const descriptor_guard{descriptor};
+
+  const std::vector<std::byte> user = test_current_user_sid();
+  if (user.empty() || owner == nullptr ||
+      !::EqualSid(owner, sid_of(user))) {
+    return false;
+  }
+
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (!::GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
+  if ((control & SE_DACL_PROTECTED) == 0) return false;
+  if (dacl == nullptr) return false;  // a null DACL means Everyone
+  ACL_SIZE_INFORMATION size_info{};
+  if (!::GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation)) {
+    return false;
+  }
+  if (size_info.AceCount != 1) return false;
+  LPVOID ace = nullptr;
+  if (!::GetAce(dacl, 0, &ace) || ace == nullptr) return false;
+  const auto* header = static_cast<const ACE_HEADER*>(ace);
+  if (header->AceType != ACCESS_ALLOWED_ACE_TYPE || header->AceFlags != 0) return false;
+  const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
+  if (allowed->Mask != FILE_ALL_ACCESS) return false;
+  const auto* const ace_sid_bytes =
+      reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
+  return ::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
+                    sid_of(user)) != FALSE;
+}
+
+// Detects a widened DACL: some access-allowed ACE grants a non-empty mask to
+// an account other than this process's user. This is what the deliberately
+// loosened fixture below -- and any pre-existing ring file the sink must
+// tighten -- looks like from the outside.
+[[nodiscard]] auto shm_file_is_widened(const std::wstring& path) -> bool {
+  const HANDLE file =
+      ::CreateFileW(path.c_str(), READ_CONTROL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  struct FileGuard {
+    HANDLE file;
+    ~FileGuard() { ::CloseHandle(file); }
+  } const file_guard{file};
+
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (::GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS) {
+    return false;
+  }
+  struct DescriptorGuard {
+    PSECURITY_DESCRIPTOR descriptor;
+    ~DescriptorGuard() { ::LocalFree(descriptor); }
+  } const descriptor_guard{descriptor};
+  const std::vector<std::byte> user = test_current_user_sid();
+  bool widened = false;
+  if (!user.empty() && owner != nullptr &&
+      ::EqualSid(owner, sid_of(user)) && dacl != nullptr) {
+    ACL_SIZE_INFORMATION size_info{};
+    if (::GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation)) {
+      for (DWORD i = 0; i < size_info.AceCount; i += 1) {
+        LPVOID ace = nullptr;
+        if (!::GetAce(dacl, i, &ace) || ace == nullptr) continue;
+        const auto* header = static_cast<const ACE_HEADER*>(ace);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+        const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
+        const auto* const ace_sid_bytes =
+            reinterpret_cast<const std::byte*>(ace) + allowed->SidStart;
+        if (!::EqualSid(reinterpret_cast<PSID>(const_cast<std::byte*>(ace_sid_bytes)),
+                        sid_of(user)) &&
+            allowed->Mask != 0) {
+          widened = true;  // an access grant to somebody other than this user
+        }
+      }
+    }
+  }
+  return widened;
+}
+
 struct ShmMapping {
   HANDLE file = INVALID_HANDLE_VALUE;
   HANDLE map = nullptr;
@@ -345,6 +480,127 @@ SYNC_TEST(a_sink_creates_and_maps_windows_shm_ring_file) {
     ::UnmapViewOfFile(pView);
     ::CloseHandle(hMap);
     ::CloseHandle(hFile);
+  }
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
+}
+
+// A ring file the sink creates must be owner-only from creation: this
+// process's user owns it, the DACL is protected from inheritance, and exactly
+// one access-allowed ACE grants that user full access -- the Windows
+// analogue of the 0600 ring files the macOS and POSIX sinks create. Red on
+// the parent revision: the file inherited the directory's DACL there, which
+// carries more than the one ACE and is not protected.
+SYNC_TEST(a_sink_creates_an_owner_only_shm_ring_file) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  {
+    MfCameraSink sink(opts);
+    SYNC_REQUIRE(sink.available());
+    SYNC_REQUIRE(shm_file_is_owner_only(shm_file));
+
+    // The tightened file is still the same user's ring: a consumer maps it,
+    // records demand, and reads a submitted frame back.
+    ShmMapping shm(shm_file);
+    SYNC_REQUIRE(shm.view != nullptr);
+    FrameRingReader reader(shm.span());
+    reader.record_demand(now_us());
+    SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x52), 6001)) == CameraSinkSubmit::Accepted);
+    SYNC_REQUIRE(reader.newest_sequence() == 1);
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    std::uint64_t pres = 0;
+    SYNC_REQUIRE(reader.read(out, kStride, pres));
+    SYNC_REQUIRE(pres == 6001);
+    SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x52);
+  }
+  SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
+}
+
+// A pre-existing ring file with a deliberately widened DACL (Everyone full
+// control beside this user) is adopted only by being tightened back to
+// owner-only before the ring is truncated, mapped or published -- the
+// Windows analogue of the POSIX sinks' fail-closed fchmod(0600) on a
+// pre-existing file. Red on the parent revision: the loose DACL survived
+// the sink's construction there unchanged.
+SYNC_TEST(a_sink_tightens_a_pre_existing_widened_shm_ring_file) {
+  const std::wstring shm_file = test_temp_path();
+  MfCameraSink::Options opts;
+  opts.section = kTestSection;
+  opts.create_virtual_camera = false;
+  opts.shm_path = shm_file;
+  opts.enable_shm = true;
+
+  {
+    // The widened fixture: this user full control and Everyone full control,
+    // via a two-ACE DACL applied at creation.
+    const std::vector<std::byte> user = test_current_user_sid();
+    SYNC_REQUIRE(!user.empty());
+    const auto* const user_info = reinterpret_cast<const TOKEN_USER*>(user.data());
+    SYNC_REQUIRE(user_info->User.Sid != nullptr);
+    SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
+    PSID everyone = nullptr;
+    SYNC_REQUIRE(::AllocateAndInitializeSid(&world, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                                            &everyone) != 0);
+    struct SidGuard {
+      PSID sid;
+      ~SidGuard() { ::FreeSid(sid); }
+    } const everyone_guard{everyone};
+
+    constexpr DWORD kMaximumSidBytes = 68;
+    std::array<unsigned char,
+               sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) + kMaximumSidBytes)>
+        acl_buffer{};
+    auto* const acl = reinterpret_cast<PACL>(acl_buffer.data());
+    SYNC_REQUIRE(::InitializeAcl(acl, static_cast<DWORD>(acl_buffer.size()), ACL_REVISION) != 0);
+    SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS,
+                                       user_info->User.Sid) != 0);
+    SYNC_REQUIRE(::AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, everyone) != 0);
+    SECURITY_DESCRIPTOR descriptor{};
+    SYNC_REQUIRE(::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) != 0);
+    // Name this process's user as the owner, exactly as the sink does: an
+    // elevated runner's default owner is the Administrators group, which
+    // would make the owner-side assertions below fail for reasons that have
+    // nothing to do with the DACL under test.
+    SYNC_REQUIRE(::SetSecurityDescriptorOwner(&descriptor, user_info->User.Sid, FALSE) != 0);
+    SYNC_REQUIRE(::SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) != 0);
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength = sizeof(attributes);
+    attributes.lpSecurityDescriptor = &descriptor;
+    attributes.bInheritHandle = FALSE;
+
+    const HANDLE loose =
+        ::CreateFileW(shm_file.c_str(), GENERIC_ALL,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &attributes,
+                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    SYNC_REQUIRE(loose != INVALID_HANDLE_VALUE);
+    ::CloseHandle(loose);
+
+    // Precondition: the fixture really is wider than owner-only.
+    SYNC_REQUIRE(shm_file_is_widened(shm_file));
+    SYNC_REQUIRE(!shm_file_is_owner_only(shm_file));
+  }
+
+  {
+    MfCameraSink sink(opts);
+    SYNC_REQUIRE(sink.available());
+    SYNC_REQUIRE(shm_file_is_owner_only(shm_file));
+    SYNC_REQUIRE(!shm_file_is_widened(shm_file));
+
+    ShmMapping shm(shm_file);
+    SYNC_REQUIRE(shm.view != nullptr);
+    FrameRingReader reader(shm.span());
+    reader.record_demand(now_us());
+    SYNC_REQUIRE(sink.submit(submission(canvas_filled(0x53), 6002)) == CameraSinkSubmit::Accepted);
+    SYNC_REQUIRE(reader.newest_sequence() == 1);
+    std::vector<std::byte> out(kFrameRingSlotBytes);
+    std::uint64_t pres = 0;
+    SYNC_REQUIRE(reader.read(out, kStride, pres));
+    SYNC_REQUIRE(pres == 6002);
+    SYNC_REQUIRE(static_cast<std::uint8_t>(out[0]) == 0x53);
   }
   SYNC_REQUIRE(::GetFileAttributesW(shm_file.c_str()) == INVALID_FILE_ATTRIBUTES);
 }
