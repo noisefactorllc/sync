@@ -13,7 +13,9 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -306,23 +308,110 @@ SYNC_TEST(a_section_others_can_read_is_refused) {
   SYNC_REQUIRE(!RenderRingSection::open(path, error).has_value());
 }
 
-SYNC_TEST(creating_over_a_stale_section_replaces_it) {
+SYNC_TEST(creating_over_a_stale_ring_takes_the_name) {
+  // A crashed writer's leftover: a regular 0600 file this user owns with no
+  // live lock on it. The new writer must replace it, not adopt it.
   const std::string path = temp_ring_path("stale");
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  SYNC_REQUIRE(::ftruncate(fd, static_cast<off_t>(*render_ring_bytes(kSmall))) == 0);
+  // A byte of stale ring content: adopting (instead of replacing) would keep it.
+  std::byte stale_byte{0x5A};
+  SYNC_REQUIRE(::pwrite(fd, &stale_byte, 1, 0) == 1);
+  SYNC_REQUIRE(::close(fd) == 0);
+
   std::string error;
-  auto first = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
-  SYNC_REQUIRE(first.has_value());
-  RenderRingWriter old_writer(first->bytes(), kSmall, 1);
-  SYNC_REQUIRE(old_writer.write(filled(kSmall, 1), kSmall.width * 4, 1));
-  auto second = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
-  SYNC_REQUIRE(second.has_value());
-  auto opened = RenderRingSection::open(path, error);
-  SYNC_REQUIRE(opened.has_value());
-  // The new section is fresh: no magic until its own writer stamps it.
-  SYNC_REQUIRE(!RenderRingReader(opened->bytes()).valid());
-  // The stale owner going away must not take the new writer's name with it.
-  first.reset();
+  auto fresh = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  SYNC_REQUIRE(fresh.has_value());
   struct stat st{};
   SYNC_REQUIRE(::stat(path.c_str(), &st) == 0);
+  SYNC_REQUIRE((st.st_mode & 0777) == 0600);
+  // Replaced, not adopted: the stale ring's content (byte 0x5A at offset 0)
+  // must not survive the takeover. (The inode number is not a discriminator:
+  // tmpfs immediately reuses freed inode numbers.)
+  SYNC_REQUIRE(fresh->bytes()[0] == std::byte{0});
+  SYNC_REQUIRE(fresh->bytes()[0] != stale_byte);
+  // The fresh ring is zeroed: no magic until its own writer stamps it.
+  SYNC_REQUIRE(!RenderRingReader(fresh->bytes()).valid());
+  fresh.reset();
+  SYNC_REQUIRE(::stat(path.c_str(), &st) != 0);
+}
+
+SYNC_TEST(a_live_writers_ring_is_never_replaced) {
+  const std::string path = temp_ring_path("live");
+  std::string error;
+  auto live = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  SYNC_REQUIRE(live.has_value());
+  RenderRingWriter writer(live->bytes(), kSmall, 1);
+  SYNC_REQUIRE(writer.write(filled(kSmall, 1), kSmall.width * 4, 1));
+
+  // A second writer must refuse the name, not destroy the live ring.
+  std::string refusal;
+  auto second = RenderRingSection::create(path, *render_ring_bytes(kSmall), refusal);
+  SYNC_REQUIRE(!second.has_value());
+  SYNC_REQUIRE(refusal.find("live writer") != std::string::npos);
+
+  // The live ring is intact: its frame is still readable through a fresh open.
+  auto opened = RenderRingSection::open(path, error);
+  SYNC_REQUIRE(opened.has_value());
+  RenderRingReader reader(opened->bytes());
+  SYNC_REQUIRE(reader.valid());
+  RenderFrameLease lease = reader.acquire();
+  SYNC_REQUIRE(lease.held());
+  SYNC_REQUIRE(lease.info().frame == 1);
+  SYNC_REQUIRE(all_equal(lease.payload(), 1));
+
+  // Once the live writer goes away the name goes with it and a new writer
+  // can take over.
+  live.reset();
+  auto next = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  SYNC_REQUIRE(next.has_value());
+}
+
+SYNC_TEST(a_widened_ring_file_is_never_taken_over) {
+  // A file others can read is not this user's private ring; creating over it
+  // would unlink an object the writer never owned in that widened form.
+  const std::string path = temp_ring_path("widened");
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  // The widened mode is set explicitly: a restrictive umask (0077 in CI
+  // containers) would otherwise mask the 0644 down to a private file and the
+  // takeover would be legitimate.
+  SYNC_REQUIRE(::fchmod(fd, 0644) == 0);
+  SYNC_REQUIRE(::ftruncate(fd, static_cast<off_t>(*render_ring_bytes(kSmall))) == 0);
+  SYNC_REQUIRE(::close(fd) == 0);
+  std::string error;
+  auto created = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  SYNC_REQUIRE(!created.has_value());
+  SYNC_REQUIRE(error.find("not this user's private file") != std::string::npos);
+  struct stat st{};
+  SYNC_REQUIRE(::stat(path.c_str(), &st) == 0);  // untouched
+  SYNC_REQUIRE((st.st_mode & 0777) == 0644);
+}
+
+SYNC_TEST(a_symlinked_ring_name_is_never_taken) {
+  // A planted link must stop creation, not be unlinked-and-recreated, so the
+  // object it points at is never replaced through the name.
+  const std::string target = temp_ring_path("linktarget");
+  const std::string path = temp_ring_path("link");
+  const int fd = ::open(target.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  SYNC_REQUIRE(::close(fd) == 0);
+  SYNC_REQUIRE(::symlink(target.c_str(), path.c_str()) == 0);
+  std::string error;
+  auto created = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  SYNC_REQUIRE(!created.has_value());
+  SYNC_REQUIRE(error.find("not this user's private file") != std::string::npos);
+  // The link and its target are intact.
+  char buf[4096]{};
+  const ssize_t n = ::readlink(path.c_str(), buf, sizeof(buf) - 1);
+  SYNC_REQUIRE(n > 0);
+  buf[n] = '\0';
+  SYNC_REQUIRE(std::string(buf) == target);
+  struct stat st{};
+  SYNC_REQUIRE(::stat(target.c_str(), &st) == 0);
+  SYNC_REQUIRE(::lstat(path.c_str(), &st) == 0);
+  SYNC_REQUIRE(S_ISLNK(st.st_mode));
 }
 
 #else

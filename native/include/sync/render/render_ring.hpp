@@ -224,7 +224,11 @@ class RenderRingSection {
   auto operator=(RenderRingSection&& other) noexcept -> RenderRingSection&;
   ~RenderRingSection();
 
-  // Replaces any existing section at name with a fresh zeroed one of bytes.
+  // On POSIX, replaces any existing section at name with a fresh zeroed one of
+  // bytes, but only when the existing file proves stale: a regular file owned
+  // by this user, closed to everyone else, whose writer lock (flock) is free.
+  // A live writer's ring is never replaced. On Windows the section must not
+  // already exist.
   [[nodiscard]] static auto create(const std::string& name, std::size_t bytes,
                                    std::string& error) -> std::optional<RenderRingSection>;
   // Maps an existing section. On POSIX the file must be a regular file owned
@@ -250,6 +254,9 @@ class RenderRingSection {
   // section that has since taken the same name.
   std::uint64_t device_ = 0;
   std::uint64_t inode_ = 0;
+  // The writer lock (flock) on the ring file, held for the section's lifetime
+  // so a starting writer cannot take the name from a live one. -1 = not held.
+  int lock_fd_ = -1;
 #endif
 };
 

@@ -10,6 +10,7 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -341,7 +342,8 @@ RenderRingSection::RenderRingSection(RenderRingSection&& other) noexcept
 #else
       ,
       device_(std::exchange(other.device_, 0)),
-      inode_(std::exchange(other.inode_, 0))
+      inode_(std::exchange(other.inode_, 0)),
+      lock_fd_(std::exchange(other.lock_fd_, -1))
 #endif
 {
 }
@@ -358,6 +360,7 @@ auto RenderRingSection::operator=(RenderRingSection&& other) noexcept -> RenderR
 #else
     device_ = std::exchange(other.device_, 0);
     inode_ = std::exchange(other.inode_, 0);
+    lock_fd_ = std::exchange(other.lock_fd_, -1);
 #endif
   }
   return *this;
@@ -479,12 +482,47 @@ auto default_render_ring_name() -> std::string { return "SyncRender.frames"; }
 
 auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::string& error)
     -> std::optional<RenderRingSection> {
-  // A stale ring from a crashed writer is replaced, never adopted: its
-  // geometry and pid belong to a process that no longer exists. The new file
-  // is a new inode, so a reader still mapped to the old one keeps a coherent
-  // (if silent) view until it re-attaches.
-  if (::unlink(name.c_str()) != 0 && errno != ENOENT) {
-    error = "unlink failed: " + std::string(std::strerror(errno));
+  // A live writer owns this name; replacing its ring underneath it interleaves
+  // two writers in one ring, which the seqlock does not survive. The name may
+  // only be taken over when the existing file proves stale: a regular file
+  // owned by this user, closed to everyone else, whose writer lock is free.
+  // A crashed writer's exit releases the lock, so the lock is the liveness
+  // proof (the same ownership pattern the camera sinks use).
+  const int existing = ::open(name.c_str(), O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+  if (existing >= 0) {
+    struct stat st{};
+    if (::fstat(existing, &st) != 0) {
+      error = "fstat failed: " + std::string(std::strerror(errno));
+      ::close(existing);
+      return std::nullopt;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_uid != ::geteuid() || (st.st_mode & 077) != 0) {
+      ::close(existing);
+      error = "an existing object at this name is not this user's private file";
+      return std::nullopt;
+    }
+    if (::flock(existing, LOCK_EX | LOCK_NB) != 0) {
+      // A live writer holds the lock; the ring is not stale.
+      ::close(existing);
+      error = "a live writer owns this ring";
+      return std::nullopt;
+    }
+    // The lock is held, so no live writer exists. Unlink under the lock so a
+    // writer that races in cannot have taken the name in between.
+    if (::unlink(name.c_str()) != 0 && errno != ENOENT) {
+      const int saved = errno;
+      ::close(existing);
+      error = "unlink failed: " + std::string(std::strerror(saved));
+      return std::nullopt;
+    }
+    ::close(existing);
+  } else if (errno == ELOOP || errno == EISDIR) {
+    // Never unlink or create through a name we cannot trust: a planted link or
+    // directory stops creation instead of being replaced.
+    error = "an existing object at this name is not this user's private file";
+    return std::nullopt;
+  } else if (errno != ENOENT) {
+    error = "open failed: " + std::string(std::strerror(errno));
     return std::nullopt;
   }
   const int fd =
@@ -493,24 +531,31 @@ auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::
     error = "open failed: " + std::string(std::strerror(errno));
     return std::nullopt;
   }
+  // Hold the exclusive writer lock on the ring file for this section's
+  // lifetime, so a later create() sees this writer as live and refuses.
+  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    error = "a live writer owns this ring: " + std::string(std::strerror(errno));
+    ::close(fd);
+    return std::nullopt;
+  }
   if (::ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
     error = "ftruncate failed: " + std::string(std::strerror(errno));
-    ::close(fd);
     ::unlink(name.c_str());
+    ::close(fd);
     return std::nullopt;
   }
   struct stat st{};
   if (::fstat(fd, &st) != 0) {
     error = "fstat failed: " + std::string(std::strerror(errno));
-    ::close(fd);
     ::unlink(name.c_str());
+    ::close(fd);
     return std::nullopt;
   }
   void* view = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  ::close(fd);
   if (view == MAP_FAILED) {
     error = "mmap failed: " + std::string(std::strerror(errno));
-    ::unlink(name.c_str());
+    ::unlink(name.c_str());  // while the lock is still held on fd
+    ::close(fd);
     return std::nullopt;
   }
   RenderRingSection section;
@@ -520,6 +565,7 @@ auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::
   section.owner_ = true;
   section.device_ = static_cast<std::uint64_t>(st.st_dev);
   section.inode_ = static_cast<std::uint64_t>(st.st_ino);
+  section.lock_fd_ = fd;  // keeps the writer lock until reset()
   return section;
 }
 
@@ -576,7 +622,14 @@ void RenderRingSection::unlink() noexcept {
 
 void RenderRingSection::reset() noexcept {
   if (view_ != nullptr) ::munmap(view_, size_);
+  // unlink() runs while the writer lock is still held, so the name is never
+  // removed by an owner that lost it to a newer writer (dev/inode check) and
+  // never removed while this writer is provably live.
   if (owner_) unlink();
+  if (lock_fd_ >= 0) {
+    ::close(lock_fd_);
+    lock_fd_ = -1;
+  }
   view_ = nullptr;
   size_ = 0;
   owner_ = false;
