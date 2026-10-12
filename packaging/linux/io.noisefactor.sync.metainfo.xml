@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="generic">
+  <id>io.noisefactor.sync</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Noisedeck Sync</name>
+  <summary>Local video and audio bridge for Noisedeck</summary>
+  <description>
+    <p>Sync receives browser video frames and publishes them to native video outputs. It also connects native audio inputs to Noisedeck.</p>
+    <p>On Linux, Sync runs as a user service with no tray window. Start the service, then run syncctl pair in a terminal before connecting from Noisedeck.</p>
+  </description>
+  <developer id="io.noisefactor"><name>Noise Factor LLC</name></developer>
+  <url type="homepage">https://sync.noisedeck.app/</url>
+  <icon type="stock">noisedeck-sync</icon>
+  <categories><category>AudioVideo</category></categories>
+  <provides><binary>syncd</binary><binary>syncctl</binary></provides>
+</component>

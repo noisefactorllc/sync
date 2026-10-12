@@ -35,6 +35,7 @@ rm -rf "$stage"
 mkdir -p "$stage/DEBIAN" "$stage/usr/bin" \
   "$stage/usr/lib/systemd/user" "$stage/usr/lib/udev/rules.d" \
   "$stage/usr/share/noisedeck-sync" "$stage/usr/share/doc/noisedeck-sync" \
+  "$stage/usr/share/icons/hicolor/256x256/apps" "$stage/usr/share/metainfo" \
   "$stage/usr/lib/systemd/system" "$stage/usr/lib/tmpfiles.d" "$stage/usr/libexec" \
   "$package_dir"
 
@@ -59,6 +60,10 @@ install -m 0644 "$source_dir/packaging/linux/noisedeck-sync-camera.modules-load"
   "$stage/usr/share/noisedeck-sync/noisedeck-sync-camera.modules-load"
 install -m 0644 "$source_dir/LICENSE" \
   "$stage/usr/share/doc/noisedeck-sync/copyright"
+install -m 0644 "$source_dir/packaging/linux/noisedeck-sync.png" \
+  "$stage/usr/share/icons/hicolor/256x256/apps/noisedeck-sync.png"
+install -m 0644 "$source_dir/packaging/linux/io.noisefactor.sync.metainfo.xml" \
+  "$stage/usr/share/metainfo/io.noisefactor.sync.metainfo.xml"
 install -m 0644 "$source_dir/packaging/linux/Third-Party-Notices.txt" \
   "$stage/usr/share/doc/noisedeck-sync/Third-Party-Notices.txt"
 install -m 0755 "$source_dir/packaging/linux/postrm" "$stage/DEBIAN/postrm"

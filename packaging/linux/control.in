@@ -2,10 +2,13 @@ Package: noisedeck-sync
 Version: @VERSION@
 Architecture: @ARCHITECTURE@
 Maintainer: Noisefactor LLC <support@noisefactor.io>
+Homepage: https://sync.noisedeck.app/
 Section: video
 Priority: optional
 Depends: libssl3t64, libuv1t64, libasound2t64, libjack-jackd2-0, v4l2loopback-dkms, v4l2loopback-utils, python3, gpg, ca-certificates, apt, systemd
 Suggests: avahi-daemon, pipewire, wireplumber
-Description: Noisedeck browser-to-video bridge daemon
+Description: Noisedeck Sync user service for video and audio
  Sync receives authenticated browser frames and publishes them to native
- video ecosystems, including a v4l2loopback virtual camera on Linux.
+ video outputs, including a v4l2loopback virtual camera on Linux. It also
+ connects native audio inputs to Noisedeck. Run syncctl pair in a terminal
+ before connecting from Noisedeck.

@@ -255,15 +255,41 @@ See the provider table above for each runtime and license boundary.
 
 ### Ubuntu 24.04 daemon
 
-The supported Linux package is x86_64. The same `.deb` can be downloaded
-directly or indexed unchanged by a signed Noisefactor-hosted APT repository:
+The supported Linux package is for Ubuntu 24.04 x86_64. Install it from the
+[signed APT repository](https://sync.noisedeck.app/#download-linux), after
+checking the repository key fingerprint shown there. Opening a downloaded
+`.deb` directly in Ubuntu App Center can show an untrusted software warning.
+The repository guide gives the key and source setup commands; after adding
+that source, install and start the user service with:
 
 ```bash
-sudo apt install ./Sync-<version>-linux-amd64.deb
+sudo apt update
+sudo apt install noisedeck-sync
+systemctl --user enable --now noisedeck-sync.service
+syncctl status
+```
+
+Sync is a user daemon on Linux and has no tray window. If `syncctl status`
+reports that the control socket is absent immediately after starting the
+service, wait a moment and try again. Have Noisedeck's Sync dialog ready,
+then run `syncctl pair` in a terminal:
+
+```bash
+syncctl pair
+```
+
+Within 35 seconds, select **Connect
+Sync** or **Connect Sync audio** in Noisedeck. Check the website address in the
+terminal, type `y`, and press Enter within 30 seconds. The terminal prints
+`paired`. Run `syncctl pair` again for each new website address. If a request
+times out, wait 30 seconds before retrying.
+
+To enable the optional
+Sync Camera, run:
+
+```bash
 sudo syncctl camera setup --user "$USER"
 # Log out and back in if setup added the group.
-systemctl --user enable --now noisedeck-sync.service
-syncctl pair
 syncctl doctor
 ```
 
@@ -278,18 +304,27 @@ ExecStart=
 ExecStart=/usr/bin/syncd --camera-device /dev/video12
 ```
 
-Safe removal stops and disables the user service first, removes the package,
-then purges only setup files whose complete contents still match Sync's
+To uninstall, stop the user service and purge the package. Purge removes
+camera setup files only when their complete contents still match Sync's
 templates:
 
 ```bash
 systemctl --user disable --now noisedeck-sync.service
-sudo apt remove noisedeck-sync
 sudo apt purge noisedeck-sync
 ```
 
-Locally modified module configuration is retained and named on stderr. Removal
-does not unload a live module or remove the `noisedeck-sync` group.
+If you added the signed APT source, remove it and its scoped key too:
+
+```bash
+sudo rm -- /etc/apt/sources.list.d/noisedeck-sync.list /etc/apt/keyrings/noisedeck-sync.gpg
+sudo apt update
+```
+
+The [Ubuntu guide](https://sync.noisedeck.app/#download-linux) also explains
+optional pairing-data removal and safe cleanup of a camera rule left by older
+packages. Locally modified camera configuration is retained and named on
+stderr. Purge does not unload a live module or remove the `noisedeck-sync`
+group.
 
 ## Packaging the desktop previews
 

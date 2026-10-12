@@ -20,6 +20,7 @@ test("Linux package is a complete conservative amd64 daemon artifact",
   assert.match(fields, /^Architecture: amd64$/m);
   assert.match(fields, /^Section: video$/m);
   assert.match(fields, /^Priority: optional$/m);
+  assert.match(fields, /^Homepage: https:\/\/sync\.noisedeck\.app\/$/m);
   assert.match(fields, /^Depends: .*libssl3t64.*libuv1t64.*v4l2loopback-dkms.*v4l2loopback-utils/m);
   assert.match(fields, /^Suggests: .*avahi-daemon.*pipewire.*wireplumber/m);
 
@@ -35,6 +36,8 @@ test("Linux package is a complete conservative amd64 daemon artifact",
     "./usr/lib/udev/rules.d/70-noisedeck-sync-camera.rules",
     "./usr/share/noisedeck-sync/noisedeck-sync-camera.modprobe",
     "./usr/share/noisedeck-sync/noisedeck-sync-camera.modules-load",
+    "./usr/share/icons/hicolor/256x256/apps/noisedeck-sync.png",
+    "./usr/share/metainfo/io.noisefactor.sync.metainfo.xml",
     "./usr/share/doc/noisedeck-sync/copyright",
     "./usr/share/doc/noisedeck-sync/Third-Party-Notices.txt",
   ]) assert.match(contents, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -57,6 +60,15 @@ test("Linux package is a complete conservative amd64 daemon artifact",
     const rule = await readFile(path.join(
       extraction, "usr/lib/udev/rules.d/70-noisedeck-sync-camera.rules"), "utf8");
     assert.doesNotMatch(rule, /SYMLINK/);
+    const metainfo = await readFile(path.join(
+      extraction, "usr/share/metainfo/io.noisefactor.sync.metainfo.xml"), "utf8");
+    assert.match(metainfo, /<component type="generic">/);
+    assert.match(metainfo, /<icon type="stock">noisedeck-sync<\/icon>/);
+    const icon = await readFile(path.join(
+      extraction, "usr/share/icons/hicolor/256x256/apps/noisedeck-sync.png"));
+    assert.equal(icon.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+    assert.equal(icon.readUInt32BE(16), 256);
+    assert.equal(icon.readUInt32BE(20), 256);
   } finally {
     await rm(extraction, { recursive: true, force: true });
   }
