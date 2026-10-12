@@ -23,7 +23,10 @@ for (const modifiedRule of [false, true]) {
         const fullPath = path.join(directory, destination)
         fs.mkdirSync(path.dirname(fullPath), { recursive: true })
         fs.writeFileSync(fullPath, fs.readFileSync(path.join(linux, template)))
-        script = script.replaceAll(`/etc/${destination}`, fullPath)
+        const shellPath = process.platform === 'win32'
+          ? fullPath.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll('\\', '/')
+          : fullPath
+        script = script.replaceAll(`/etc/${destination}`, shellPath)
       }
       const udevRule = path.join(directory, managed[0][0])
       if (modifiedRule) fs.appendFileSync(udevRule, '# local change\n')
