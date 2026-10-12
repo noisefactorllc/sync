@@ -403,6 +403,7 @@ SYNC_TEST(a_directory_at_the_ring_name_is_never_taken) {
   struct stat st{};
   SYNC_REQUIRE(::lstat(path.c_str(), &st) == 0);
   SYNC_REQUIRE(S_ISDIR(st.st_mode));  // untouched
+  SYNC_REQUIRE(::rmdir(path.c_str()) == 0);  // leave no fixture behind
 }
 
 SYNC_TEST(a_stale_inode_lock_never_removes_a_replaced_live_ring) {
