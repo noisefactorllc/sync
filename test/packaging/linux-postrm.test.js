@@ -18,11 +18,14 @@ for (const modifiedRule of [false, true]) {
   test(`purge ${modifiedRule ? 'preserves a modified' : 'removes an unchanged'} camera rule`, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-postrm-'))
     try {
-      let script = fs.readFileSync(path.join(linux, 'postrm'), 'utf8')
+      // A Windows checkout materializes these files with CRLF line endings.
+      // Normalize both sides so the script's heredoc and the fixture bytes
+      // compare equal on every platform.
+      let script = fs.readFileSync(path.join(linux, 'postrm'), 'utf8').replaceAll('\r\n', '\n')
       for (const [destination, template] of managed) {
         const fullPath = path.join(directory, destination)
         fs.mkdirSync(path.dirname(fullPath), { recursive: true })
-        fs.writeFileSync(fullPath, fs.readFileSync(path.join(linux, template)))
+        fs.writeFileSync(fullPath, fs.readFileSync(path.join(linux, template)).toString('utf8').replaceAll('\r\n', '\n'))
         script = script.replaceAll(`/etc/${destination}`, destination)
       }
       const udevRule = path.join(directory, managed[0][0])
@@ -39,6 +42,7 @@ for (const modifiedRule of [false, true]) {
         assert.equal(fs.existsSync(path.join(directory, destination)), false, result.stderr)
       }
       if (modifiedRule) assert.match(result.stderr, /preserving modified .*70-noisedeck-sync-camera\.rules/)
+      assert.doesNotMatch(result.stderr, /preserving modified .*noisedeck-sync-camera\.conf/)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
