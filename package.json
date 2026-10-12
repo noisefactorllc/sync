@@ -21,7 +21,7 @@
     "test:integration:linux": "node --test --test-timeout=45000 test/integration/linux-daemon-control.test.js",
     "test:integration:update": "node --test --test-timeout=30000 test/integration/update-gate.test.js",
     "test:packaging": "node --test --test-timeout=30000 test/packaging/*.test.js",
-    "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js",
+    "test:packaging:linux": "node --test --test-timeout=30000 test/packaging/linux-package.test.js test/packaging/linux-postrm.test.js",
     "test:linux:containers": "scripts/test-linux-containers.sh",
     "test:acceptance:unit": "node --test --test-timeout=30000 test/acceptance/*.test.mjs",
     "test:acceptance:interop": "node test/acceptance/interoperability.mjs",

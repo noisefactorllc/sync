@@ -2,6 +2,16 @@
 set -eu
 
 if [ "${1:-}" = purge ]; then
+  udev_file=/etc/udev/rules.d/70-noisedeck-sync-camera.rules
+  if [ -f "$udev_file" ] && cmp -s "$udev_file" - <<'EOF'
+SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", ATTR{name}=="Sync Camera", GROUP="noisedeck-sync", MODE="0660"
+EOF
+  then
+    rm -f "$udev_file"
+  elif [ -e "$udev_file" ]; then
+    echo "noisedeck-sync: preserving modified $udev_file" >&2
+  fi
+
   modprobe_file=/etc/modprobe.d/noisedeck-sync-camera.conf
   if [ -f "$modprobe_file" ] && cmp -s "$modprobe_file" - <<'EOF'
 # Managed by Noisedeck Sync. Local edits make this file operator-owned.
