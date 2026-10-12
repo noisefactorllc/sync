@@ -21,6 +21,9 @@ namespace noisefactor::sync::render {
 namespace {
 
 constexpr int kAcquireAttempts = 8;
+// How many times create() re-opens the name when a competing writer replaced
+// it between the open of the old inode and the acquisition of its lock.
+constexpr int kTakeoverAttempts = 8;
 constexpr std::uint64_t kBytesPerPixel = 4;
 
 [[nodiscard]] constexpr auto pack_newest(std::uint64_t frame, std::uint32_t slot) noexcept
@@ -488,8 +491,29 @@ auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::
   // owned by this user, closed to everyone else, whose writer lock is free.
   // A crashed writer's exit releases the lock, so the lock is the liveness
   // proof (the same ownership pattern the camera sinks use).
-  const int existing = ::open(name.c_str(), O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-  if (existing >= 0) {
+  //
+  // The takeover is retried a bounded number of times: another writer can
+  // replace the name after this writer opened the old inode but before it
+  // acquires the old inode's lock, and unlinking by name then would remove
+  // the new live ring. The name is therefore unlinked only while this writer
+  // holds the lock of the very inode the name still resolves to.
+  bool name_free = false;
+  for (int attempt = 0; attempt < kTakeoverAttempts; ++attempt) {
+    const int existing = ::open(name.c_str(), O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    if (existing < 0) {
+      if (errno == ENOENT) {
+        name_free = true;
+        break;  // free name
+      }
+      if (errno == ELOOP || errno == EISDIR) {
+        // Never unlink or create through a name we cannot trust: a planted
+        // link or directory stops creation instead of being replaced.
+        error = "an existing object at this name is not this user's private file";
+        return std::nullopt;
+      }
+      error = "open failed: " + std::string(std::strerror(errno));
+      return std::nullopt;
+    }
     struct stat st{};
     if (::fstat(existing, &st) != 0) {
       error = "fstat failed: " + std::string(std::strerror(errno));
@@ -501,14 +525,42 @@ auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::
       error = "an existing object at this name is not this user's private file";
       return std::nullopt;
     }
+    // Snapshot the seam before invoking it: the hook may clear itself (the
+    // regression's hook is one-shot and must not observe or destroy the
+    // function object it is running inside).
+    if (const auto hook = render_ring_takeover_hook) hook(existing);
     if (::flock(existing, LOCK_EX | LOCK_NB) != 0) {
-      // A live writer holds the lock; the ring is not stale.
+      // A live writer holds the lock on the current name; the ring is not
+      // stale. (If the name moved while this fd was open, the re-check below
+      // handles that case instead.)
       ::close(existing);
       error = "a live writer owns this ring";
       return std::nullopt;
     }
-    // The lock is held, so no live writer exists. Unlink under the lock so a
-    // writer that races in cannot have taken the name in between.
+    // The lock is held, so no live writer exists for this inode. Re-verify
+    // the name still identifies it: a competing writer may have taken the
+    // name over (unlinking this inode's name and creating its own ring)
+    // after this fd was opened but before its lock was acquired. Only the
+    // inode this writer locks may be unlinked, never the successor's.
+    struct stat named{};
+    if (::lstat(name.c_str(), &named) != 0) {
+      const int saved = errno;
+      ::close(existing);  // releases the lock
+      if (saved == ENOENT) continue;  // the name is free now; create below
+      error = "lstat failed: " + std::string(std::strerror(saved));
+      return std::nullopt;
+    }
+    if (!S_ISREG(named.st_mode) ||
+        static_cast<std::uint64_t>(named.st_dev) != static_cast<std::uint64_t>(st.st_dev) ||
+        static_cast<std::uint64_t>(named.st_ino) != static_cast<std::uint64_t>(st.st_ino)) {
+      // The name belongs to a newer writer now (or a non-regular object was
+      // planted): release the stale inode's lock and take the name's current
+      // owner through the whole validation again.
+      ::close(existing);
+      continue;
+    }
+    // Unlink under the lock, holding the inode the name still resolves to,
+    // so a writer that races in cannot have taken the name in between.
     if (::unlink(name.c_str()) != 0 && errno != ENOENT) {
       const int saved = errno;
       ::close(existing);
@@ -516,13 +568,11 @@ auto RenderRingSection::create(const std::string& name, std::size_t bytes, std::
       return std::nullopt;
     }
     ::close(existing);
-  } else if (errno == ELOOP || errno == EISDIR) {
-    // Never unlink or create through a name we cannot trust: a planted link or
-    // directory stops creation instead of being replaced.
-    error = "an existing object at this name is not this user's private file";
-    return std::nullopt;
-  } else if (errno != ENOENT) {
-    error = "open failed: " + std::string(std::strerror(errno));
+    name_free = true;
+    break;  // name free for creation
+  }
+  if (!name_free) {
+    error = "ring takeover did not settle";
     return std::nullopt;
   }
   const int fd =

@@ -389,29 +389,67 @@ SYNC_TEST(a_widened_ring_file_is_never_taken_over) {
   SYNC_REQUIRE((st.st_mode & 0777) == 0644);
 }
 
-SYNC_TEST(a_symlinked_ring_name_is_never_taken) {
-  // A planted link must stop creation, not be unlinked-and-recreated, so the
-  // object it points at is never replaced through the name.
-  const std::string target = temp_ring_path("linktarget");
-  const std::string path = temp_ring_path("link");
-  const int fd = ::open(target.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
-  SYNC_REQUIRE(fd >= 0);
-  SYNC_REQUIRE(::close(fd) == 0);
-  SYNC_REQUIRE(::symlink(target.c_str(), path.c_str()) == 0);
+SYNC_TEST(a_directory_at_the_ring_name_is_never_taken) {
+  // A directory at the name must stop creation instead of being unlinked and
+  // replaced. (A symlink at the name is refused by the same non-traversing
+  // open, but creating a symlink as a fixture is against the repository's
+  // no-symlink rule, so the directory case carries the regression.)
+  const std::string path = temp_ring_path("dir");
+  SYNC_REQUIRE(::mkdir(path.c_str(), 0700) == 0);
   std::string error;
   auto created = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
   SYNC_REQUIRE(!created.has_value());
   SYNC_REQUIRE(error.find("not this user's private file") != std::string::npos);
-  // The link and its target are intact.
-  char buf[4096]{};
-  const ssize_t n = ::readlink(path.c_str(), buf, sizeof(buf) - 1);
-  SYNC_REQUIRE(n > 0);
-  buf[n] = '\0';
-  SYNC_REQUIRE(std::string(buf) == target);
   struct stat st{};
-  SYNC_REQUIRE(::stat(target.c_str(), &st) == 0);
   SYNC_REQUIRE(::lstat(path.c_str(), &st) == 0);
-  SYNC_REQUIRE(S_ISLNK(st.st_mode));
+  SYNC_REQUIRE(S_ISDIR(st.st_mode));  // untouched
+}
+
+SYNC_TEST(a_stale_inode_lock_never_removes_a_replaced_live_ring) {
+  // The concurrent-takeover race: the second writer opens the stale inode,
+  // and before it acquires that inode's (now free) lock, a first writer takes
+  // the name over with a fresh ring it locks. The second writer must then
+  // refuse the name — never unlink it — because the name no longer
+  // identifies the inode it locked. The takeover hook interleaves the first
+  // writer inside that exact window (after the open, before the flock).
+  const std::string path = temp_ring_path("race");
+  // A crashed writer's leftover the second writer will open.
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  SYNC_REQUIRE(fd >= 0);
+  SYNC_REQUIRE(::ftruncate(fd, static_cast<off_t>(*render_ring_bytes(kSmall))) == 0);
+  SYNC_REQUIRE(::close(fd) == 0);
+
+  std::string error;
+  std::optional<RenderRingSection> first;
+  render_ring_takeover_hook = [&](int) {
+    // This callback runs with the stale inode open and unlocked: the exact
+    // descheduling window. A competing writer takes the name over now; the
+    // stale inode's lock is free, so the takeover succeeds and the new ring
+    // is created, named and locked. One-shot: the inner create must not run
+    // the hook recursively.
+    render_ring_takeover_hook = nullptr;
+    first = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+    SYNC_REQUIRE(first.has_value());
+    RenderRingWriter writer(first->bytes(), kSmall, 1);
+    SYNC_REQUIRE(writer.write(filled(kSmall, 7), kSmall.width * 4, 1));
+  };
+  auto second = RenderRingSection::create(path, *render_ring_bytes(kSmall), error);
+  render_ring_takeover_hook = nullptr;
+
+  // The second writer refused the replaced name.
+  SYNC_REQUIRE(!second.has_value());
+  SYNC_REQUIRE(error.find("live writer") != std::string::npos);
+  // The first writer's live ring is intact and still attached to the name:
+  // its frame is readable through a fresh open, and the name was not taken
+  // from it (no unlink-and-replace happened).
+  auto opened = RenderRingSection::open(path, error);
+  SYNC_REQUIRE(opened.has_value());
+  RenderRingReader reader(opened->bytes());
+  SYNC_REQUIRE(reader.valid());
+  RenderFrameLease lease = reader.acquire();
+  SYNC_REQUIRE(lease.held());
+  SYNC_REQUIRE(lease.info().frame == 1);
+  SYNC_REQUIRE(all_equal(lease.payload(), 7));
 }
 
 #else

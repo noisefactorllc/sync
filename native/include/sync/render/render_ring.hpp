@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -262,5 +263,15 @@ class RenderRingSection {
 
 // The default section name for a helper instance.
 [[nodiscard]] auto default_render_ring_name() -> std::string;
+
+#if !defined(_WIN32)
+// Test seam, null in production: when non-null, invoked with the descriptor
+// of an already-opened existing ring file after it passes the ownership
+// validation and immediately before the takeover flock. This is the window
+// in which a competing writer can replace the name, so tests use it to
+// interleave that takeover deterministically and prove the caller re-verifies
+// the name still identifies the locked inode before unlinking it.
+inline std::function<void(int)> render_ring_takeover_hook = nullptr;
+#endif
 
 }  // namespace noisefactor::sync::render
