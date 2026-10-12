@@ -23,20 +23,20 @@ for (const modifiedRule of [false, true]) {
         const fullPath = path.join(directory, destination)
         fs.mkdirSync(path.dirname(fullPath), { recursive: true })
         fs.writeFileSync(fullPath, fs.readFileSync(path.join(linux, template)))
-        const shellPath = process.platform === 'win32'
-          ? fullPath.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll('\\', '/')
-          : fullPath
-        script = script.replaceAll(`/etc/${destination}`, shellPath)
+        script = script.replaceAll(`/etc/${destination}`, destination)
       }
       const udevRule = path.join(directory, managed[0][0])
       if (modifiedRule) fs.appendFileSync(udevRule, '# local change\n')
       const scriptPath = path.join(directory, 'postrm')
       fs.writeFileSync(scriptPath, script)
-      const result = spawnSync('sh', [scriptPath, 'purge'], { encoding: 'utf8' })
+      const result = spawnSync('sh', [scriptPath, 'purge'], {
+        cwd: directory,
+        encoding: 'utf8',
+      })
       assert.equal(result.status, 0, result.stderr)
-      assert.equal(fs.existsSync(udevRule), modifiedRule)
+      assert.equal(fs.existsSync(udevRule), modifiedRule, result.stderr)
       for (const [destination] of managed.slice(1)) {
-        assert.equal(fs.existsSync(path.join(directory, destination)), false)
+        assert.equal(fs.existsSync(path.join(directory, destination)), false, result.stderr)
       }
       if (modifiedRule) assert.match(result.stderr, /preserving modified .*70-noisedeck-sync-camera\.rules/)
     } finally {
