@@ -352,9 +352,13 @@ test('negative control: a short producer summary cannot shrink the delivery deno
   assert.ok(names.includes('delivery_fraction'), `delivery not failed: ${names.join(',')}`);
   const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
   assert.equal(fraction.measured.uniqueDelivered, 60);
-  assert.equal(fraction.measured.denominator, 60);
+  // The fraction is judged against the requested window (600 slots), never
+  // against the short summary's own count (60): 60 of 600 is 10%, not 100%.
+  assert.equal(fraction.measured.denominator, SLOTS);
   assert.equal(fraction.measured.requestedSlots, SLOTS);
   assert.equal(fraction.measured.scheduledShortfall, SLOTS - 60);
+  assert.ok(fraction.measured.fraction < 0.99, `fraction ${fraction.measured.fraction}`);
+  assert.equal(fraction.measured.fraction, Number((60 / SLOTS).toFixed(5)));
   assert.equal(verdictFor(video, null).qualified, false);
 });
 

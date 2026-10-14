@@ -398,28 +398,30 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
       if (lastSequence !== null && entry.sequence < lastSequence) reorderedPairs += 1;
       lastSequence = entry.sequence;
     }
-    const denominator = slotLedger.scheduledSlots;
-    const uniqueDelivered = deliveredSequences.size;
-    const fraction = denominator > 0 ? uniqueDelivered / denominator : 0;
-    // The fraction is judged against a denominator the requested window
-    // validates: while the summary schedules fewer slots than the window
-    // covers - or the window is absent, so no validation is possible - the
-    // fraction cannot pass, however complete the delivered sample is.
+    // The delivery fraction is measured against the requested window, not
+    // against the summary's own short count: a run that stops early judges
+    // its delivered sample against every slot the window requested (60 of
+    // 600 is 10%, never 60 of 60 = 100%). Only when the start record states
+    // no window does the denominator fall back to the scheduled count, and
+    // integrity has already failed that ledger as unvalidated trust.
     const requestedSlots = slotLedger.requestedSlots ?? null;
     const scheduledShortfall = slotLedger.scheduledShortfall ?? null;
     const denominatorValid = requestedSlots !== null && scheduledShortfall === 0;
+    const denominator = requestedSlots !== null ? requestedSlots : slotLedger.scheduledSlots;
+    const uniqueDelivered = deliveredSequences.size;
+    const fraction = denominator > 0 ? uniqueDelivered / denominator : 0;
     criteria.push(criterion(
       'delivery_fraction',
       fraction >= DELIVERY_FRACTION_MIN && unscheduledIdentities === 0 && denominatorValid ? 'pass' : 'fail',
-      `${uniqueDelivered} of ${denominator} scheduled slots delivered uniquely `
+      `${uniqueDelivered} of ${denominator} requested slots delivered uniquely `
         + `(${(fraction * 100).toFixed(3)}% vs the ${(DELIVERY_FRACTION_MIN * 100).toFixed(0)}% target)`
         + (unscheduledIdentities === 0
           ? ''
           : `; ${unscheduledIdentities} unscheduled identit${unscheduledIdentities === 1 ? 'y was' : 'ies were'} rejected from the numerator`)
         + (requestedSlots === null
-          ? '; the requested window is absent, so the denominator is unvalidated'
+          ? '; the requested window is absent, so the denominator is only the scheduled count and is unvalidated'
           : scheduledShortfall > 0
-            ? `; the scheduled count covers ${denominator} of the ${requestedSlots} slots the requested window schedules`
+            ? `; the producer scheduled only ${slotLedger.scheduledSlots} of the ${requestedSlots} requested slots`
             : ''),
       {
         uniqueDelivered,
