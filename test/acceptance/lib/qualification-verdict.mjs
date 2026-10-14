@@ -202,6 +202,20 @@ export function buildSlotLedger({ start, slots, summary }) {
   const missingSeqRecords = Math.max(0, expectedSeqCount - withinSchedule);
   const unscheduledSeqRecords = seqs.length - withinSchedule;
   const scheduledBySummary = scheduledCount !== null;
+  // The requested window (the start record's configured seconds and rate)
+  // bounds the summary itself: a run that stops early emits a short
+  // summary, and a verdict that trusts framesScheduled alone would judge a
+  // one-second sample of a ten-second window at a full delivery fraction.
+  // requestedSlots is the window's own slot count; scheduledShortfall is how
+  // many of those slots the scheduled count does not cover. An absent
+  // requested window leaves the summary unvalidated: requestedSlots is
+  // null and the integrity criterion reports it, never a silent pass.
+  const requestedSeconds = Number(start.seconds);
+  const requestedSlots = Number.isFinite(requestedSeconds) && requestedSeconds > 0
+    && Number.isFinite(fps) && fps > 0
+    ? Math.round(requestedSeconds * fps) : null;
+  const scheduledShortfall = requestedSlots !== null
+    ? Math.max(0, requestedSlots - expectedSeqCount) : null;
   const secondOf = (slot) => Number((slot.deadlineNs - t0Ns) / 1_000_000_000n);
   const maxSecond = maxSeq >= 0 ? secondOf(bySeq.get(maxSeq)) : -1;
   // A second is complete when the run covered its full extent: the
@@ -249,6 +263,8 @@ export function buildSlotLedger({ start, slots, summary }) {
     // scheduledBySummary so a fallback is visible, never a silent pass).
     scheduledSlots: expectedSeqCount,
     scheduledBySummary,
+    requestedSlots,
+    scheduledShortfall,
     receivedSlotRecords: seqs.length,
     unscheduledSeqRecords,
     submittedSlots,
@@ -303,6 +319,12 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     slotLedger.missingSeqRecords > 0 ? `${slotLedger.missingSeqRecords} slot record(s) missing from the ${slotLedger.scheduledSlots} scheduled` : null,
     slotLedger.unscheduledSeqRecords > 0 ? `${slotLedger.unscheduledSeqRecords} slot record(s) beyond the scheduled range` : null,
     slotLedger.scheduledBySummary === false ? 'no producer summary: the scheduled count is only the largest observed sequence, so trailing omissions cannot be seen' : null,
+    slotLedger.requestedSlots === null || slotLedger.requestedSlots === undefined
+      ? 'the producer start record does not state the requested window: the summary cannot be validated against it'
+      : null,
+    (slotLedger.scheduledShortfall ?? 0) > 0
+      ? `the producer summary schedules ${slotLedger.scheduledSlots} of the ${slotLedger.requestedSlots} slots the requested window covers: the delivery denominator cannot shrink below the requested window`
+      : null,
   ].filter(Boolean);
   criteria.push(criterion(
     'slot_ledger_integrity',
@@ -316,6 +338,8 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
       unscheduledSeqRecords: slotLedger.unscheduledSeqRecords,
       scheduledSlots: slotLedger.scheduledSlots,
       scheduledBySummary: slotLedger.scheduledBySummary,
+      requestedSlots: slotLedger.requestedSlots ?? null,
+      scheduledShortfall: slotLedger.scheduledShortfall ?? null,
     },
   ));
 
@@ -377,19 +401,33 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     const denominator = slotLedger.scheduledSlots;
     const uniqueDelivered = deliveredSequences.size;
     const fraction = denominator > 0 ? uniqueDelivered / denominator : 0;
+    // The fraction is judged against a denominator the requested window
+    // validates: while the summary schedules fewer slots than the window
+    // covers - or the window is absent, so no validation is possible - the
+    // fraction cannot pass, however complete the delivered sample is.
+    const requestedSlots = slotLedger.requestedSlots ?? null;
+    const scheduledShortfall = slotLedger.scheduledShortfall ?? null;
+    const denominatorValid = requestedSlots !== null && scheduledShortfall === 0;
     criteria.push(criterion(
       'delivery_fraction',
-      fraction >= DELIVERY_FRACTION_MIN && unscheduledIdentities === 0 ? 'pass' : 'fail',
+      fraction >= DELIVERY_FRACTION_MIN && unscheduledIdentities === 0 && denominatorValid ? 'pass' : 'fail',
       `${uniqueDelivered} of ${denominator} scheduled slots delivered uniquely `
         + `(${(fraction * 100).toFixed(3)}% vs the ${(DELIVERY_FRACTION_MIN * 100).toFixed(0)}% target)`
         + (unscheduledIdentities === 0
           ? ''
-          : `; ${unscheduledIdentities} unscheduled identit${unscheduledIdentities === 1 ? 'y was' : 'ies were'} rejected from the numerator`),
+          : `; ${unscheduledIdentities} unscheduled identit${unscheduledIdentities === 1 ? 'y was' : 'ies were'} rejected from the numerator`)
+        + (requestedSlots === null
+          ? '; the requested window is absent, so the denominator is unvalidated'
+          : scheduledShortfall > 0
+            ? `; the scheduled count covers ${denominator} of the ${requestedSlots} slots the requested window schedules`
+            : ''),
       {
         uniqueDelivered,
         denominator,
         fraction: Number(fraction.toFixed(5)),
         unscheduledIdentities,
+        requestedSlots,
+        scheduledShortfall,
       },
     ));
     criteria.push(criterion(

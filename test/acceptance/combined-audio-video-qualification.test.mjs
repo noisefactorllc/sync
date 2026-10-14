@@ -6,8 +6,10 @@
 // missed wall-clock production, a trailing slot-record omission, a
 // wrong-format packet mixed with valid ones, startup/tail audio
 // underproduction, and out-of-range final-pixel identities that must not
-// inflate the delivery numerator. A clean synthetic ledger produces no
-// failed
+// inflate the delivery numerator, a short producer summary that must not
+// shrink the delivery denominator below the requested window, and a
+// start record without the requested window, which leaves the summary
+// unvalidated. A clean synthetic ledger produces no failed
 // criterion, and the standing blockers (synthetic audio fixture,
 // unadopted jitter epsilon, no final-pixel ledger on the collector path)
 // keep the overall verdict NOT QUALIFIED - which is the honest state of
@@ -317,6 +319,57 @@ test('negative control: out-of-range identities cannot inflate the delivery nume
   assert.equal(fraction.measured.denominator, SLOTS);
   assert.equal(fraction.measured.unscheduledIdentities, 10);
   assert.ok(fraction.measured.fraction < 0.99);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
+test('negative control: a short producer summary cannot shrink the delivery denominator', () => {
+  // The run requests a 10 s window (the start record) but stops after one
+  // second: only the first 60 slot records exist and the summary schedules
+  // exactly those. A verdict that trusts framesScheduled judges 60 of 60
+  // delivered and passes; the denominator must stay bound to the
+  // requested window, and the shortfall must fail integrity and delivery.
+  const { lines } = producerLines();
+  const short = lines.slice(0, 1 + 60);
+  const summary = JSON.parse(lines[lines.length - 1]);
+  summary.framesSent = 60;
+  summary.framesSkipped = 0;
+  summary.framesScheduled = 60;
+  summary.accepted = 60;
+  summary.seconds = 1;
+  summary.stopReason = 'interrupted';
+  short.push(JSON.stringify(summary));
+  const ledger = buildSlotLedger(parseProducerRecords(short));
+  assert.equal(ledger.requestedSlots, SLOTS);
+  assert.equal(ledger.scheduledSlots, 60);
+  assert.equal(ledger.scheduledShortfall, SLOTS - 60);
+  const pixels = [];
+  for (let seq = 0; seq < 60; seq += 1) {
+    pixels.push({ sequence: seq, ok: true, arrivalMs: seq * (1000 / FPS) });
+  }
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: pixels, ranVideo: true });
+  const names = failedNames(video);
+  assert.ok(names.includes('slot_ledger_integrity'), `integrity not failed: ${names.join(',')}`);
+  assert.ok(names.includes('delivery_fraction'), `delivery not failed: ${names.join(',')}`);
+  const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
+  assert.equal(fraction.measured.uniqueDelivered, 60);
+  assert.equal(fraction.measured.denominator, 60);
+  assert.equal(fraction.measured.requestedSlots, SLOTS);
+  assert.equal(fraction.measured.scheduledShortfall, SLOTS - 60);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
+test('negative control: a producer start record without the requested window fails integrity', () => {
+  // Without start.seconds the summary cannot be validated against any
+  // requested window, so the scheduled count is unvalidated trust; the
+  // integrity criterion must report it, never silently pass it.
+  const { lines } = producerLines();
+  const start = JSON.parse(lines[0]);
+  delete start.seconds;
+  const rewritten = [JSON.stringify(start), ...lines.slice(1)];
+  const ledger = buildSlotLedger(parseProducerRecords(rewritten));
+  assert.equal(ledger.requestedSlots, null);
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: cleanFinalPixels(), ranVideo: true });
+  assert.ok(failedNames(video).includes('slot_ledger_integrity'));
   assert.equal(verdictFor(video, null).qualified, false);
 });
 
