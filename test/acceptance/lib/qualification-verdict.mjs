@@ -216,6 +216,11 @@ export function buildSlotLedger({ start, slots, summary }) {
     ? Math.round(requestedSeconds * fps) : null;
   const scheduledShortfall = requestedSlots !== null
     ? Math.max(0, requestedSlots - expectedSeqCount) : null;
+  // Over-schedule is the mirror defect: a summary that schedules more
+  // slots than the requested window covers can pad the delivery numerator
+  // with beyond-window identities, so it is reported beside the shortfall.
+  const scheduledExcess = requestedSlots !== null
+    ? Math.max(0, expectedSeqCount - requestedSlots) : null;
   const secondOf = (slot) => Number((slot.deadlineNs - t0Ns) / 1_000_000_000n);
   const maxSecond = maxSeq >= 0 ? secondOf(bySeq.get(maxSeq)) : -1;
   // A second is complete when the run covered its full extent: the
@@ -265,6 +270,7 @@ export function buildSlotLedger({ start, slots, summary }) {
     scheduledBySummary,
     requestedSlots,
     scheduledShortfall,
+    scheduledExcess,
     receivedSlotRecords: seqs.length,
     unscheduledSeqRecords,
     submittedSlots,
@@ -325,6 +331,9 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     (slotLedger.scheduledShortfall ?? 0) > 0
       ? `the producer summary schedules ${slotLedger.scheduledSlots} of the ${slotLedger.requestedSlots} slots the requested window covers: the delivery denominator cannot shrink below the requested window`
       : null,
+    (slotLedger.scheduledExcess ?? 0) > 0
+      ? `the producer summary schedules ${slotLedger.scheduledSlots} slots for a ${slotLedger.requestedSlots}-slot requested window: the delivery numerator cannot grow beyond the requested window`
+      : null,
   ].filter(Boolean);
   criteria.push(criterion(
     'slot_ledger_integrity',
@@ -340,6 +349,7 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
       scheduledBySummary: slotLedger.scheduledBySummary,
       requestedSlots: slotLedger.requestedSlots ?? null,
       scheduledShortfall: slotLedger.scheduledShortfall ?? null,
+      scheduledExcess: slotLedger.scheduledExcess ?? null,
     },
   ));
 
@@ -376,14 +386,19 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
     let tornFrames = 0;
     let reorderedPairs = 0;
     let lastSequence = null;
-    // An identity the schedule never issued is not delivery. Sequences
-    // outside [0, scheduledSlots) - or not integers at all - are counted
-    // as unscheduled identities and excluded from every delivery number,
-    // so they can neither inflate the numerator nor mask a
+    // An identity the schedule never issued is not delivery, and neither
+    // is one the requested window never asked for. The delivery window is
+    // the requested window when the start record states one, else the
+    // scheduled count (that fallback is unvalidated trust and integrity
+    // has already failed it). Sequences outside [0, deliveryWindow) - or
+    // not integers at all - are counted as unscheduled identities and
+    // excluded from every delivery number, so they can neither inflate
+    // the numerator against the requested denominator nor mask a
     // zero-delivery second.
     let unscheduledIdentities = 0;
+    const deliveryWindow = slotLedger.requestedSlots ?? slotLedger.scheduledSlots;
     const isScheduledIdentity = (sequence) => Number.isInteger(sequence)
-      && sequence >= 0 && sequence < slotLedger.scheduledSlots;
+      && sequence >= 0 && sequence < deliveryWindow;
     for (const entry of finalPixels) {
       if (entry.ok !== true) {
         tornFrames += 1;
@@ -422,7 +437,9 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
           ? '; the requested window is absent, so the denominator is only the scheduled count and is unvalidated'
           : scheduledShortfall > 0
             ? `; the producer scheduled only ${slotLedger.scheduledSlots} of the ${requestedSlots} requested slots`
-            : ''),
+            : (slotLedger.scheduledExcess ?? 0) > 0
+              ? `; the producer scheduled ${slotLedger.scheduledSlots} slots for a ${requestedSlots}-slot window, and identities at or above the window are rejected from the numerator`
+              : ''),
       {
         uniqueDelivered,
         denominator,
@@ -430,6 +447,7 @@ export function evaluateVideo({ slotLedger, finalPixels, queueAcceptance, ranVid
         unscheduledIdentities,
         requestedSlots,
         scheduledShortfall,
+        scheduledExcess: slotLedger.scheduledExcess ?? null,
       },
     ));
     criteria.push(criterion(

@@ -362,6 +362,44 @@ test('negative control: a short producer summary cannot shrink the delivery deno
   assert.equal(verdictFor(video, null).qualified, false);
 });
 
+test('negative control: an over-scheduled summary cannot inflate the delivery numerator', () => {
+  // The run requests a 10 s window (600 slots) but the producer schedules
+  // 700 slots and the receiver delivers 600 unique identities: 500 inside
+  // the requested window and 100 beyond it (sequences 600..699), while 100
+  // requested identities (500..599) are never delivered. A numerator
+  // bounded only by the scheduled count (700) scores this 600 of 600 and
+  // passes; the numerator must stay bounded by the requested window, and
+  // the over-schedule itself must fail slot-ledger integrity.
+  const { lines } = producerLines();
+  const start = JSON.parse(lines[0]);
+  const over = [JSON.stringify(start)];
+  for (let seq = 0; seq < SLOTS + 100; seq += 1) over.push(slotLine(seq));
+  over.push(JSON.stringify({
+    ...JSON.parse(lines[lines.length - 1]),
+    framesSent: SLOTS + 100, framesScheduled: SLOTS + 100, accepted: SLOTS + 100,
+  }));
+  const ledger = buildSlotLedger(parseProducerRecords(over));
+  assert.equal(ledger.requestedSlots, SLOTS);
+  assert.equal(ledger.scheduledSlots, SLOTS + 100);
+  const pixels = [];
+  for (let seq = 0; seq < 500; seq += 1) {
+    pixels.push({ sequence: seq, ok: true, arrivalMs: seq * (1000 / FPS) });
+  }
+  for (let seq = SLOTS; seq < SLOTS + 100; seq += 1) {
+    pixels.push({ sequence: seq, ok: true, arrivalMs: 8000 + (seq - SLOTS) * (1000 / FPS) });
+  }
+  const video = evaluateVideo({ slotLedger: ledger, finalPixels: pixels, ranVideo: true });
+  const names = failedNames(video);
+  assert.ok(names.includes('slot_ledger_integrity'), `integrity not failed: ${names.join(',')}`);
+  assert.ok(names.includes('delivery_fraction'), `delivery not failed: ${names.join(',')}`);
+  const fraction = video.criteria.find((item) => item.name === 'delivery_fraction');
+  assert.equal(fraction.measured.uniqueDelivered, 500);
+  assert.equal(fraction.measured.denominator, SLOTS);
+  assert.equal(fraction.measured.requestedSlots, SLOTS);
+  assert.ok(fraction.measured.fraction < 0.99, `fraction ${fraction.measured.fraction}`);
+  assert.equal(verdictFor(video, null).qualified, false);
+});
+
 test('negative control: a producer start record without the requested window fails integrity', () => {
   // Without start.seconds the summary cannot be validated against any
   // requested window, so the scheduled count is unvalidated trust; the
