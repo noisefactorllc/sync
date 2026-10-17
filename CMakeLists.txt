@@ -967,6 +967,22 @@ if(APPLE)
   )
   add_test(NAME sync_syphon_consumer_tests COMMAND sync_syphon_consumer_tests)
 
+  add_executable(sync_syphon_lifetime_tests
+    native/test/macos/syphon_lifetime_test.mm
+    native/test/test_main.cpp
+  )
+  target_compile_features(sync_syphon_lifetime_tests PRIVATE cxx_std_20)
+  set_target_properties(sync_syphon_lifetime_tests PROPERTIES OBJCXX_STANDARD 20)
+  target_compile_options(sync_syphon_lifetime_tests PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_syphon_lifetime_tests
+    PRIVATE sync_syphon_consumer ${FOUNDATION_FRAMEWORK} ${METAL_FRAMEWORK}
+  )
+  add_test(NAME sync_syphon_lifetime_tests COMMAND sync_syphon_lifetime_tests)
+  set_tests_properties(sync_syphon_lifetime_tests PROPERTIES TIMEOUT 30)
+
+
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
   target_link_libraries(sync_protocol PRIVATE ${ACCELERATE_FRAMEWORK})
 

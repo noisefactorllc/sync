@@ -1,11 +1,17 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <dispatch/dispatch.h>
 
 #include <sync/platform/syphon_consumer.hpp>
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <memory>
+
+#include "metal_tsan.hpp"
 #include <string>
 #include <string_view>
 
@@ -22,6 +28,57 @@
 
 namespace noisefactor::sync {
 namespace {
+
+void stop_server(id<SyncSyphonMetalServer> server) noexcept {
+  @autoreleasepool {
+    @try {
+      [server stop];
+    } @catch (NSException*) {
+    }
+  }
+}
+
+auto current_thread_token() noexcept -> std::uint64_t {
+  static std::atomic<std::uint64_t> next{1};
+  thread_local const std::uint64_t token = next.fetch_add(1, std::memory_order_relaxed);
+  return token;
+}
+
+struct RetirementStatus {
+  std::atomic<bool> complete{false};
+};
+
+struct ServerLifetime {
+  explicit ServerLifetime(id<SyncSyphonMetalServer> value)
+      : server(value), owner_thread(current_thread_token()),
+        retirement(std::make_shared<RetirementStatus>()) {}
+
+  ~ServerLifetime() {
+    id<SyncSyphonMetalServer> value = server;
+    auto status = retirement;
+    if (owner_thread == current_thread_token()) {
+      stop_server(value);
+      status->complete.store(true, std::memory_order_release);
+    } else {
+      // Metal completion handlers must return promptly. Retirement can wait on
+      // Syphon's messaging queue, so run it outside the completion thread.
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        stop_server(value);
+        status->complete.store(true, std::memory_order_release);
+      });
+    }
+  }
+
+  id<SyncSyphonMetalServer> __strong server;
+  std::uint64_t owner_thread;
+  std::shared_ptr<RetirementStatus> retirement;
+};
+
+struct FrameLease {
+  explicit FrameLease(std::shared_ptr<ServerLifetime> value) : lifetime(std::move(value)) {}
+  void complete() noexcept { lifetime.reset(); }
+  std::shared_ptr<ServerLifetime> lifetime;
+};
 
 constexpr std::size_t kMaximumSenderIdBytes = 128;
 constexpr std::size_t kMaximumSenderNameBytes = 64;
@@ -74,6 +131,8 @@ struct SyphonMetalConsumer::Impl {
     std::size_t name_length = 0;
     std::array<char, kMaximumSenderNameBytes> name{};
     id<SyncSyphonMetalServer> __strong server = nil;
+    std::shared_ptr<ServerLifetime> lifetime;
+    std::shared_ptr<RetirementStatus> retirement;
     id<MTLDevice> __weak device = nil;
     bool in_standby = false;
     std::chrono::steady_clock::time_point closed_at{};
@@ -259,20 +318,15 @@ struct SyphonMetalConsumer::Impl {
       return;
     }
     @autoreleasepool {
-      id<SyncSyphonMetalServer> server = entry.server;
       entry.occupied = false;
       entry.in_standby = false;
       entry.sender_id_length = 0;
       entry.name_length = 0;
       entry.server = nil;
       entry.device = nil;
-      if (server == nil) {
-        return;
-      }
-      @try {
-        [server stop];
-      } @catch (NSException*) {
-      }
+      // A queued frame owns a lease until Syphon's publication callback ends.
+      // Disposing an uncommitted buffer also releases its unused lease.
+      entry.lifetime.reset();
     }
   }
 };
@@ -342,7 +396,9 @@ auto SyphonMetalConsumer::open_sender(std::string_view sender_id,
 
   Impl::SenderEntry* entry = nullptr;
   for (Impl::SenderEntry& candidate : impl_->senders) {
-    if (!candidate.occupied && !candidate.in_standby) {
+    if (!candidate.occupied && !candidate.in_standby &&
+        (!candidate.retirement ||
+         candidate.retirement->complete.load(std::memory_order_acquire))) {
       entry = &candidate;
       break;
     }
@@ -361,6 +417,13 @@ auto SyphonMetalConsumer::open_sender(std::string_view sender_id,
       id<SyncSyphonMetalServer> server =
           [(id<SyncSyphonMetalServer>)allocated initWithName:exact_name device:device options:nil];
       if (server == nil) {
+        return false;
+      }
+      try {
+        entry->lifetime = std::make_shared<ServerLifetime>(server);
+        entry->retirement = entry->lifetime->retirement;
+      } catch (...) {
+        stop_server(server);
         return false;
       }
       entry->sender_id_length = sender_id.size();
@@ -419,10 +482,21 @@ auto SyphonMetalConsumer::encode_frame(std::string_view sender_id,
           command_buffer.status != MTLCommandBufferStatusNotEnqueued) {
         return false;
       }
+      std::shared_ptr<FrameLease> lease;
+      try {
+        lease = std::make_shared<FrameLease>(entry->lifetime);
+      } catch (...) {
+        return false;
+      }
       [entry->server publishFrameTexture:texture
                          onCommandBuffer:command_buffer
                              imageRegion:NSMakeRect(0, 0, metadata.width, metadata.height)
                                  flipped:NO];
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        detail::metal_handler_started((__bridge const void*)completed);
+        lease->complete();
+      }];
+      detail::metal_handler_added((__bridge const void*)command_buffer);
       return true;
     } @catch (NSException*) {
       return false;

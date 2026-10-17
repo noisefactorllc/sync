@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,10 +23,10 @@
 @property(nonatomic, copy) NSString* name;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) NSDictionary<NSString*, id>* options;
-@property(nonatomic) NSUInteger stopCount;
+@property(atomic) NSUInteger stopCount;
 @property(nonatomic) NSUInteger publishCount;
 @property(nonatomic, strong) id<MTLTexture> texture;
-@property(nonatomic, strong) id<MTLCommandBuffer> commandBuffer;
+@property(nonatomic, weak) id<MTLCommandBuffer> commandBuffer;
 @property(nonatomic) NSRect imageRegion;
 @property(nonatomic) BOOL flipped;
 @property(nonatomic) MTLCommandBufferStatus statusAtPublish;
@@ -59,6 +60,7 @@ bool fake_throw_next_stop = false;
 id<MTLSharedEvent> fake_signal_event = nil;
 std::uint64_t fake_signal_value = 0;
 NSUInteger fake_next_instance_number = 1;
+std::function<void(id<MTLCommandBuffer>)> fake_capture_buffer;
 
 void reset_fake() {
   [fake_observations() removeAllObjects];
@@ -70,6 +72,7 @@ void reset_fake() {
   fake_signal_event = nil;
   fake_signal_value = 0;
   fake_next_instance_number = 1;
+  fake_capture_buffer = {};
 }
 
 SyncSyphonFakeObservation* observation_named(NSString* name) {
@@ -133,6 +136,7 @@ SyncSyphonFakeObservation* observation_named(NSString* name) {
   _observation.publishCount += 1;
   _observation.texture = texture;
   _observation.commandBuffer = commandBuffer;
+  if (fake_capture_buffer) fake_capture_buffer(commandBuffer);
   _observation.imageRegion = region;
   _observation.flipped = flipped;
   _observation.statusAtPublish = commandBuffer.status;
@@ -149,7 +153,9 @@ SyncSyphonFakeObservation* observation_named(NSString* name) {
 
 - (void)stop {
   _observation.stopCount += 1;
-  [fake_stop_order() addObject:@(_observation.instanceNumber)];
+  @synchronized(fake_stop_order()) {
+    [fake_stop_order() addObject:@(_observation.instanceNumber)];
+  }
   if (fake_throw_next_stop) {
     fake_throw_next_stop = false;
     @throw [NSException exceptionWithName:@"SyncSyphonFakeStopException"
@@ -435,6 +441,7 @@ SYNC_TEST(syphon_sender_reused_during_recovery_grace_period_preserves_server_ins
 }
 
 SYNC_TEST(syphon_encode_forwards_exact_objects_full_region_and_no_flip_without_committing) {
+  @autoreleasepool {
   reset_fake();
   id<MTLDevice> device = test_device();
   SYNC_REQUIRE(device != nil);
@@ -454,6 +461,7 @@ SYNC_TEST(syphon_encode_forwards_exact_objects_full_region_and_no_flip_without_c
   SYNC_REQUIRE(observation.flipped == NO);
   SYNC_REQUIRE(observation.statusAtPublish == MTLCommandBufferStatusNotEnqueued);
   SYNC_REQUIRE(command_buffer.status == MTLCommandBufferStatusNotEnqueued);
+  }
 }
 
 SYNC_TEST(syphon_encodes_on_the_callers_buffer_and_never_commits_it) {
@@ -475,11 +483,12 @@ SYNC_TEST(syphon_encodes_on_the_callers_buffer_and_never_commits_it) {
   SYNC_REQUIRE(command_buffer.status == MTLCommandBufferStatusNotEnqueued);
   [command_buffer commit];
   SYNC_REQUIRE(wait_until([&] { return fake_signal_event.signaledValue == 17; }));
-  SYNC_REQUIRE(wait_until(
-      [&] { return command_buffer.status == MTLCommandBufferStatusCompleted; }));
+  [command_buffer waitUntilCompleted];
+  SYNC_REQUIRE(command_buffer.status == MTLCommandBufferStatusCompleted);
 }
 
 SYNC_TEST(syphon_rejects_invalid_frames_and_contains_publish_exceptions) {
+  @autoreleasepool {
   reset_fake();
   id<MTLDevice> device = test_device();
   SYNC_REQUIRE(device != nil);
@@ -527,6 +536,7 @@ SYNC_TEST(syphon_rejects_invalid_frames_and_contains_publish_exceptions) {
   SYNC_REQUIRE(consumer.encode_frame("sender", texture, recovered_buffer, metadata()));
   SYNC_REQUIRE(recovered_buffer.status == MTLCommandBufferStatusNotEnqueued);
   SYNC_REQUIRE(observation_named(@"Validation").publishCount == 2);
+  }
 }
 
 SYNC_TEST(syphon_consumer_integrates_with_the_real_metal_publisher_commit_boundary) {
@@ -537,8 +547,11 @@ SYNC_TEST(syphon_consumer_integrates_with_the_real_metal_publisher_commit_bounda
   SYNC_REQUIRE(publisher.available());
   SYNC_REQUIRE(publisher.open_sender("integrated", "Integrated"));
   auto frame = make_frame();
+  id<MTLCommandBuffer> __strong captured_buffer = nil;
+  fake_capture_buffer = [&](id<MTLCommandBuffer> buffer) { captured_buffer = buffer; };
   SYNC_REQUIRE(publisher.publish("integrated", frame.view) == PublishResult::Accepted);
 
+  fake_capture_buffer = {};
   SyncSyphonFakeObservation* observation = observation_named(@"Integrated");
   SYNC_REQUIRE(observation != nil);
   SYNC_REQUIRE(observation.publishCount == 1);
@@ -546,8 +559,8 @@ SYNC_TEST(syphon_consumer_integrates_with_the_real_metal_publisher_commit_bounda
   SYNC_REQUIRE(observation.commandBuffer.device == observation.device);
   SYNC_REQUIRE(observation.statusAtPublish == MTLCommandBufferStatusNotEnqueued);
   SYNC_REQUIRE(observation.flipped == NO);
-  SYNC_REQUIRE(wait_until(
-      [&] { return observation.commandBuffer.status == MTLCommandBufferStatusCompleted; }));
+  [captured_buffer waitUntilCompleted];
+  SYNC_REQUIRE(captured_buffer.status == MTLCommandBufferStatusCompleted);
 }
 
 }  // namespace
