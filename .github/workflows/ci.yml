@@ -2,7 +2,7 @@ name: CI
 
 # Every change to Sync is built and tested here before it can be released.
 # This repository is public and holds no deployment credential: releasing is
-# the Scaffold release harness's job, and it re-runs all of these gates against
+# the private release harness's job, and it re-runs all of these gates against
 # the exact commit it is asked to ship.
 on:
   push:

@@ -60,7 +60,7 @@ name: Camera end-to-end
 #   4. cmake/ctest and vcpkg on the runner account's PATH. Hosted images have
 #      them; a desktop does not.
 #
-# Host setup is recorded in Scaffold's runner host runbook.
+# Host setup is recorded in the private runner host runbook.
 
 on:
   push:
@@ -112,7 +112,7 @@ on:
 #
 # If a cancellation ever does strand it, the symptom is the desktop's own Sync
 # camera showing nothing, and the fix is one command -- see the troubleshooting
-# section of Scaffold's runner host runbook.
+# section of the private runner host runbook.
 concurrency:
   group: sync-camera-e2e
   cancel-in-progress: true

@@ -2,10 +2,10 @@ name: Request Sync preview release
 
 # Sync is public and holds no deployment credential. Building, signing,
 # notarizing, and publishing to downloads.noisefactor.io all happen in the
-# Scaffold release harness, which is the sole holder of the Developer ID
-# certificate, the Apple notarization credentials, and SCAFFOLD_SSH_KEY.
-# This workflow only asks that harness to release a specific commit, using an
-# EHSRE App token scoped to dispatching it.
+# private release harness, which is the sole holder of the Developer ID
+# certificate, the Apple notarization credentials, and the deploy key.
+# This workflow only asks that harness to release a specific commit, using a
+# GitHub App token scoped to dispatching it.
 #
 # It runs on CI completion rather than on push, so a commit can only be
 # proposed for release after every native, browser, and loopback gate has
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   request:
-    name: Ask Scaffold to release this commit
+    name: Request a release of this commit
     # Only a green CI run on main may propose a release.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
@@ -85,7 +85,21 @@ jobs:
             echo "No product paths changed; skipping the release request."
           fi
 
-      - name: Generate a Scaffold-scoped dispatch token
+      - name: Check the release dispatch configuration
+        if: steps.product-checks.outputs.release == 'true' && steps.scope.outputs.release == 'true'
+        env:
+          RELEASE_REPOSITORY: ${{ secrets.RELEASE_REPOSITORY }}
+          SYNC_PREVIEW_WORKFLOW: ${{ secrets.SYNC_PREVIEW_WORKFLOW }}
+        run: |
+          missing=""
+          [ -n "$RELEASE_REPOSITORY" ] || missing="$missing RELEASE_REPOSITORY"
+          [ -n "$SYNC_PREVIEW_WORKFLOW" ] || missing="$missing SYNC_PREVIEW_WORKFLOW"
+          if [ -n "$missing" ]; then
+            echo "::error::The release dispatch is not configured. Empty or unset secret(s):$missing"
+            exit 1
+          fi
+
+      - name: Generate a release-scoped dispatch token
         if: steps.product-checks.outputs.release == 'true' && steps.scope.outputs.release == 'true'
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -93,7 +107,7 @@ jobs:
           client-id: Iv23liy6T6BW0BXuZRzx
           private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
           owner: noisefactorllc
-          repositories: scaffold
+          repositories: ${{ secrets.RELEASE_REPOSITORY }}
 
       - name: Dispatch the release harness for this exact commit
         if: steps.product-checks.outputs.release == 'true' && steps.scope.outputs.release == 'true'
@@ -101,11 +115,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_REPOSITORY: ${{ secrets.RELEASE_REPOSITORY }}
+          SYNC_PREVIEW_WORKFLOW: ${{ secrets.SYNC_PREVIEW_WORKFLOW }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          gh workflow run build-sync-preview.yml \
-            --repo noisefactorllc/scaffold \
+          gh workflow run "$SYNC_PREVIEW_WORKFLOW" \
+            --repo "$GITHUB_REPOSITORY_OWNER/$RELEASE_REPOSITORY" \
             --ref main \
             -f sync_sha="$RELEASE_SHA"
           echo "Requested a signed Sync preview release of $RELEASE_SHA"

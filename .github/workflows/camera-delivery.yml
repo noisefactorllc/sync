@@ -17,7 +17,7 @@
 # from a new path opens-or-creates the key in place instead.
 #
 # Host requirements are the four in camera-e2e.yml; the same runner satisfies
-# them. Host setup is recorded in Scaffold's runner host runbook.
+# them. Host setup is recorded in the private runner host runbook.
 #
 # workflow_dispatch only -- never on push. A long delivery run monopolises the
 # one camera on the one machine, so it is a deliberate, dispatched measurement,
