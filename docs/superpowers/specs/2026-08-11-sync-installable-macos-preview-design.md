@@ -2,7 +2,7 @@
 
 **Status:** Approved for autonomous implementation and delivery on 2026-08-11
 
-**Repositories:** `noisefactorllc/sync`, `noisefactorllc/scaffold`, and the
+**Repositories:** `noisefactorllc/sync`, the private release system, and the
 Noisedeck preview documentation
 
 ## Goal
@@ -146,11 +146,11 @@ use a two-second total timeout.
 
 Sync receives CMake targets for the menu app and deterministic app-bundle/DMG
 packaging. Local unsigned packaging remains possible for tests. Release version
-uses `0.2.<scaffold workflow run number>`; CMake injects that exact value into
+uses `0.2.<release workflow run number>`; CMake injects that exact value into
 the health/status responses and `Info.plist` without changing wire protocol version 1
 or the independently versioned browser SDK.
 
-Scaffold receives a dedicated `build-sync-preview.yml` workflow rather than
+The release system receives a dedicated Sync preview workflow rather than
 adding Sync to the Electron three-platform matrix. The workflow:
 
 1. accepts an exact 40-character Sync commit on `main`;
@@ -177,15 +177,14 @@ repository.
 ## Public download delivery
 
 The existing subscriber download endpoint always creates a personalized ZIP,
-so Sync does not use `/downloads/*`. The desktop-downloads sidecar gains one
+so Sync does not use `/downloads/*`. The downloads service gains one
 allowlisted public installer endpoint:
 
 ```text
 /public-downloads/sync-mac-arm64.dmg
 ```
 
-It serves only the stable staged file
-`/installers/sync/Sync-arm64.dmg`, as a raw DMG, with an attachment filename,
+It serves only the stable staged Sync DMG, as a raw DMG, with an attachment filename,
 `nosniff`, HTTP byte-range support through `aiohttp.web.FileResponse`, and a
 five-minute public cache lifetime. Arbitrary paths and all existing licensed
 download behavior stay unchanged.

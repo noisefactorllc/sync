@@ -1,7 +1,7 @@
 # Sync review — 2026-09-05
 
 Reviewed the separate checkout from baseline `7ca2dae` on `main`. Repairs are
-contained in Sync; sibling Noisemaker, Noisedeck, and Scaffold sources were
+contained in Sync; sibling Noisemaker, Noisedeck, and release-system sources were
 consulted for interoperability and release behavior. The installed companion
 was left running. The initial review did not start a release or remote workflow.
 
@@ -163,7 +163,7 @@ this task. NDI normalization tests verify production copy bytes without loading
 the vendor runtime. The actual Noisedeck A → Sync Camera → Noisedeck B pixel
 path remains a separate acceptance requirement.
 
-A push to public `main` can request a preview release through Scaffold after
+A push to public `main` can request a preview release through the release system after
 green CI. The user subsequently authorized pushing after review feedback is
 addressed. The upstream protocol geometry-rotation change was integrated and
 verified before the push.

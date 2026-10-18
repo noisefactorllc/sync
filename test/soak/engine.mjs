@@ -93,7 +93,7 @@ export class ProtocolSoak {
     // capacity measurement of the daemon alone and the WRONG shape for a
     // co-load: run beside a browser sender at 1080p it starved that sender
     // from 60 to ~40 fps within 100 s on every gauntlet of 2026-09-07/08
-    // (macOS soak host bisect, scaffold handoff section 4b). With fps set, the loop
+    // (macOS soak host bisect). With fps set, the loop
     // sends at most one frame per 1000/fps ms and never bursts to catch up
     // after backpressure: a paced client that fell behind resumes at its
     // rate, it does not repay the deficit.

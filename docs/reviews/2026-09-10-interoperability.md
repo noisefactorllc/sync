@@ -13,7 +13,7 @@ Each origin still needs user approval.
 
 The examples include browser and Electron applications.
 The developer guide and protocol reference describe installation, permissions, frame ownership, limits, errors, and cleanup.
-The local Scaffold website copy describes the same integration path.
+The local website copy describes the same integration path.
 New feature prose uses the STE100 skill.
 
 ## SDK artifact

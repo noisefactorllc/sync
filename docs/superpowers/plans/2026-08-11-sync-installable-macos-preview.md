@@ -4,16 +4,16 @@
 
 **Goal:** Deliver a public, signed, notarized Apple Silicon `Sync.app` DMG from `downloads.noisefactor.io` that runs the existing Sync daemon as a managed menu-bar companion with bundled Syphon.
 
-**Architecture:** A small AppKit `LSUIElement` application supervises the existing `syncd` executable as an embedded child and consumes its loopback native status and JSON pairing-management interfaces. Sync owns deterministic unsigned app/DMG packaging; Scaffold owns signing credentials, notarization, public installer serving, atomic deployment, and downloads-page publication.
+**Architecture:** A small AppKit `LSUIElement` application supervises the existing `syncd` executable as an embedded child and consumes its loopback native status and JSON pairing-management interfaces. Sync owns deterministic unsigned app/DMG packaging; the private release system owns signing credentials, notarization, public installer serving, atomic deployment, and downloads-page publication.
 
 **Tech Stack:** C++20, Objective-C++/AppKit/Foundation/ServiceManagement, CMake, libuv, OpenSSL 3, Syphon/Metal, shell packaging, GitHub Actions, Python/aiohttp, Node.js page tooling.
 
 ## Global Constraints
 
 - Work on existing branches only; do not create a branch, worktree, or pull request.
-- Preserve unrelated dirty Scaffold files and stage only this plan's exact files.
+- Preserve unrelated dirty files in every repository and stage only this plan's exact files.
 - The public app supports Apple Silicon and requires macOS 13 or later.
-- Release versions are `0.2.<scaffold workflow run number>`; wire protocol remains version 1 and browser SDK remains independently versioned.
+- Release versions are `0.2.<release workflow run number>`; wire protocol remains version 1 and browser SDK remains independently versioned.
 - Build Syphon from official commit `71351d4b484cd2d1917867f7846a5cdca724552d` and include its complete redistribution notice.
 - The public URL is `/public-downloads/sync-mac-arm64.dmg`; existing `/downloads/*` licensing behavior must not change.
 - Never expose Apple, SSH, or GitHub App credentials to the public Sync repository.
@@ -282,162 +282,33 @@ git commit -m "build: package Sync as a macOS app"
 
 ### Task 5: Public allowlisted installer route
 
-**Repository:** `../scaffold`
-
-**Files:**
-- Modify: `apps/desktop-downloads/lib/installers.py`
-- Modify: `apps/desktop-downloads/server.py`
-- Modify: `apps/desktop-downloads/tests/test_server.py`
-- Modify: `apps/noisedeck-desktop/groundsquirrel.template.json`
-- Modify: `docs/runbook/standalone-builds.md`
+**Repository:** the private release system
 
 **Interfaces:**
-- Produces: `locate_public_installer("sync-mac-arm64.dmg")` mapping only to `/installers/sync/Sync-arm64.dmg`.
-- Produces: public `GET`/`HEAD /public-downloads/sync-mac-arm64.dmg` through `aiohttp.web.FileResponse`.
+- Produces: public `GET`/`HEAD /public-downloads/sync-mac-arm64.dmg`.
 - Preserves: authenticated personalized ZIP behavior for every `/downloads/*` route.
 
-- [ ] **Step 1: Write failing sidecar tests**
-
-Cover successful anonymous GET/HEAD, `Content-Disposition`, `application/x-apple-diskimage`, `nosniff`, five-minute cache control, byte range response, missing staged file, unknown filename, traversal input, and unchanged subscription enforcement on `/downloads/noisedeck-mac-arm64.zip`.
-
-- [ ] **Step 2: Run focused tests and confirm failure**
-
-Run: `pytest -q apps/desktop-downloads/tests/test_server.py`
-
-Expected: public route tests receive 404.
-
-- [ ] **Step 3: Implement the exact public mapping and handler**
-
-Use a separate immutable map and route. Do not reuse the personalized license builder. Apply the same trusted-proxy boundary as the existing backend, then return `web.FileResponse` with fixed headers.
-
-- [ ] **Step 4: Run the entire sidecar suite**
-
-Run: `pytest -q apps/desktop-downloads/tests`
-
-Expected: all existing and new tests pass.
-
-- [ ] **Step 5: Update the template and runbook**
-
-Add an explicit public override for `/public-downloads/*`, describe the stable Sync path, atomic staging, cache policy, and live verification commands.
-
-- [ ] **Step 6: Commit exact Scaffold files**
-
-```bash
-git add apps/desktop-downloads/lib/installers.py apps/desktop-downloads/server.py apps/desktop-downloads/tests/test_server.py apps/noisedeck-desktop/groundsquirrel.template.json docs/runbook/standalone-builds.md
-git commit -m "feat(downloads): serve the public Sync preview"
-```
+The implementation steps for this task belong to the private release system and are not recorded here.
 
 ### Task 6: Sync downloads card and release metadata updater
 
-**Repository:** `../scaffold`
-
-**Files:**
-- Modify: `apps/changelist-generator/products.yml`
-- Modify: `apps/noisedeck-desktop/content/index.html`
-- Modify: `apps/noisedeck-desktop/bin/update-downloads.mjs`
-- Modify: `apps/noisedeck-desktop/lib/update-downloads.mjs`
-- Modify: `apps/noisedeck-desktop/test/update-downloads.test.mjs`
+**Repository:** the private release system
 
 **Interfaces:**
-- Produces: optional `--version` argument updating only a matching `span.product-version[data-product]`.
-- Produces: final Sync card with `data-product="sync"` markers and public DMG URL.
-- Preserves: weekly Electron build plan because Sync has no `desktop` configuration.
+- Produces: final Sync card on the downloads page with the public DMG URL and the released preview version.
 
-- [ ] **Step 1: Write failing updater and registry tests**
-
-Assert that `version: "Preview 0.2.17"` updates only the Sync card, HTML escaping remains correct, a missing card is reported, and the products registry includes Sync without adding it to the desktop matrix.
-
-- [ ] **Step 2: Run the focused tests and confirm failure**
-
-Run:
-
-```bash
-node --test apps/noisedeck-desktop/test/update-downloads.test.mjs
-pytest -q apps/changelist-generator/tests/test_config.py apps/changelist-generator/tests/test_plan.py
-```
-
-Expected: version-marker tests fail and Sync is absent from the registry.
-
-- [ ] **Step 3: Extend the updater and add the card**
-
-Add optional version replacement without affecting existing callers. Add page copy explaining that paid apps remain account-gated while the MIT Sync preview is public. Add one Mac Apple Silicon CTA and Preview warning.
-
-- [ ] **Step 4: Run page, changelist, and markup checks**
-
-Run:
-
-```bash
-node --test apps/noisedeck-desktop/test/update-downloads.test.mjs
-pytest -q apps/changelist-generator/tests
-node apps/noisedeck-desktop/bin/update-downloads.mjs --help || true
-```
-
-Expected: tests pass and a fixture update leaves non-Sync cards byte-identical.
-
-- [ ] **Step 5: Commit exact Scaffold files**
-
-```bash
-git add apps/changelist-generator/products.yml apps/noisedeck-desktop/content/index.html apps/noisedeck-desktop/bin/update-downloads.mjs apps/noisedeck-desktop/lib/update-downloads.mjs apps/noisedeck-desktop/test/update-downloads.test.mjs
-git commit -m "feat(downloads): add the Sync preview card"
-```
+The implementation steps for this task belong to the private release system and are not recorded here.
 
 ### Task 7: Dedicated signed and notarized Sync release workflow
 
-**Repository:** `../scaffold`
-
-**Files:**
-- Create: `.github/workflows/build-sync-preview.yml`
-- Create: `scripts/verify-sync-preview-release.mjs`
-- Create: `scripts/verify-sync-preview-release.test.mjs`
-- Modify: `docs/runbook/deploy-pipelines.md`
-- Modify: `docs/runbook/standalone-builds.md`
+**Repository:** the private release system
 
 **Interfaces:**
 - Consumes: required `sync_sha` matching `^[0-9a-f]{40}$` and reachable from Sync `main`.
 - Produces: signed/notarized `Sync-0.2.<run>-arm64.dmg`, `Sync-arm64.dmg`, and `SHA256SUMS`.
-- Produces: atomic remote stage at `/home/deploy/desktop-installers/sync/Sync-arm64.dmg`.
-- Produces: downloads-page commit/deploy only after public artifact verification.
+- Produces: downloads-page update only after public artifact verification.
 
-- [ ] **Step 1: Write failing static workflow tests**
-
-Parse the YAML and assert exact SHA validation, ARM64 runner, pinned Syphon commit, existing certificate/notary secret names, hardened-runtime signing order, notarize/staple/Gatekeeper checks, atomic `.tmp` upload, remote checksum comparison, public HTTP checksum comparison, and delayed page update.
-
-- [ ] **Step 2: Run and confirm failure**
-
-Run: `node --test scripts/verify-sync-preview-release.test.mjs`
-
-Expected: workflow file missing.
-
-- [ ] **Step 3: Implement build and verification jobs**
-
-Use `macos-latest`, checkout exact Sync SHA, verify ancestry, build pinned Syphon with signing disabled, install runtime/build dependencies, run all Sync tests, package the app, import the certificate using the existing keychain commands, sign inside-out, build/sign/notarize/staple the DMG, mount it, verify the app, launch it, and require healthy bundled Syphon.
-
-- [ ] **Step 4: Implement atomic deploy and publication job**
-
-Download the notarized artifact on Ubuntu, compute SHA-256, SCP a temporary file, atomically rename it, compare remote SHA-256, download through the public route, compare again, then update the Sync card version/date. Commit only the page, rebase normally, push, dispatch `deploy-noisedeck-desktop.yml`, and verify the live page and link.
-
-- [ ] **Step 5: Run workflow static tests and repository CI checks**
-
-Run:
-
-```bash
-node --test scripts/verify-sync-preview-release.test.mjs
-ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-sync-preview.yml"); puts "yaml ok"'
-git diff --check
-```
-
-Expected: all pass.
-
-- [ ] **Step 6: Document operation and rollback**
-
-Document the exact dispatch command, required secrets, how to verify notarization and the live SHA, and rollback by atomically restoring the prior stable DMG and prior page commit. Do not delete retained artifacts.
-
-- [ ] **Step 7: Commit exact Scaffold files**
-
-```bash
-git add .github/workflows/build-sync-preview.yml scripts/verify-sync-preview-release.mjs scripts/verify-sync-preview-release.test.mjs docs/runbook/deploy-pipelines.md docs/runbook/standalone-builds.md
-git commit -m "build: add signed Sync preview releases"
-```
+The implementation steps for this task belong to the private release system and are not recorded here.
 
 ### Task 8: Noisedeck installation documentation
 
@@ -492,7 +363,7 @@ git commit -m "docs(sync): link the installable macOS preview"
 
 - [ ] **Step 1: Run final local verification**
 
-Run the full Sync native/browser/integration/package suites, full affected Scaffold sidecar/changelist/page/workflow tests, Noisedeck node suite/lint, and `git diff --check` in all three repositories. Record exact totals and any platform-limited skips.
+Run the full Sync native/browser/integration/package suites, the affected release-system tests, Noisedeck node suite/lint, and `git diff --check` in all three repositories. Record exact totals and any platform-limited skips.
 
 - [ ] **Step 2: Request a code review and address only validated findings**
 
@@ -500,21 +371,19 @@ Review product behavior, process ownership, token/origin leakage, public-route t
 
 - [ ] **Step 3: Fetch and verify fast-forward push safety**
 
-For each repository, fetch the remote and require `git rev-list --left-right --count HEAD...@{u}` to show no remote-only commits before pushing. Preserve all unrelated Scaffold WIP.
+For each repository, fetch the remote and require `git rev-list --left-right --count HEAD...@{u}` to show no remote-only commits before pushing. Preserve all unrelated work in progress.
 
-- [ ] **Step 4: Push Sync, Scaffold, and Noisedeck existing branches**
+- [ ] **Step 4: Push Sync, release-system, and Noisedeck existing branches**
 
 Use ordinary pushes only. Do not force-push or open pull requests.
 
 - [ ] **Step 5: Deploy the public sidecar route**
 
-Dispatch the existing desktop-downloads build/deploy workflow for the pushed Scaffold SHA. Verify the running image and `/up`; the new public URL may return 503 until the installer is staged but must not return an authentication redirect.
+Dispatch the existing downloads service deploy for the pushed release-system commit. Verify the running service and its health check; the new public URL may return 503 until the installer is staged but must not return an authentication redirect.
 
 - [ ] **Step 6: Dispatch the Sync preview release**
 
-```bash
-gh workflow run build-sync-preview.yml -R noisefactorllc/scaffold -f sync_sha=<40-char-sync-main-sha>
-```
+Dispatch the release system's Sync preview workflow with the 40-character Sync `main` SHA.
 
 Wait for completion. If signing, notarization, packaging smoke, checksum, or publication fails, diagnose and fix forward; do not publish the card manually.
 

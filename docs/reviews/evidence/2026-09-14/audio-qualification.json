@@ -500,7 +500,6 @@
       },
       "deploymentRun": {
         "runId": 34807555706,
-        "url": "https://github.com/noisefactorllc/noisedeck/actions/runs/34807555706",
         "statusAtRecord": "completed",
         "testJob": "success",
         "buildJob": "success",
@@ -512,7 +511,6 @@
       "productionPayloadProofRecorded": true,
       "promotionRun": {
         "runId": 34807765254,
-        "url": "https://github.com/noisefactorllc/scaffold/actions/runs/34807765254",
         "statusAtRecord": "completed",
         "browserTest": "success",
         "httpSmokeTest": "success",
@@ -534,7 +532,6 @@
       },
       "productionDeploymentRun": {
         "runId": 34807876356,
-        "url": "https://github.com/noisefactorllc/noisedeck/actions/runs/34807876356",
         "statusAtRecord": "completed",
         "conclusion": "success",
         "deploymentCommit": "2df3966f48ba6fbd931f9a41c262826c375db5ba"
@@ -838,7 +835,6 @@
     "releaseHarnessFixCommit": "5a3949061971a8324f2d4da1097f8c2c6ab14548",
     "currentInstallerRun": {
       "runId": 34805667558,
-      "url": "https://github.com/noisefactorllc/scaffold/actions/runs/34805667558",
       "statusAtRecord": "completed",
       "macos": {
         "candidateVersion": "0.2.68",
@@ -1012,8 +1008,7 @@
           "sources": {
             "sync": "1972af1ce3f0d14054f3693e250c668aff536884",
             "noisemaker": "e1feefa0a1188e70aae0169fdc1e7901cc8cc939",
-            "noisedeck": "539ee0892f575361195da69ca46abc2996488cd3",
-            "scaffold": "5a3949061971a8324f2d4da1097f8c2c6ab14548"
+            "noisedeck": "539ee0892f575361195da69ca46abc2996488cd3"
           },
           "dependencies": {
             "noisemaker": {
@@ -1028,8 +1023,7 @@
             "identity": "Developer ID Application: Noise Factor LLC (TX27BNWUG9)",
             "notarized": true,
             "stapled": true
-          },
-          "workflowRunUrl": "https://github.com/noisefactorllc/scaffold/actions/runs/34805667558"
+          }
         }
       },
       "remainingAtRecord": [],
@@ -1057,8 +1051,7 @@
           "sources": {
             "sync": "1972af1ce3f0d14054f3693e250c668aff536884",
             "noisemaker": "e1feefa0a1188e70aae0169fdc1e7901cc8cc939",
-            "noisedeck": "539ee0892f575361195da69ca46abc2996488cd3",
-            "scaffold": "5a3949061971a8324f2d4da1097f8c2c6ab14548"
+            "noisedeck": "539ee0892f575361195da69ca46abc2996488cd3"
           },
           "dependencies": {
             "noisemaker": {
@@ -1083,8 +1076,7 @@
             "signed": false,
             "notarized": false,
             "stapled": false
-          },
-          "workflowRunUrl": "https://github.com/noisefactorllc/scaffold/actions/runs/34805667558"
+          }
         }
       },
       "remainingNativePublicationGate": null,
@@ -1264,7 +1256,7 @@
         "Build, sign, notarize, and smoke",
         "Build and verify Ubuntu 24.04 package",
         "Build and package the Windows preview",
-        "Certify Ubuntu camera path on a disposable Linode",
+        "Certify Ubuntu camera path on a disposable cloud host",
         "Certify WebGL2 and WebGPU latency on physical Apple Silicon",
         "Publish artifact, card, and live proof"
       ]

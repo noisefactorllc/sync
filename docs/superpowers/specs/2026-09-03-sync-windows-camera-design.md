@@ -257,11 +257,11 @@ So branch 3 applies:
   `FrameServerMonitor`, and `mfsensorgroup.dll` 10.0.26100.9278 is
   registered with labels
   `[self-hosted, Windows, X64, sync-camera]`, mirroring the existing
-  `[self-hosted, macOS, ARM64, sync-performance]` job in Scaffold's
-  `build-sync-preview.yml`. `.github/workflows/camera-e2e.yml` drives it. Host
-  setup is in Scaffold's runner host runbook.
+  `[self-hosted, macOS, ARM64, sync-performance]` job in the release
+  system's Sync preview workflow. `.github/workflows/camera-e2e.yml` drives it.
+  Host setup is documented privately.
 
-Scaffold's `build-sync-preview.yml` builds Windows on `windows-2022`, which is
+The release system's Sync preview workflow builds Windows on `windows-2022`, which is
 build 20348 and below the floor. What §6.3 concludes applies there too.
 
 ### 6.4 What a camera host has to be — measured 2026-09-03
@@ -304,9 +304,9 @@ the ACL grant from constraint 3 along with it.
 ## 7. Packaging and documentation
 
 - `Sync.iss` ships `SyncCamera.dll` and adds the `--unregister-camera` step.
-- Scaffold's `build-sync-preview.yml` builds and packages the DLL.
-- `create-sync-windows-release-manifest.mjs` records it, and
-  `verify-sync-preview-release.mjs` asserts the widened shape. Both assert
+- The release system's Sync preview workflow builds and packages the DLL.
+- Its Windows release manifest records it, and its release verification
+  asserts the widened shape. Both assert
   manifest structure today and both must change together.
 - The README provider table gains a Windows row for Camera; the Known Issues
   list gains the Windows 10 exclusion and the declined-uninstall-prompt case.

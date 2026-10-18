@@ -123,9 +123,8 @@ export function verifyTonesPacket(buffer, { fixture = AUDIO_SOURCES.audio_32_ton
 
 // ---- producer JSONL --------------------------------------------------------
 
-// One record per JSONL line of the paced producer (scaffold
-// apps/sync-soak/lib/paced-producer.mjs). Nanosecond fields serialize as
-// decimal strings; they are restored as BigInt here.
+// One record per JSONL line of the paced producer. Nanosecond fields
+// serialize as decimal strings; they are restored as BigInt here.
 export function parseProducerRecords(lines) {
   let start = null;
   const slots = [];

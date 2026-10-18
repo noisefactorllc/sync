@@ -2760,7 +2760,7 @@ Register the Windows 11 test host as a self-hosted runner labelled `sync-camera`
     timeout-minutes: 30
 ```
 
-with the same steps, and document the machine in Scaffold's runner host runbook — it is the second self-hosted runner after the macOS performance runner.
+with the same steps, and document the machine privately — it is the second self-hosted runner after the macOS performance runner.
 
 - [ ] **Step 7: Commit**
 
@@ -2818,38 +2818,15 @@ git commit -m "build(camera): ship and unregister the camera source"
 
 ---
 
-### Task 16: Release harness (Scaffold repo)
+### Task 16: Release harness (private release system)
 
-Cross-repo: `~/platform/scaffold`, not the Sync tree.
-
-**Files:**
-- Modify: `.github/workflows/build-sync-preview.yml`, `scripts/create-sync-windows-release-manifest.mjs`, `scripts/verify-sync-preview-release.mjs`, `scripts/create-sync-release-manifest.test.mjs`, Scaffold's runner host runbook (only if Task 14 Step 6 applied)
+Cross-repo: the private release system, not the Sync tree.
 
 **Interfaces:**
 - Consumes: the packaged bundle
 - Produces: a release manifest recording the camera source
 
-- [ ] **Step 1: Note the runner floor**
-
-`build-windows` runs on `windows-2022` (build 20348), below the camera's 22000 floor. Building is unaffected — only running a virtual camera needs 22000 — so the build job stays as it is. Add a comment saying so, next to the existing `SPOUT_REVISION` comment block, so nobody later "fixes" it by bumping the runner.
-
-- [ ] **Step 2: Record the DLL in the manifest**
-
-In `create-sync-windows-release-manifest.mjs`, add a `cameraSourcePath` option hashed the same way `spoutLibraryPath` is, emitted as a `cameraSource` record. Update `verify-sync-preview-release.mjs` to require it, and add a case to `create-sync-release-manifest.test.mjs` asserting a manifest missing it is rejected.
-
-- [ ] **Step 3: Run the Scaffold tests**
-
-```bash
-cd ~/platform/scaffold && node --test scripts/create-sync-release-manifest.test.mjs scripts/verify-sync-preview-release.test.mjs
-```
-
-Expected: PASS.
-
-- [ ] **Step 4: Commit in the Scaffold repo**
-
-```bash
-git add -A && git commit -m "build(sync): record the Windows camera source in the release manifest"
-```
+The release build keeps `windows-2022` (build 20348): building is unaffected by the camera's 22000 floor, and only running a virtual camera needs 22000. The release manifest records `SyncCamera.dll` with the same hashing as the Spout library, and release verification rejects a manifest without it. The implementation steps belong to the private release system and are not recorded here.
 
 ---
 
