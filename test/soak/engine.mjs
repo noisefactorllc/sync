@@ -93,10 +93,14 @@ export class ProtocolSoak {
     // capacity measurement of the daemon alone and the WRONG shape for a
     // co-load: run beside a browser sender at 1080p it starved that sender
     // from 60 to ~40 fps within 100 s on every gauntlet of 2026-09-07/08
-    // (macOS soak host bisect). With fps set, the loop
-    // sends at most one frame per 1000/fps ms and never bursts to catch up
-    // after backpressure: a paced client that fell behind resumes at its
-    // rate, it does not repay the deficit.
+    // (macOS soak host bisect). With fps set, the loop offers exactly one
+    // frame per target slot of a monotonic schedule anchored at the first
+    // session open (slot k's deadline is origin + k*1000/fps ms) and never
+    // bursts to catch up after backpressure: a slot that expired more than
+    // a full interval ago is skipped and counted in slotsSkipped, never
+    // repaid, so cycles and stalls cannot shift the cadence and the summary
+    // carries the complete target-slot denominator (slotsPlanned) the
+    // offered fraction is measured against.
     if (!Number.isFinite(fps) || fps < 0) {
       throw new RangeError(`fps must be a non-negative number, got ${fps}`);
     }
@@ -167,7 +171,8 @@ export class ProtocolSoak {
     this.maxBuffered = 3 * Math.max(
       ...[this.baseGeometry, ...this.geometries].map((g) => this._frameFor(g).length));
     this.state = { sentFrames: 0, cycles: 0, accepted: 0, dropped: 0,
-                   sequence: 0, reconnects: 0, stderr: '' };
+                   sequence: 0, reconnects: 0, stderr: '',
+                   slotsPlanned: 0, slotsSkipped: 0 };
     this.stopped = false;
     this._port = null;
   }
@@ -318,10 +323,15 @@ export class ProtocolSoak {
     let lastLeaks = started;
     let lastGeometry = started;
     await this._openSession();
-    // The earliest instant the next frame may be sent when paced. Reset to
-    // "now" whenever a session is (re)opened so a fresh sender starts at the
-    // rate, not with a queued burst.
-    let nextFrameAt = Date.now();
+    // PACED RUNS KEEP ONE ABSOLUTE SLOT SCHEDULE for the whole run: slot k's
+    // deadline is slotOrigin + k*frameIntervalMs, anchored here at the first
+    // session open and never reset, so session cycles, reconnects and
+    // backpressure stalls cannot shift the cadence. A slot that expired more
+    // than a full interval ago is skipped and counted in slotsSkipped rather
+    // than sent late, so slotsPlanned stays a complete target-slot
+    // denominator (slotsPlanned === sentFrames + slotsSkipped) and the
+    // offered fraction is measurable. Unpaced runs leave the ledger at zero.
+    const slotOrigin = Date.now();
     while (!this.stopped && Date.now() - started < durationMs) {
       const now = Date.now();
       // Geometry changes on its own clock, independent of the session cycle,
@@ -340,7 +350,6 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = now;
-        nextFrameAt = Date.now();
       }
       const elapsed = Math.round((now - started) / 1000);
       if (elapsed > lastSample) {
@@ -357,6 +366,9 @@ export class ProtocolSoak {
           frames: this.state.sentFrames, accepted: this.state.accepted,
           dropped: this.state.dropped, cycles: this.state.cycles,
           reconnects: this.state.reconnects,
+          ...(this.frameIntervalMs > 0 ? {
+            slotsPlanned: this.state.slotsPlanned,
+            slotsSkipped: this.state.slotsSkipped } : {}),
           leaks: leaks && leaks.leaks,
         });
       }
@@ -371,7 +383,6 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = Date.now();
-        nextFrameAt = lastCycle;
         continue;
       }
       if (this.data.socket.writableLength > this.maxBuffered) {
@@ -379,14 +390,23 @@ export class ProtocolSoak {
         continue;
       }
       if (this.frameIntervalMs > 0) {
-        const wait = nextFrameAt - Date.now();
+        // Drain every slot that expired more than a full interval ago
+        // without sending it: no catch-up burst, and the loss is counted in
+        // the ledger rather than hidden in a shifted cadence. Only the
+        // still-current expired slot is sent below.
+        while (Date.now()
+            - (slotOrigin + this.state.slotsPlanned * this.frameIntervalMs)
+            >= this.frameIntervalMs) {
+          this.state.slotsPlanned += 1;
+          this.state.slotsSkipped += 1;
+        }
+        const deadline = slotOrigin + this.state.slotsPlanned * this.frameIntervalMs;
+        const wait = deadline - Date.now();
         if (wait > 0) {
           await sleep(wait);
           continue;
         }
-        // At most one frame per interval, measured from the later of the
-        // schedule and now: no catch-up burst after a stall.
-        nextFrameAt = Math.max(nextFrameAt, Date.now()) + this.frameIntervalMs;
+        this.state.slotsPlanned += 1;
       }
       this.state.sequence += 1;
       try {
@@ -404,7 +424,6 @@ export class ProtocolSoak {
         await this._closeSession();
         await this._openSession();
         lastCycle = Date.now();
-        nextFrameAt = lastCycle;
       }
     }
     await this._stats();

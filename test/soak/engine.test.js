@@ -511,3 +511,69 @@ test('fps rejects a negative or non-numeric rate up front', () => {
   assert.throws(() => new ProtocolSoak({ daemonPath: '', fps: Number.NaN }), RangeError);
   assert.throws(() => new ProtocolSoak({ daemonPath: '', fps: Number.POSITIVE_INFINITY }), RangeError);
 });
+
+// --- the slot ledger (SYNC-CR-008) ----------------------------------------
+//
+// "At most one frame per interval" pacing could not establish a 60 Hz
+// offered load: every session cycle, reconnect or backpressure pause shifted
+// the cadence later permanently, and no record said which slots were lost,
+// so a paced run reported an absolute send count with no denominator to
+// judge it against. The paced loop now keeps one absolute slot schedule —
+// slot k's deadline is origin + k*interval, anchored at the first session
+// open — skips (and counts) any slot that expired more than a full interval
+// ago, and reports slotsPlanned === slotsSent + slotsSkipped so the offered
+// fraction is measurable against the complete target-slot denominator.
+
+test('a paced run reports a complete slot ledger for its monotonic deadlines', async () => {
+  const soak = pacedSoak(200); // 5 ms slots
+  await soak.run(100);
+  assert.ok(Number.isInteger(soak.state.slotsPlanned),
+    'a paced run must record the planned-slot denominator');
+  assert.ok(soak.state.slotsPlanned >= 3,
+    `expected a handful of planned slots, got ${soak.state.slotsPlanned}`);
+  assert.ok(soak.state.slotsPlanned <= 24,
+    `expected at most ~20 planned slots, got ${soak.state.slotsPlanned}`);
+  assert.equal(soak.state.slotsPlanned, soak.state.sentFrames + soak.state.slotsSkipped,
+    'every planned slot is either sent or counted as skipped');
+});
+
+test('a stall is counted in the denominator and the cadence rejoins the schedule', async () => {
+  const soak = pacedSoak(50); // 20 ms slots
+  const sendTimes = [];
+  let stalled = false;
+  soak.data.sendBinary = async () => {
+    sendTimes.push(Date.now());
+    if (!stalled) {
+      stalled = true;
+      await new Promise((resolve) => setTimeout(resolve, 70)); // spans several slots
+    }
+  };
+  await soak.run(400);
+  assert.ok(soak.state.slotsSkipped >= 2,
+    `expected the stall to count skipped slots, got ${soak.state.slotsSkipped}`);
+  assert.equal(soak.state.slotsPlanned, soak.state.sentFrames + soak.state.slotsSkipped,
+    'the ledger stays complete across a stall');
+  assert.ok(sendTimes.length >= 4,
+    `the cadence must rejoin the schedule after the stall, got ${sendTimes.length} sends`);
+  // No catch-up burst: after the stall, consecutive sends stay on the slot
+  // cadence (at least a quarter of a slot apart), never back-to-back.
+  for (let index = 2; index < sendTimes.length; index += 1) {
+    assert.ok(sendTimes[index] - sendTimes[index - 1] >= 5,
+      `post-stall sends must respect the cadence, saw a ${sendTimes[index] - sendTimes[index - 1]} ms gap`);
+  }
+});
+
+test('an unpaced run reports no slot ledger', async () => {
+  const soak = pacedSoak(0);
+  let clockReads = 0;
+  const original = Date.now;
+  Date.now = () => Math.floor(clockReads++ / 16);
+  try {
+    await soak.run(50);
+  } finally {
+    Date.now = original;
+  }
+  assert.ok(soak.state.sentFrames > 100, `unpaced loop should send freely, got ${soak.state.sentFrames}`);
+  assert.equal(soak.state.slotsPlanned, 0, 'the unpaced stream has no target slots');
+  assert.equal(soak.state.slotsSkipped, 0);
+});

@@ -64,10 +64,13 @@ const soak = new ProtocolSoak({
   // canvas, so a rotation that changes source size changes its per-frame cost —
   // work a --test-receiver run never performs and therefore never measures.
   publisher: process.env.SYNC_SOAK_PUBLISHER || null,
-  // SYNC_SOAK_FPS=60 paces the client to at most that many frames per
-  // second. Unset or 0 it sends as fast as the daemon accepts, which is a
-  // capacity measurement of the daemon alone and, beside a browser sender,
-  // a co-load heavy enough to starve it (soak bisect, 2026-09-07).
+  // SYNC_SOAK_FPS=60 paces the client to one frame per target slot of a
+  // monotonic schedule, and every sample and the summary carry the complete
+  // slot ledger (slotsPlanned, slotsSkipped) the offered fraction is
+  // measured against. Unset or 0 it sends as fast as the daemon accepts,
+  // which is a capacity measurement of the daemon alone and, beside a
+  // browser sender, a co-load heavy enough to starve it (soak bisect,
+  // 2026-09-07).
   fps: Number(process.env.SYNC_SOAK_FPS || 0),
   geometries: parseGeometries(process.env.SYNC_SOAK_GEOMETRIES),
   geometryEveryMs: Number(process.env.SYNC_SOAK_GEOMETRY_EVERY || 0) * 1000,
