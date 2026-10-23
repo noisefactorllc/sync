@@ -1766,10 +1766,23 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     assert.equal(authPong.payload.toString("utf8"), "auth-ping");
     responsiveData.client.send(0x2, await readFile(FIXTURE));
     responsiveControl.client.sendJson({ type: "getStats", senderId: responsiveSender.id });
-    assert.equal((await withTimeout(
-      responsiveControl.client.nextJson("stats while authentication is held"),
-      "stats while authentication is held", 250,
-    )).accepted, 1);
+    // The frame write and the stats request travel on two different
+    // connections, so the daemon may answer stats before it counts the frame
+    // on a loaded runner. Each answer arriving within 250 ms is the
+    // responsiveness guarantee under test; the count follows within the
+    // bound rather than assuming cross-socket ordering.
+    const heldAuthStatsDeadline = Date.now() + TIMEOUT_MS;
+    let heldAuthStats;
+    do {
+      heldAuthStats = await withTimeout(
+        responsiveControl.client.nextJson("stats while authentication is held"),
+        "stats while authentication is held", 250,
+      );
+      if (heldAuthStats.accepted !== 1) {
+        responsiveControl.client.sendJson({ type: "getStats", senderId: responsiveSender.id });
+      }
+    } while (heldAuthStats.accepted !== 1 && Date.now() < heldAuthStatsDeadline);
+    assert.equal(heldAuthStats.accepted, 1);
     await releaseAuthority(daemon);
     assert.equal((await pendingAuthentication.client.nextJson("released authentication")).type,
                  "welcome");
@@ -1850,10 +1863,22 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     assert.equal(issuePong.opcode, 0xa);
     issueData.client.send(0x2, await readFile(FIXTURE));
     issueControl.client.sendJson({ type: "getStats", senderId: issueSender.id });
-    assert.equal((await withTimeout(
-      issueControl.client.nextJson("stats while issue is held"),
-      "stats while issue is held", 250,
-    )).accepted, 1);
+    // Same cross-connection ordering as the held-auth block above: each
+    // stats answer must arrive within 250 ms while the issue is held, and the
+    // accepted count must reach 1 within the bound. The sanitizer runner
+    // lost the ordering assumption as an accepted-0 answer.
+    const heldIssueStatsDeadline = Date.now() + TIMEOUT_MS;
+    let heldIssueStats;
+    do {
+      heldIssueStats = await withTimeout(
+        issueControl.client.nextJson("stats while issue is held"),
+        "stats while issue is held", 250,
+      );
+      if (heldIssueStats.accepted !== 1) {
+        issueControl.client.sendJson({ type: "getStats", senderId: issueSender.id });
+      }
+    } while (heldIssueStats.accepted !== 1 && Date.now() < heldIssueStatsDeadline);
+    assert.equal(heldIssueStats.accepted, 1);
     const heldIssueResponse = await finishPairingClient(
       pendingIssue.client, "held issue timeout",
     );

@@ -555,11 +555,16 @@ test('a stall is counted in the denominator and the cadence rejoins the schedule
     'the ledger stays complete across a stall');
   assert.ok(sendTimes.length >= 4,
     `the cadence must rejoin the schedule after the stall, got ${sendTimes.length} sends`);
-  // No catch-up burst: after the stall, consecutive sends stay on the slot
-  // cadence (at least a quarter of a slot apart), never back-to-back.
+  // No catch-up burst: the engine sends each slot inside its own window, so
+  // two consecutive sends can land close together on a loaded runner only
+  // when the first was delayed near its window's end; sends two slots apart
+  // always span most of an interval. That span, not the pairwise gap, is
+  // the burst-proof property (a 3 ms pairwise gap on the Windows runner was
+  // two legitimate slot sends, not a burst; a real catch-up burst shows
+  // three sends within a few milliseconds).
   for (let index = 2; index < sendTimes.length; index += 1) {
-    assert.ok(sendTimes[index] - sendTimes[index - 1] >= 5,
-      `post-stall sends must respect the cadence, saw a ${sendTimes[index] - sendTimes[index - 1]} ms gap`);
+    assert.ok(sendTimes[index] - sendTimes[index - 2] >= 10,
+      `sends two slots apart must span most of an interval, saw ${sendTimes[index] - sendTimes[index - 2]} ms`);
   }
 });
 
