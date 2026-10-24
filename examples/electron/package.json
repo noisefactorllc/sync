@@ -7,6 +7,6 @@
     "start": "electron main.mjs"
   },
   "devDependencies": {
-    "electron": "44.0.0"
+    "electron": "44.9.1"
   }
 }
