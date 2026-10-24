@@ -38,6 +38,13 @@ const ENDPOINT_WINDOW = 5;
 // model is the wrong way round.
 const FRAMES_PER_TURN = 64;
 
+// Paced sends keep a bounded per-send ledger — { slot, deadline, t } for the
+// most recent sends — so pacing invariants can be proven slot-by-slot
+// instead of inferred from wall-clock gaps between sends. It lives on the
+// instance, not in state, so summary records stay lean; unpaced runs never
+// record (they have no slots to name).
+const SEND_LOG_LIMIT = 128;
+
 function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = sorted.length >> 1;
@@ -173,6 +180,7 @@ export class ProtocolSoak {
     this.state = { sentFrames: 0, cycles: 0, accepted: 0, dropped: 0,
                    sequence: 0, reconnects: 0, stderr: '',
                    slotsPlanned: 0, slotsSkipped: 0 };
+    this.sendLog = [];
     this.stopped = false;
     this._port = null;
   }
@@ -333,6 +341,7 @@ export class ProtocolSoak {
     // offered fraction is measurable. Unpaced runs leave the ledger at zero.
     const slotOrigin = Date.now();
     while (!this.stopped && Date.now() - started < durationMs) {
+      let sendSlot = null;
       const now = Date.now();
       // Geometry changes on its own clock, independent of the session cycle,
       // so a rotation cadence can be chosen without also changing how often
@@ -407,12 +416,22 @@ export class ProtocolSoak {
           continue;
         }
         this.state.slotsPlanned += 1;
+        sendSlot = this.state.slotsPlanned - 1;
       }
       this.state.sequence += 1;
+      const sentAt = Date.now();
       try {
         await this.data.sendBinary(
-          stampFrame(this.frame, this.state.sequence, BigInt(Date.now()) * 1000n));
+          stampFrame(this.frame, this.state.sequence, BigInt(sentAt) * 1000n));
         this.state.sentFrames += 1;
+        if (sendSlot !== null) {
+          this.sendLog.push({
+            slot: sendSlot,
+            deadline: slotOrigin + sendSlot * this.frameIntervalMs,
+            t: sentAt,
+          });
+          if (this.sendLog.length > SEND_LOG_LIMIT) this.sendLog.shift();
+        }
         // Small writes may complete entirely through nextTick callbacks.
         // Give timers and shutdown signals a turn even without backpressure.
         if (this.state.sentFrames % FRAMES_PER_TURN === 0) await yieldToEventLoop();

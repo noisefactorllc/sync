@@ -555,16 +555,34 @@ test('a stall is counted in the denominator and the cadence rejoins the schedule
     'the ledger stays complete across a stall');
   assert.ok(sendTimes.length >= 4,
     `the cadence must rejoin the schedule after the stall, got ${sendTimes.length} sends`);
-  // No catch-up burst: the engine sends each slot inside its own window, so
-  // two consecutive sends can land close together on a loaded runner only
-  // when the first was delayed near its window's end; sends two slots apart
-  // always span most of an interval. That span, not the pairwise gap, is
-  // the burst-proof property (a 3 ms pairwise gap on the Windows runner was
-  // two legitimate slot sends, not a burst; a real catch-up burst shows
-  // three sends within a few milliseconds).
+  // No catch-up burst. The two-apart span below stays as a coarse bound,
+  // and the slot-aware block restores the adjacent-send bound the timing
+  // repair traded away: the engine records each paced send's slot, its own
+  // deadline and its send time, so a close adjacent pair is checked instead
+  // of assumed. No send can precede its slot deadline and no slot is sent
+  // twice; any adjacent pair closer than half an interval must be the
+  // legitimate boundary case — the first send delayed near the end of its
+  // own window and still inside it, then the next slot's on-time send. A
+  // catch-up burst repaying an overdue slot lands past that window and
+  // fails here.
   for (let index = 2; index < sendTimes.length; index += 1) {
     assert.ok(sendTimes[index] - sendTimes[index - 2] >= 10,
       `sends two slots apart must span most of an interval, saw ${sendTimes[index] - sendTimes[index - 2]} ms`);
+  }
+  const intervalMs = 20;
+  assert.ok(Array.isArray(soak.sendLog) && soak.sendLog.length >= 4,
+    `expected the paced sends to be recorded with their slots, got ${soak.sendLog && soak.sendLog.length}`);
+  for (let index = 1; index < soak.sendLog.length; index += 1) {
+    const previous = soak.sendLog[index - 1];
+    const current = soak.sendLog[index];
+    assert.ok(current.slot > previous.slot,
+      `each send must occupy a fresh slot, saw slot ${previous.slot} then slot ${current.slot}`);
+    assert.ok(current.t >= current.deadline,
+      `a send must never precede its slot deadline, saw ${current.deadline - current.t} ms early`);
+    if (current.t - previous.t < intervalMs / 2) {
+      assert.ok(previous.t < previous.deadline + intervalMs,
+        `a close adjacent pair must be a window-end send followed by the next slot, not a repaid overdue slot (first send ${previous.t - previous.deadline} ms into a ${intervalMs} ms window)`);
+    }
   }
 });
 
