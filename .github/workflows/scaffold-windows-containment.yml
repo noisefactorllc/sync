@@ -91,7 +91,9 @@ jobs:
             sha256 = $(if ($modelRegular) { (Get-FileHash -LiteralPath $model.FullName -Algorithm SHA256).Hash } else { $null }) }
           @{ executable = $node; regular = $regular; version = $nodeRuntime.version; sha256 = (Get-FileHash -LiteralPath $node -Algorithm SHA256).Hash;
              platform = $nodeRuntime.platform; architecture = $nodeRuntime.arch; powershell_version = $PSVersionTable.PSVersion.ToString();
-             sandbox_api = $sandboxApi } |
+             sandbox_api = $sandboxApi;
+             os_build = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuildNumber);
+             os_revision = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name UBR) } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
           if ($nodeExit -ne 0 -or $nodeRuntime.platform -ne 'win32' -or $nodeRuntime.arch -ne 'x64' -or [version]$nodeRuntime.version -lt [version]'24.13.0') {
             throw 'The existing runner Node runtime is unsupported'
@@ -198,6 +200,7 @@ jobs:
               'apps/scaffold-cloud/runtime/windows-process.cs',
               'apps/scaffold-cloud/runtime/windows-process.ps1',
               'apps/scaffold-cloud/test/windows-process.test.mjs',
+              'apps/scaffold-cloud/test/windows-isolation.test.mjs',
               'apps/scaffold-cloud/test/fixtures/windows-process-child.mjs',
               'apps/scaffold-cloud/test/fixtures/windows-process-breakaway.ps1',
             ];
@@ -469,6 +472,23 @@ jobs:
           $text = Get-Content -LiteralPath $log -Raw
           if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 28\s*$') {
             throw 'The complete Windows containment inventory must run without skips'
+          }
+
+      - name: Qualify Windows file and network isolation without admitting native jobs
+        env:
+          SCAFFOLD_WINDOWS_ISOLATION_QUALIFICATION: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $env:TEMP = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'scratch'
+          $env:TMP = $env:TEMP
+          $test = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'apps/scaffold-cloud/test/windows-isolation.test.mjs'
+          $log = Join-Path $env:SCAFFOLD_WINDOWS_ROOT 'evidence/windows-isolation.tap'
+          & $env:SCAFFOLD_WINDOWS_NODE --test --test-reporter=tap $test 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows file and network isolation did not qualify' }
+          $text = Get-Content -LiteralPath $log -Raw
+          if ($text -notmatch '(?m)^# skipped 0\s*$' -or $text -notmatch '(?m)^# fail 0\s*$' -or $text -notmatch '(?m)^# tests 5\s*$') {
+            throw 'The complete isolation inventory must run without skips'
           }
 
       - name: Verify the camera host and workspace were preserved
