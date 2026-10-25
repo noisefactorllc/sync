@@ -64,7 +64,7 @@ Sync calls seven methods on the returned interface: `SetSenderName`,
 `SendImage`, `ReleaseSender`, `IsInitialized`, `CreateOpenGL`,
 `CloseOpenGL`, and `Release`. Every one of them is declared exactly once
 upstream -- see "Overloaded methods" below for why that matters. Because the real `SpoutLibrary.h` cannot be
-vendored into this repository (see the vendor boundary in `CLAUDE.md`),
+vendored into this repository (see the build-time boundary at the top of this document),
 `spout_publisher.cpp` declares a local mirror of the `SPOUTLIBRARY` vtable's
 *shape*: correctly-ordered placeholder slots for every intervening method it
 does not call, so the ones it does call land at the right offset.

@@ -19,7 +19,7 @@
 - **Ring payload:** always top-down BGRA, opaque alpha. Conversion happens in the media source, never in syncd.
 - **Elevation:** required only for the HKLM CLSID write. `MFCreateVirtualCamera` is called unelevated by syncd with `MFVirtualCameraAccess_CurrentUser`.
 - **CI gate:** the provider does not ship until its end-to-end path runs green in CI. Manual verification on one desk is not sufficient.
-- **No temporary artifacts.** `~/platform/CLAUDE.md` bans "for now" hacks. The capability probe in Task 2 is therefore a permanent CI job, not a throwaway workflow.
+- **No temporary artifacts.** The workspace agent instructions ban "for now" hacks. The capability probe in Task 2 is therefore a permanent CI job, not a throwaway workflow.
 - **Git:** commit in place on the current branch. No branches, no PRs, no worktrees, no force-push.
 - **`kMaximumProviders = 4`** and `cli::kMaximumPublishers = 4` are already at capacity with syphon/spout/ndi/camera. Do not add a fifth provider.
 
@@ -27,7 +27,7 @@
 
 ### Task 1: Toolchain and a green baseline
 
-Nothing can be verified without a compiler, and `~/platform/CLAUDE.md` bans shipping unverified code. Establish the baseline before touching any source.
+Nothing can be verified without a compiler, and the workspace agent instructions ban shipping unverified code. Establish the baseline before touching any source.
 
 **Files:**
 - Create: none
@@ -2833,7 +2833,7 @@ The release build keeps `windows-2022` (build 20348): building is unaffected by 
 ### Task 17: Documentation
 
 **Files:**
-- Modify: `README.md:78-88` (Sync repo), `~/platform/noisedeck/app/docs/Sync.md:7-12,37`
+- Modify: `README.md:78-88` (Sync repo), `app/docs/Sync.md:7-12,37` (Noisedeck repo)
 
 - [ ] **Step 1: Update the Sync README provider table**
 
@@ -2845,13 +2845,15 @@ Add: the camera is unavailable on Windows 10; and a declined elevation prompt at
 
 - [ ] **Step 3: Update Noisedeck's Sync.md**
 
-In `~/platform/noisedeck/app/docs/Sync.md`, the "Current availability" list says Windows provides "Spout and NDI output". Add the camera, with its Windows 11 requirement and the one-time enable step, and add it to the step 7 list of what receiving applications can select.
+In the Noisedeck repository's `app/docs/Sync.md`, the "Current availability" list says Windows provides "Spout and NDI output". Add the camera, with its Windows 11 requirement and the one-time enable step, and add it to the step 7 list of what receiving applications can select.
 
 - [ ] **Step 4: Commit both repos**
 
 ```bash
-cd ~/platform/sync && git add -A && git commit -m "docs: describe the Windows camera provider"
-cd ~/platform/noisedeck && git add -A && git commit -m "docs(sync): describe the Windows camera provider"
+# In the Sync checkout
+git add -A && git commit -m "docs: describe the Windows camera provider"
+# In the Noisedeck checkout
+git add -A && git commit -m "docs(sync): describe the Windows camera provider"
 ```
 
 ---
@@ -2863,7 +2865,8 @@ The user's stated bar. Not a substitute for the CI gate; the last check before d
 - [ ] **Step 1: Prepare Noisedeck**
 
 ```bash
-cd ~/platform/noisedeck && node scripts/fetch-noisemaker.js && npm install
+# In the Noisedeck checkout
+node scripts/fetch-noisemaker.js && npm install
 ```
 
 Noisemaker v0 is banned — the pin is the rolling `/1` channel. If the engine is missing, run the fetch script; never point anything at a local `0.8.0/` directory.
