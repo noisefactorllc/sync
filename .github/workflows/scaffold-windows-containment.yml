@@ -62,8 +62,36 @@ jobs:
           if (-not $regular) { throw 'The existing Node runtime must be a regular executable' }
           $nodeRuntime = & $node -p 'JSON.stringify({version:process.versions.node, platform:process.platform, arch:process.arch})' | ConvertFrom-Json
           $nodeExit = $LASTEXITCODE
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class SandboxApiInventory {
+            [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+            static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
+            static extern IntPtr GetProcAddress(IntPtr module, string name);
+            [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
+            public static bool Present(string entrypoint) {
+              IntPtr module = LoadLibraryExW("processmodel.dll", IntPtr.Zero, 0x800);
+              if (module == IntPtr.Zero) return false;
+              try { return GetProcAddress(module, entrypoint) != IntPtr.Zero; }
+              finally { FreeLibrary(module); }
+            }
+          }
+          '@
+          $model = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'System32/processmodel.dll') -ErrorAction SilentlyContinue
+          $modelRegular = $null -ne $model -and -not $model.PSIsContainer -and -not ($model.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          $exports = @{}
+          foreach ($entrypoint in @('Experimental_CreateProcessInSandbox', 'CreateProcessSecurityEnvironment',
+            'CloseProcessSecurityEnvironment', 'QueryProcessSecurityEnvironmentSupport', 'IsProcessSecurityEnvironmentVersionSupported')) {
+            $exports[$entrypoint] = [SandboxApiInventory]::Present($entrypoint)
+          }
+          $sandboxApi = @{ library = 'processmodel.dll'; regular = $modelRegular; qualified = $false; exports = $exports;
+            version = $(if ($modelRegular) { $model.VersionInfo.FileVersion } else { $null });
+            sha256 = $(if ($modelRegular) { (Get-FileHash -LiteralPath $model.FullName -Algorithm SHA256).Hash } else { $null }) }
           @{ executable = $node; regular = $regular; version = $nodeRuntime.version; sha256 = (Get-FileHash -LiteralPath $node -Algorithm SHA256).Hash;
-             platform = $nodeRuntime.platform; architecture = $nodeRuntime.arch; powershell_version = $PSVersionTable.PSVersion.ToString() } |
+             platform = $nodeRuntime.platform; architecture = $nodeRuntime.arch; powershell_version = $PSVersionTable.PSVersion.ToString();
+             sandbox_api = $sandboxApi } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'evidence/runtime.json') -Encoding utf8
           if ($nodeExit -ne 0 -or $nodeRuntime.platform -ne 'win32' -or $nodeRuntime.arch -ne 'x64' -or [version]$nodeRuntime.version -lt [version]'24.13.0') {
             throw 'The existing runner Node runtime is unsupported'
