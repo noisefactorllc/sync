@@ -90,10 +90,20 @@ export class ProtocolSoak {
                 cycleMs = 60_000, leaksEveryMs = 900_000, onSample = () => {},
                 startupTimeoutMs = 5_000, daemonArgs = [], publisher = null,
                 stopTermTimeoutMs = 5_000, stopKillTimeoutMs = 2_000,
-                geometries = null, geometryEveryMs = 0, fps = 0 }) {
+                geometries = null, geometryEveryMs = 0, fps = 0,
+                monotonicNow = null }) {
     Object.assign(this, { daemonPath, origin, token, width, height, cycleMs,
                           leaksEveryMs, onSample, startupTimeoutMs, daemonArgs, publisher,
                           stopTermTimeoutMs, stopKillTimeoutMs, geometryEveryMs });
+    // PACING AND ELAPSED-RUN TIMING READ A MONOTONIC CLOCK, never Date.now().
+    // The wall clock moves with NTP corrections and manual adjustments, so a
+    // step mid-run would otherwise drain the stepped interval into
+    // slotsSkipped and end the run early while the machine's real elapsed
+    // time says otherwise. performance.now() is Node's monotonic source;
+    // tests inject a controlled clock here. The frame stamp deliberately
+    // keeps Date.now(): it records WHEN a frame was sent in wall time, a
+    // different question from how much run time has elapsed.
+    this.monotonicNow = monotonicNow ?? (() => performance.now());
     // PACING. Unpaced (fps 0, the default) this client sends as fast as the
     // daemon accepts: on the macOS soak host that is ~200 frames/s of 8 MB frames,
     // 800 MB/s or more through the loopback. That is the right shape for a
@@ -325,7 +335,7 @@ export class ProtocolSoak {
   }
 
   async run(durationMs) {
-    const started = Date.now();
+    const started = this.monotonicNow();
     let lastCycle = started;
     let lastSample = 0;
     let lastLeaks = started;
@@ -339,10 +349,10 @@ export class ProtocolSoak {
     // than sent late, so slotsPlanned stays a complete target-slot
     // denominator (slotsPlanned === sentFrames + slotsSkipped) and the
     // offered fraction is measurable. Unpaced runs leave the ledger at zero.
-    const slotOrigin = Date.now();
-    while (!this.stopped && Date.now() - started < durationMs) {
+    const slotOrigin = this.monotonicNow();
+    while (!this.stopped && this.monotonicNow() - started < durationMs) {
       let sendSlot = null;
-      const now = Date.now();
+      const now = this.monotonicNow();
       // Geometry changes on its own clock, independent of the session cycle,
       // so a rotation cadence can be chosen without also changing how often
       // senders are torn down — the browser run varies those separately and
@@ -391,7 +401,7 @@ export class ProtocolSoak {
         this.state.reconnects += 1;
         await this._closeSession();
         await this._openSession();
-        lastCycle = Date.now();
+        lastCycle = this.monotonicNow();
         continue;
       }
       if (this.data.socket.writableLength > this.maxBuffered) {
@@ -403,14 +413,14 @@ export class ProtocolSoak {
         // without sending it: no catch-up burst, and the loss is counted in
         // the ledger rather than hidden in a shifted cadence. Only the
         // still-current expired slot is sent below.
-        while (Date.now()
+        while (this.monotonicNow()
             - (slotOrigin + this.state.slotsPlanned * this.frameIntervalMs)
             >= this.frameIntervalMs) {
           this.state.slotsPlanned += 1;
           this.state.slotsSkipped += 1;
         }
         const deadline = slotOrigin + this.state.slotsPlanned * this.frameIntervalMs;
-        const wait = deadline - Date.now();
+        const wait = deadline - this.monotonicNow();
         if (wait > 0) {
           await sleep(wait);
           continue;
@@ -419,10 +429,13 @@ export class ProtocolSoak {
         sendSlot = this.state.slotsPlanned - 1;
       }
       this.state.sequence += 1;
-      const sentAt = Date.now();
+      // The ledger's send time is monotonic like the schedule it proves; the
+      // frame stamp below stays on the wall clock, recording when the frame
+      // was sent in epoch time for the receiver side.
+      const sentAt = this.monotonicNow();
       try {
         await this.data.sendBinary(
-          stampFrame(this.frame, this.state.sequence, BigInt(sentAt) * 1000n));
+          stampFrame(this.frame, this.state.sequence, BigInt(Date.now()) * 1000n));
         this.state.sentFrames += 1;
         if (sendSlot !== null) {
           this.sendLog.push({
@@ -442,7 +455,7 @@ export class ProtocolSoak {
         this.state.reconnects += 1;
         await this._closeSession();
         await this._openSession();
-        lastCycle = Date.now();
+        lastCycle = this.monotonicNow();
       }
     }
     await this._stats();

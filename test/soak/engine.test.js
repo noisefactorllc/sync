@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { summarise, ProtocolSoak } from './engine.mjs';
+import { readFrameHeader } from './lib/frame.mjs';
 
 const sample = (t, footprint) => ({ t, footprint, rss: footprint, frames: t * 60 });
 
@@ -72,16 +73,16 @@ test('startup accepts fragmented readiness and drains later stdout', async (t) =
   });
 
 test('fast completed writes yield so a queued stop can interrupt streaming', async (t) => {
-  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8 });
+  // Keep the loop bound independent of host load, and queue the stop before
+  // the loop's own setImmediate so one event-loop turn suffices to observe it.
+  let clockReads = 0;
+  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8,
+    monotonicNow: () => Math.floor(clockReads++ / 16) });
   soak.data = { closed: false, socket: { writableLength: 0, destroyed: false },
     sendBinary: async () => {} };
   soak._openSession = async () => {};
   soak._closeSession = async () => {};
   soak._stats = async () => {};
-  // Keep the loop bound independent of host load, and queue the stop before
-  // the loop's own setImmediate so one event-loop turn suffices to observe it.
-  let clockReads = 0;
-  t.mock.method(Date, 'now', () => Math.floor(clockReads++ / 16));
   const stop = setImmediate(() => { soak.stopped = true; });
   t.after(() => clearImmediate(stop));
 
@@ -473,8 +474,8 @@ test('ProtocolSoak defaults to --test-receiver and can select a publisher instea
 // loopback gives it. Beside a browser sender that starved the sender on every
 // gauntlet of 2026-09-07/08. `fps` bounds it to one frame per interval.
 
-function pacedSoak(fps) {
-  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8, fps });
+function pacedSoak(fps, overrides = {}) {
+  const soak = new ProtocolSoak({ daemonPath: '', width: 8, height: 8, fps, ...overrides });
   soak.data = { closed: false, socket: { writableLength: 0, destroyed: false },
     sendBinary: async () => {} };
   soak._openSession = async () => {};
@@ -493,16 +494,10 @@ test('fps paces the stream to at most one frame per interval, with no catch-up b
 });
 
 test('fps 0 (the default) leaves the stream unpaced', async () => {
-  const soak = pacedSoak(0);
-  assert.equal(soak.frameIntervalMs, 0);
   let clockReads = 0;
-  const original = Date.now;
-  Date.now = () => Math.floor(clockReads++ / 16);
-  try {
-    await soak.run(50);
-  } finally {
-    Date.now = original;
-  }
+  const soak = pacedSoak(0, { monotonicNow: () => Math.floor(clockReads++ / 16) });
+  assert.equal(soak.frameIntervalMs, 0);
+  await soak.run(50);
   assert.ok(soak.state.sentFrames > 100, `unpaced loop should send freely, got ${soak.state.sentFrames}`);
 });
 
@@ -542,7 +537,7 @@ test('a stall is counted in the denominator and the cadence rejoins the schedule
   const sendTimes = [];
   let stalled = false;
   soak.data.sendBinary = async () => {
-    sendTimes.push(Date.now());
+    sendTimes.push(performance.now());
     if (!stalled) {
       stalled = true;
       await new Promise((resolve) => setTimeout(resolve, 70)); // spans several slots
@@ -587,16 +582,81 @@ test('a stall is counted in the denominator and the cadence rejoins the schedule
 });
 
 test('an unpaced run reports no slot ledger', async () => {
-  const soak = pacedSoak(0);
   let clockReads = 0;
-  const original = Date.now;
-  Date.now = () => Math.floor(clockReads++ / 16);
-  try {
-    await soak.run(50);
-  } finally {
-    Date.now = original;
-  }
+  const soak = pacedSoak(0, { monotonicNow: () => Math.floor(clockReads++ / 16) });
+  await soak.run(50);
   assert.ok(soak.state.sentFrames > 100, `unpaced loop should send freely, got ${soak.state.sentFrames}`);
   assert.equal(soak.state.slotsPlanned, 0, 'the unpaced stream has no target slots');
   assert.equal(soak.state.slotsSkipped, 0);
+});
+
+// --- wall-clock steps vs the monotonic schedule ----------------------------
+//
+// Date.now() tracks the wall clock, which steps (NTP corrections, manual
+// changes). A paced run measured on it would drain the stepped interval into
+// slotsSkipped and end early once the step exceeded the declared duration,
+// while the machine's real elapsed time says the run still had time left.
+// Pacing and elapsed-run timing must read a monotonic clock instead; the
+// frame stamp keeps the wall clock because it records WHEN a frame was sent,
+// not how much run time has elapsed.
+
+function steppingWallClock(stepMs, afterReads) {
+  const original = Date.now;
+  let reads = 0;
+  let stepped = false;
+  const steppedNow = function steppedNow() {
+    reads += 1;
+    if (!stepped && reads > afterReads) stepped = true;
+    const now = original.call(Date);
+    return stepped ? now + stepMs : now;
+  };
+  return {
+    install() { Date.now = steppedNow; },
+    restore() { Date.now = original; },
+    didStep: () => stepped,
+    realNow: () => original.call(Date),
+  };
+}
+
+test('a wall-clock step cannot move the paced schedule or end the run early', async () => {
+  const soak = pacedSoak(25); // 40 ms slots
+  const wall = steppingWallClock(80, 2);
+  wall.install();
+  const monotonicStart = performance.now();
+  try {
+    await soak.run(240);
+  } finally {
+    wall.restore();
+  }
+  const monotonicElapsedMs = performance.now() - monotonicStart;
+  assert.ok(wall.didStep(), 'the wall-clock step must actually have been injected');
+  assert.ok(monotonicElapsedMs >= 230,
+    `the run must span its declared duration in monotonic time despite the step, saw ${monotonicElapsedMs} ms`);
+  assert.ok(soak.state.slotsSkipped <= 1,
+    `a wall-clock step must not drain slots into the skip count (a loaded host may still stall one real slot), saw ${soak.state.slotsSkipped}`);
+  assert.equal(soak.state.slotsPlanned, soak.state.sentFrames + soak.state.slotsSkipped,
+    'the ledger stays complete across the step');
+});
+
+test('frame stamps keep wall-clock identity while pacing ignores the wall clock', async () => {
+  const soak = pacedSoak(25); // 40 ms slots
+  const wall = steppingWallClock(5000, 2);
+  const stamps = [];
+  const steppedAt = { real: 0 };
+  soak.data.sendBinary = async (frame) => {
+    stamps.push(readFrameHeader(frame).timestampUs);
+    if (wall.didStep() && !steppedAt.real) steppedAt.real = wall.realNow();
+  };
+  wall.install();
+  try {
+    await soak.run(120);
+  } finally {
+    wall.restore();
+  }
+  assert.ok(wall.didStep(), 'the wall-clock step must actually have been injected');
+  assert.ok(stamps.length >= 2, `expected several stamped frames, saw ${stamps.length}`);
+  assert.ok(soak.state.slotsSkipped <= 1,
+    `pacing must not see the wall-clock step, saw ${soak.state.slotsSkipped} skips`);
+  assert.ok(stamps[stamps.length - 1] >= BigInt(steppedAt.real + 4000) * 1000n,
+    'the epoch stamp must track the stepped wall clock, not the monotonic schedule');
 });
