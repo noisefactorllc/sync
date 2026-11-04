@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -382,5 +383,62 @@ test("a half-configured render build is refused before anything is packaged", {
                  "nothing may be staged when the render inputs are incomplete");
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+// AGENTS.md bans symbolic links, and the DMG is built by this repository's
+// script. Its Applications entry is a Finder alias: a regular file that
+// resolves to /Applications on the machine that opens the DMG.
+const dmgs = existsSync(packageDirectory)
+  ? readdirSync(packageDirectory).filter((name) => /^Sync-.+-arm64\.dmg$/.test(name))
+  : [];
+const stagedDmgOnMacos = {
+  skip: process.platform !== "darwin" || dmgs.length === 0,
+};
+
+const resolveAlias = `ObjC.import("Foundation");
+function run(argv) {
+  const url = $.NSURL.fileURLWithPath(argv[0]);
+  const isAlias = Ref();
+  url.getResourceValueForKeyError(isAlias, $.NSURLIsAliasFileKey, $());
+  const resolved = $.NSURL.URLByResolvingAliasFileAtURLOptionsError(
+      url, $.NSURLBookmarkResolutionWithoutUI | $.NSURLBookmarkResolutionWithoutMounting, $());
+  return (ObjC.unwrap(isAlias[0]) ? "alias " : "file ") +
+         (resolved.isNil() ? "unresolved" : ObjC.unwrap(resolved.path));
+}`;
+
+function symbolicLinks(root) {
+  return execFileSync("/usr/bin/find", [root, "-type", "l"], { encoding: "utf8" })
+    .split("\n").filter(Boolean).map((link) => path.relative(root, link)).sort();
+}
+
+test("packaged DMG adds no symbolic link and links Applications with a Finder alias",
+     stagedDmgOnMacos, () => {
+  assert.equal(dmgs.length, 1, `expected one DMG in ${packageDirectory}: ${dmgs.join(", ")}`);
+  assert.equal(existsSync(app), true, `the DMG check compares against the staged ${app}`);
+  const mountPoint = mkdtempSync(path.join(os.tmpdir(), "sync-dmg-"));
+  execFileSync("/usr/bin/hdiutil", [
+    "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mountPoint,
+    path.join(packageDirectory, dmgs[0]),
+  ]);
+  try {
+    // The staged app keeps the links of each versioned framework's layout
+    // (Versions/Current and the links beside it). The DMG step must add none:
+    // not at the DMG root, not inside the app.
+    const dmgLinks = symbolicLinks(mountPoint);
+    const bundleLinks = new Set(symbolicLinks(packageDirectory)
+      .filter((link) => link.startsWith(`Sync.app${path.sep}`)));
+    const added = dmgLinks.filter((link) => !bundleLinks.has(link));
+    assert.deepEqual(added, [], `the DMG adds symbolic links:\n${added.join("\n")}`);
+    const entries = readdirSync(mountPoint).filter((name) => !name.startsWith(".")).sort();
+    assert.deepEqual(entries, ["Applications", "LICENSE.txt", "Sync.app", "Third-Party-Notices.txt"]);
+    const alias = path.join(mountPoint, "Applications");
+    assert.equal(lstatSync(alias).isFile(), true, "Applications must be a regular file");
+    const resolved = execFileSync("/usr/bin/osascript", ["-l", "JavaScript", "-e", resolveAlias, alias],
+                                  { encoding: "utf8" }).trim();
+    assert.equal(resolved, "alias /Applications");
+  } finally {
+    execFileSync("/usr/bin/hdiutil", ["detach", "-quiet", mountPoint]);
+    rmSync(mountPoint, { recursive: true, force: true });
   }
 });

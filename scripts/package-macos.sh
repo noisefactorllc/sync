@@ -29,7 +29,22 @@ if [[ "$mode" == "dmg" ]]; then
   rm -rf "$dmg_root"
   mkdir -p "$dmg_root"
   ditto "$bundle" "$dmg_root/Sync.app"
-  ln -s /Applications "$dmg_root/Applications"
+  # The Applications entry is a Finder alias, not a symbolic link: AGENTS.md
+  # bans symbolic links. An alias is a regular file that holds bookmark data,
+  # and Finder shows it and accepts a dragged app on it as it does a link.
+  /usr/bin/osascript -l JavaScript - "$dmg_root/Applications" <<'JXA'
+ObjC.import("Foundation");
+function run(argv) {
+  const options = $.NSURLBookmarkCreationSuitableForBookmarkFile;
+  const bookmark = $.NSURL.fileURLWithPath("/Applications")
+    .bookmarkDataWithOptionsIncludingResourceValuesForKeysRelativeToURLError(options, $(), $(), $());
+  if (bookmark.isNil()) throw new Error("cannot create a bookmark to /Applications");
+  if (!$.NSURL.writeBookmarkDataToURLOptionsError(
+          bookmark, $.NSURL.fileURLWithPath(argv[0]), options, $())) {
+    throw new Error("cannot write the Applications alias");
+  }
+}
+JXA
   cp "$source_dir/LICENSE" "$dmg_root/LICENSE.txt"
   # The bundle's notices, not the source file: a bundle with the render
   # helper carries the generated Qt and helper section as well.
