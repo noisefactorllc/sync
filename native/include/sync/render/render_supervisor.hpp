@@ -75,6 +75,8 @@ class RenderSupervisor {
   void on_line(std::string_view line);
   void on_child_exit(std::int64_t exit_status);
   void poll();
+  void hold_timer_resolution() noexcept;
+  void release_timer_resolution() noexcept;
 
   uv_loop_t* loop_;
   RenderSupervisorOptions options_;
@@ -84,8 +86,17 @@ class RenderSupervisor {
   uv_timer_t* restart_timer_ = nullptr;
   std::uint64_t restart_attempt_ = 0;
   bool stopping_ = false;
+  bool timer_resolution_held_ = false;
   Status status_{};
 };
+
+// How many supervisors in this process hold a 1 ms system timer resolution.
+// A supervisor holds it while its source is attached: on Windows a libuv
+// timer fires no faster than the system timer resolution, 15.6 ms by
+// default, so the 2 ms ring poll would run at about 64 Hz and skip frames of
+// a 60 fps helper. Every hold is released on detach, so this returns to zero
+// whenever no source is attached. Exposed so tests can check the balance.
+[[nodiscard]] auto timer_resolution_holds() noexcept -> int;
 
 // Exit codes sync-render uses for outcomes a restart cannot change: a bad
 // command line and a session that ended for good (kicked, banned, locked,

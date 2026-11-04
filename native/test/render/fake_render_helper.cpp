@@ -13,6 +13,9 @@
 //                             sets the stop flag, which nothing reads any more.
 //                             Closing stdin still ends the process, so a test
 //                             never leaves one behind.
+//   --fake-fps <n>            write frames at n per second on a steady clock,
+//                             as sync-render paces its output, instead of
+//                             every few milliseconds
 
 #include <atomic>
 #include <cerrno>
@@ -29,6 +32,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <timeapi.h>
 #else
 #include <unistd.h>
 #endif
@@ -68,6 +72,7 @@ int main(int argc, char** argv) {
   long exit_after = -1;
   long stall_after = -1;
   long block_after = -1;
+  long fps = 0;
   int exit_code = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -78,7 +83,13 @@ int main(int argc, char** argv) {
     else if (arg == "--fake-exit-code") exit_code = static_cast<int>(std::strtol(next(), nullptr, 10));
     else if (arg == "--fake-stall-after") stall_after = std::strtol(next(), nullptr, 10);
     else if (arg == "--fake-block-after") block_after = std::strtol(next(), nullptr, 10);
+    else if (arg == "--fake-fps") fps = std::strtol(next(), nullptr, 10);
   }
+#if defined(_WIN32)
+  // Paced output has to keep its own frame period, which a 15.6 ms default
+  // timer resolution would not allow; sync-render paces on a precise timer.
+  if (fps > 0) ::timeBeginPeriod(1);
+#endif
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
   if (watch_stdin) {
@@ -103,6 +114,9 @@ int main(int argc, char** argv) {
 
   std::vector<std::byte> frame(std::size_t{geometry.width} * 4 * geometry.height);
   long written = 0;
+  const auto period = fps > 0 ? std::chrono::nanoseconds(1'000'000'000 / fps)
+                              : std::chrono::nanoseconds(0);
+  auto next_frame = std::chrono::steady_clock::now();
   while (!g_stop.load()) {
     if (block_after >= 0 && written >= block_after) {
       g_blocked.store(true);
@@ -113,7 +127,12 @@ int main(int argc, char** argv) {
       if (writer.write(frame, geometry.width * 4, render_clock_us())) ++written;
       if (exit_after >= 0 && written >= exit_after) return exit_code;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (fps > 0) {
+      next_frame += period;
+      std::this_thread::sleep_until(next_frame);
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
   }
   writer.close();
   return 0;

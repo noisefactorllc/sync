@@ -3,6 +3,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <string>
 #include <vector>
@@ -228,6 +229,77 @@ SYNC_TEST(a_missing_helper_is_retried_without_crashing_syncd) {
     SYNC_REQUIRE(supervisor.status().launches == 0);
     SYNC_REQUIRE(!supervisor.status().running);
     SYNC_REQUIRE(publisher.opened == 0);
+    supervisor.stop();
+    drain(&loop);
+  }
+  SYNC_REQUIRE(uv_loop_close(&loop) == 0);
+}
+
+// The 1 ms timer resolution is held exactly while a source is attached: taken
+// on attach, given back on every way out of it, so the begin and end calls
+// stay balanced through exits, relaunches, a stalled writer and stop.
+SYNC_TEST(the_timer_resolution_is_held_exactly_while_a_source_is_attached) {
+  SYNC_REQUIRE(timer_resolution_holds() == 0);
+  uv_loop_t loop{};
+  SYNC_REQUIRE(uv_loop_init(&loop) == 0);
+  CountingPublisher publisher;
+  {
+    RenderSupervisor supervisor(
+        &loop, publisher, options("resolution", {"--fake-exit-after", "3", "--fake-exit-code", "3"}));
+    SYNC_REQUIRE(supervisor.start());
+    bool balanced = true;
+    SYNC_REQUIRE(run_until(&loop, [&] {
+      balanced = balanced && timer_resolution_holds() == (supervisor.status().attached ? 1 : 0);
+      return supervisor.status().launches >= 3 && supervisor.status().exits >= 2;
+    }));
+    SYNC_REQUIRE(balanced);
+    supervisor.stop();
+    SYNC_REQUIRE(timer_resolution_holds() == 0);
+    drain(&loop);
+  }
+  {
+    // A writer that stops heartbeating is detached by the poll, not by an exit.
+    RenderSupervisor supervisor(&loop, publisher, options("resolution-stall", {"--fake-stall-after", "2"}));
+    SYNC_REQUIRE(supervisor.start());
+    SYNC_REQUIRE(run_until(&loop, [&] { return supervisor.status().attached; }));
+    SYNC_REQUIRE(timer_resolution_holds() == 1);
+    SYNC_REQUIRE(run_until(&loop, [&] { return !supervisor.status().attached; }, 15'000));
+    SYNC_REQUIRE(timer_resolution_holds() == 0);
+    supervisor.stop();
+    drain(&loop);
+  }
+  SYNC_REQUIRE(timer_resolution_holds() == 0);
+  SYNC_REQUIRE(uv_loop_close(&loop) == 0);
+}
+
+// A helper pacing 60 fps, polled at the real 2 ms interval, is published
+// without a skipped frame. On Windows the poll timer runs that fast only with
+// the timer resolution the supervisor holds; at the 15.6 ms default it polls
+// at about 64 Hz and skips frames, which is what this guards against.
+SYNC_TEST(a_60_fps_ring_is_published_without_skips_at_the_real_poll_interval) {
+  uv_loop_t loop{};
+  SYNC_REQUIRE(uv_loop_init(&loop) == 0);
+  CountingPublisher publisher;
+  {
+    const RenderSupervisorOptions paced = options("paced", {"--fake-fps", "60"});
+    SYNC_REQUIRE(paced.poll_interval_ms == 2);
+    RenderSupervisor supervisor(&loop, publisher, paced);
+    SYNC_REQUIRE(supervisor.start());
+    SYNC_REQUIRE(run_until(&loop, [&] { return supervisor.source().stats().published >= 10; }));
+    const RenderSource::Stats before = supervisor.source().stats();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    SYNC_REQUIRE(run_until(&loop, [&] { return std::chrono::steady_clock::now() >= until; }, 6'000));
+    const RenderSource::Stats after = supervisor.source().stats();
+    const std::uint64_t published = after.published - before.published;
+    const std::uint64_t polls = published + (after.repeats - before.repeats);
+    std::printf("paced: published %llu, skipped %llu, polls %llu in 3 s\n",
+                static_cast<unsigned long long>(published),
+                static_cast<unsigned long long>(after.skipped_frames - before.skipped_frames),
+                static_cast<unsigned long long>(polls));
+    SYNC_REQUIRE(after.skipped_frames == before.skipped_frames);
+    SYNC_REQUIRE(published >= 170);
+    // About 1500 polls at 2 ms; about 190 at the Windows default resolution.
+    SYNC_REQUIRE(polls >= 600);
     supervisor.stop();
     drain(&loop);
   }

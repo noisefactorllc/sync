@@ -623,12 +623,19 @@ add_library(sync_render_supervisor
 )
 target_compile_features(sync_render_supervisor PUBLIC cxx_std_20)
 target_link_libraries(sync_render_supervisor PUBLIC sync_render_source ${SYNC_LIBUV_TARGET})
+if(WIN32)
+  # timeBeginPeriod and timeEndPeriod, for the ring poll's timer resolution.
+  target_link_libraries(sync_render_supervisor PRIVATE winmm)
+endif()
 
 # Stands in for sync-render in the supervisor tests: same ring, same event
 # lines, same stdin contract, no GPU.
 add_executable(sync_fake_render_helper native/test/render/fake_render_helper.cpp)
 target_compile_features(sync_fake_render_helper PRIVATE cxx_std_20)
 target_link_libraries(sync_fake_render_helper PRIVATE sync_render_ring Threads::Threads)
+if(WIN32)
+  target_link_libraries(sync_fake_render_helper PRIVATE winmm)
+endif()
 
 add_executable(sync_render_supervisor_tests
   native/test/render/render_supervisor_test.cpp

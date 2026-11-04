@@ -1,9 +1,21 @@
 #include <sync/render/render_supervisor.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <iostream>
 #include <utility>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#endif
 
 namespace noisefactor::sync::render {
 
@@ -40,6 +52,8 @@ namespace {
 
 constexpr std::size_t kMaximumEventLine = 64 * 1024;
 
+std::atomic<int> g_timer_resolution_holds{0};
+
 void delete_timer(uv_timer_t* timer) {
   if (timer == nullptr) return;
   uv_timer_stop(timer);
@@ -57,6 +71,28 @@ RenderSupervisor::RenderSupervisor(uv_loop_t* loop, FramePublisher& publisher,
 
 RenderSupervisor::~RenderSupervisor() {
   stop();
+}
+
+auto timer_resolution_holds() noexcept -> int {
+  return g_timer_resolution_holds.load();
+}
+
+void RenderSupervisor::hold_timer_resolution() noexcept {
+  if (timer_resolution_held_) return;
+  timer_resolution_held_ = true;
+  g_timer_resolution_holds.fetch_add(1);
+#if defined(_WIN32)
+  ::timeBeginPeriod(1);
+#endif
+}
+
+void RenderSupervisor::release_timer_resolution() noexcept {
+  if (!timer_resolution_held_) return;
+  timer_resolution_held_ = false;
+  g_timer_resolution_holds.fetch_sub(1);
+#if defined(_WIN32)
+  ::timeEndPeriod(1);
+#endif
 }
 
 auto RenderSupervisor::start() -> bool {
@@ -93,6 +129,7 @@ void RenderSupervisor::stop() {
   stopping_ = true;
   source_.detach();
   status_.attached = false;
+  release_timer_resolution();
   delete_timer(poll_timer_);
   poll_timer_ = nullptr;
   delete_timer(restart_timer_);
@@ -215,6 +252,9 @@ void RenderSupervisor::on_line(std::string_view line) {
   if (source_.attach(options_.ring_name, error)) {
     status_.attached = true;
     restart_attempt_ = 0;
+    // The ring is polled every poll_interval_ms only while the system timer
+    // allows it; see timer_resolution_holds().
+    hold_timer_resolution();
   } else {
     std::cerr << "syncd: render ring attach failed: " << error << '\n';
   }
@@ -226,6 +266,7 @@ void RenderSupervisor::on_child_exit(std::int64_t exit_status) {
   status_.running = false;
   source_.detach();
   status_.attached = false;
+  release_timer_resolution();
   if (child_ != nullptr) {
     Child* child = child_.release();
     child->owner = nullptr;
@@ -256,6 +297,7 @@ void RenderSupervisor::poll() {
   const RenderSource::Poll result = source_.poll(now_us);
   if (result == RenderSource::Poll::WriterGone) {
     status_.attached = false;
+    release_timer_resolution();
     std::cerr << "syncd: render ring " << render_poll_name(result) << '\n';
     // A helper that is still running but has stopped stamping its heartbeat
     // is hung, not idle (it heartbeats every tick even with no program).
