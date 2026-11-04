@@ -40,18 +40,19 @@ Build the distribution from the repository root:
 npm run package:sdk
 ```
 
-The command creates these versioned files:
+The command creates these files, where `<version>` is the `version` field of
+`browser/package.json` in your checkout:
 
 ```text
-dist/sdk/0.3.0/modules/
-dist/sdk/0.3.0/noisefactor-sync-0.3.0.tgz
-dist/sdk/0.3.0/SHA256SUMS
+dist/sdk/<version>/modules/
+dist/sdk/<version>/noisefactor-sync-<version>.tgz
+dist/sdk/<version>/SHA256SUMS
 ```
 
 Install the tarball from the path that applies to your application:
 
 ```bash
-npm install /absolute/path/to/sync/dist/sdk/0.3.0/noisefactor-sync-0.3.0.tgz
+npm install /absolute/path/to/sync/dist/sdk/<version>/noisefactor-sync-<version>.tgz
 ```
 
 You can then import from `@noisefactor/sync`.
@@ -407,7 +408,7 @@ Release all other resources that your application owns.
 
 ## Public exports
 
-SDK version 0.3.0 exports:
+The SDK exports:
 
 - `SyncBridgeClient` and `SYNC_DEFAULT_ENDPOINT`
 - `SyncFrameSink`
@@ -425,7 +426,7 @@ SDK version 0.3.0 exports:
 The TypeScript declarations also export `AudioSourceFormat`, `AudioSource`, and
 `AudioPacket` for the audio methods on `SyncBridgeClient`.
 
-`SYNC_SDK_VERSION` is `0.3.0`.
+`SYNC_SDK_VERSION` equals the `version` field of `browser/package.json`.
 The SDK version and the companion product version are independent.
 
 ## Platform outputs
