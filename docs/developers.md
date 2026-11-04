@@ -161,9 +161,11 @@ and for video output. `readAudioSource()` is a bounded pull operation; avoid a
 busy polling loop. Reset queued browser audio when `firstFrame` stops following
 the preceding cursor or `droppedFrames` changes.
 
-Audio requires fresh origin pairing after the companion restarts, even when a
-stored token remains valid for video. When an operation reports the daemon code
-`audio_pairing_required`, ask the user to start pairing again. The opened format
+A pairing that a current companion approves stores audio consent with the
+origin's credential, so audio access survives a companion restart. An older
+grant that holds video consent only reports the daemon code
+`audio_pairing_required` for audio operations. Ask the user to start pairing
+again; the new pairing grants audio. The opened format
 reports the channel count and sample rate that the native backend actually
 provided. The API does not add channels missing from that backend and does not
 provide sample-accurate audio/video synchronization. See the

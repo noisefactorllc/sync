@@ -156,9 +156,11 @@ frames are ready. Avoid a busy polling loop. Deliver nonempty packets to a
 bounded AudioWorklet queue, and reset queued data when `firstFrame` ceases to
 match the preceding frame cursor or `droppedFrames` changes.
 
-Audio requires fresh origin pairing after the companion restarts, even if a
-stored token still works for video. Handle `audio_pairing_required` by asking
-the user to connect again. Device channel exposure depends on the OS backend;
+A pairing that a current companion approves stores audio consent with the
+origin's credential, so audio access survives a companion restart. An older
+grant that holds video consent only reports `audio_pairing_required` for audio
+operations. Handle it by asking the user to pair again; the new pairing grants
+audio. Device channel exposure depends on the OS backend;
 this API does not add missing hardware channels or supply sample-accurate
 audio/video synchronization. See the [native audio contract and qualification
 record](https://github.com/noisefactorllc/sync/blob/main/docs/audio-input.md).

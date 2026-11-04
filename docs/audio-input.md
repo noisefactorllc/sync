@@ -242,13 +242,14 @@ Noisedeck source.
 
 ### Permission boundary
 
-Persisted video-origin tokens do not automatically authorize audio. Production
-audio discovery and capture require an explicit successful pairing in the
-current daemon lifetime, using prompt wording that includes audio inputs.
-The in-memory approval cache holds at most 64 origins. After a daemon restart,
-pair again for audio; ordinary video token authentication still works. A future
-persisted per-capability grant model may improve this experience, but must keep
-the same consent boundary. [Server gate](../native/src/server.cpp),
+Audio discovery and capture require an origin grant that holds audio consent.
+A pairing approved with prompt wording that includes audio inputs stores that
+consent with the origin's credential in the pairing store, so it survives a
+daemon restart without another prompt. An older grant that holds video consent
+only still authenticates for video, but its audio operations report
+`audio_pairing_required`; a new pairing then grants audio. Authentication never
+widens a video-only grant to audio. [Server gate](../native/src/server.cpp),
+[pairing store](../native/src/pairing_store.cpp),
 [restart/renewal integration test](../test/integration/loopback.test.js).
 
 ## Release qualification matrix
