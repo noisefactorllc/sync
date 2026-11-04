@@ -8,7 +8,7 @@
 namespace noisefactor::sync::camera {
 
 // The frame the camera shows while no sender is feeding it: a dark card with
-// the words "Sync: waiting for Noisedeck", so a consumer that opened the
+// the words "Sync: waiting for video", so a consumer that opened the
 // camera early sees that Sync is present rather than a black picture that
 // reads as a broken device. Drawn once into a top-down 32BGRA buffer of
 // canvas_stride * canvas.height bytes with opaque alpha. Returns false when

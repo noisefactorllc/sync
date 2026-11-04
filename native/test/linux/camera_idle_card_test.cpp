@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -49,6 +50,39 @@ SYNC_TEST(linux_idle_card_is_opaque_centered_and_deterministic) {
   }
   SYNC_REQUIRE(center_text_pixels > 1000);
   SYNC_REQUIRE(outside_text_pixels == 0);
+}
+
+SYNC_TEST(linux_idle_card_draws_every_character_of_its_message) {
+  // The card's message and glyph layout (camera_idle_card.cpp): 5 by 7 glyphs
+  // on a 6-column advance, scaled 8 times, centered on the canvas. Each
+  // non-space character must put at least one text pixel in its own slot, so
+  // a character without a glyph fails here.
+  constexpr std::string_view message = "Sync: waiting for video";
+  constexpr std::uint32_t scale = 8;
+  constexpr std::uint32_t advance = 6 * scale;
+  constexpr std::uint32_t glyph_width = 5 * scale;
+  constexpr std::uint32_t glyph_height = 7 * scale;
+  constexpr std::uint32_t text_width =
+      (static_cast<std::uint32_t>(message.size()) * 6 - 1) * scale;
+  std::vector<std::byte> bgra(kStride * camera::kCanvas.height);
+  SYNC_REQUIRE(camera::draw_camera_idle_card(bgra, kStride, camera::kCanvas));
+  const std::uint32_t origin_x = (camera::kCanvas.width - text_width) / 2U;
+  const std::uint32_t origin_y = (camera::kCanvas.height - glyph_height) / 2U;
+  for (std::size_t index = 0; index < message.size(); ++index) {
+    std::size_t text_pixels = 0;
+    const std::uint32_t left =
+        origin_x + static_cast<std::uint32_t>(index) * advance;
+    for (std::uint32_t y = origin_y; y < origin_y + glyph_height; ++y) {
+      for (std::uint32_t x = left; x < left + glyph_width; ++x) {
+        if (!background_at(bgra, x, y)) ++text_pixels;
+      }
+    }
+    if (message[index] == ' ') {
+      SYNC_REQUIRE(text_pixels == 0);
+    } else {
+      SYNC_REQUIRE(text_pixels > 0);
+    }
+  }
 }
 
 SYNC_TEST(linux_idle_card_rejects_short_storage_without_touching_sentinels) {
