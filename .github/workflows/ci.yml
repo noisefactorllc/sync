@@ -788,11 +788,72 @@ jobs:
           node --test test/packaging/windows-package.test.js
           if ($LASTEXITCODE -ne 0) { throw "packaging tests failed" }
 
+      # The installer this job built, run the way a user's silent install runs
+      # it, so the [Files] layout under Program Files is what the smoke below
+      # exercises rather than the staged directory Inno Setup reads.
+      - name: Install the built installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = @(Get-ChildItem -Path build-package/package -Filter 'Sync-*-x64-Setup.exe')
+          if ($setup.Count -ne 1) { throw "expected one built installer, found $($setup.Count)" }
+          $install = Start-Process -FilePath $setup[0].FullName -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\sync-install.log"
+          if ($install.ExitCode -ne 0) {
+            Get-Content "$env:RUNNER_TEMP\sync-install.log" -ErrorAction SilentlyContinue
+            throw "installer exited $($install.ExitCode)"
+          }
+          $installed = Join-Path $env:ProgramFiles 'Noise Factor\Sync'
+          foreach ($binary in 'Sync.exe', 'syncd.exe', 'unins000.exe') {
+            if (-not (Test-Path (Join-Path $installed $binary))) { throw "the installer did not install $binary" }
+          }
+          "SYNC_INSTALLED_DIR=$installed" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SYNC_SETUP=$($setup[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Smoke the installed app lifecycle
         shell: pwsh
         run: |
-          ./scripts/smoke-windows-app.ps1 -Bundle "$PWD/build-package/package/Sync"
+          ./scripts/smoke-windows-app.ps1 -Bundle $env:SYNC_INSTALLED_DIR
           if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
+      - name: Uninstall the app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $uninstall = Start-Process -FilePath (Join-Path $env:SYNC_INSTALLED_DIR 'unins000.exe') -Wait -PassThru `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\sync-uninstall.log"
+          if ($uninstall.ExitCode -ne 0) { throw "uninstaller exited $($uninstall.ExitCode)" }
+          # The uninstaller runs from a copy in the temporary directory, which
+          # can outlive the process waited on above, so wait for its work too.
+          $deadline = (Get-Date).AddSeconds(60)
+          do {
+            $left = @(Get-ChildItem -Path $env:SYNC_INSTALLED_DIR -Recurse -File -Include '*.exe', '*.dll' -ErrorAction SilentlyContinue)
+            if ($left.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 500
+          } while ((Get-Date) -lt $deadline)
+          if ($left.Count -ne 0) {
+            Get-Content "$env:RUNNER_TEMP\sync-uninstall.log" -ErrorAction SilentlyContinue
+            throw "the uninstaller left Sync binaries behind: $($left.FullName -join ', ')"
+          }
+          $running = @(Get-Process -Name 'Sync', 'syncd' -ErrorAction SilentlyContinue)
+          if ($running.Count -ne 0) { throw "Sync processes remain after uninstall: $($running.Id -join ', ')" }
+
+      # Silent payload replacement is refused until an authenticated update
+      # transaction exists, so /SYNCUPDATE must exit without installing.
+      - name: Refuse an automatic update install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $update = Start-Process -FilePath $env:SYNC_SETUP -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SYNCUPDATE', "/LOG=$env:RUNNER_TEMP\sync-update.log"
+          if ($update.ExitCode -eq 0) { throw "the installer accepted /SYNCUPDATE" }
+          if (Test-Path (Join-Path $env:SYNC_INSTALLED_DIR 'Sync.exe')) { throw "the installer installed Sync under /SYNCUPDATE" }
+          $log = Get-Content "$env:RUNNER_TEMP\sync-update.log" -Raw
+          if ($log -notmatch 'Automatic installation is not enabled') {
+            Write-Output $log
+            throw "the installer log does not record the /SYNCUPDATE refusal"
+          }
+          Write-Output "installer exited $($update.ExitCode) under /SYNCUPDATE without installing"
 
       # The helper creates its Qt GUI application before it parses arguments,
       # so --help from the staged bundle proves its Qt DLLs and the Windows
