@@ -207,7 +207,7 @@ network access unless you supply them:
 - RtAudio at `b4f04903312e0e0efffbe77655172e0f060dc085` (`CMakeLists.txt`),
   for every build;
 - RtMidi at `1e5b49925aa60065db52de44c366d446a902547b` and noisemaker-for-qt
-  at `7675d7931ccf38a4c24768c882f829ea3f8f2341` (`render/CMakeLists.txt`),
+  at `0f410a3645637d48d57a1c6bdf90668191e0ee93` (`render/CMakeLists.txt`),
   only with `-DSYNC_BUILD_RENDER=ON`.
 
 To configure offline, pass local copies of those revisions with

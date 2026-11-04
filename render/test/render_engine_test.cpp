@@ -1,9 +1,12 @@
 #include "test_harness.hpp"
 
 #include <QCoreApplication>
+#include <QColor>
 #include <QImage>
 #include <QStringList>
 
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -260,6 +263,62 @@ SYNC_TEST(a_program_that_fails_its_first_render_gives_way_to_the_last_that_rende
     engine.stop();
   }
   std::filesystem::remove_all(std::filesystem::path(root.toStdString()));
+}
+
+// The mean colour of the lit pixels in a 7 by 7 window, so the gaps between
+// heightGrid's particles do not count.
+[[nodiscard]] auto lit_mean(const QImage& image, int cx, int cy) -> std::array<double, 3> {
+  std::array<double, 3> sum{};
+  int lit = 0;
+  for (int y = cy - 3; y <= cy + 3; ++y) {
+    for (int x = cx - 3; x <= cx + 3; ++x) {
+      const QColor c = image.pixelColor(x, y);
+      if (c.red() + c.green() + c.blue() == 0) continue;
+      sum[0] += c.red();
+      sum[1] += c.green();
+      sum[2] += c.blue();
+      ++lit;
+    }
+  }
+  if (lit > 0) for (double& v : sum) v /= lit;
+  return sum;
+}
+
+SYNC_TEST(height_grid_seen_from_above_shows_its_image_as_authored) {
+  // A uvMap image carries u in red and v in green, so each axis reads
+  // straight from the frame: image right must be frame right and image top
+  // frame top, with no mirror.
+  ProgramCompiler compiler(data_root());
+  RenderEngine::Options options = engine_options("height-grid");
+  options.size = QSize(128, 128);
+  RenderEngine engine(options);
+  QString error;
+  SYNC_REQUIRE(engine.start(error));
+  engine.freeze_time(0.0);
+  const auto frame = [&](const QString& dsl) {
+    auto graph = compiler.compile(dsl).graph;
+    SYNC_REQUIRE(graph != nullptr);
+    engine.set_program(graph);
+    for (int i = 0; i < 4; ++i) engine.tick();
+    return engine.read_surface();
+  };
+  const auto across = [](const QImage& image) {
+    return lit_mean(image, 84, 44)[0] - lit_mean(image, 44, 44)[0];
+  };
+  const auto down = [](const QImage& image) {
+    return lit_mean(image, 44, 84)[1] - lit_mean(image, 44, 44)[1];
+  };
+  const QImage image = frame(QStringLiteral("search synth\ntestPattern(pattern: uvMap).write(o0)\nrender(o0)\n"));
+  SYNC_REQUIRE(std::abs(across(image)) > 48 && std::abs(down(image)) > 48);
+  const QImage view = frame(QStringLiteral(
+      "search synth, points, render\n"
+      "testPattern(pattern: uvMap).write(o1)\n"
+      "solid(color: #ffffff).pointsEmit(stateSize: x128).heightGrid(heightScale: 0, diffuseTex: read(o1))"
+      ".pointsRender(viewMode: perspective, rotateX: 1.5708, density: 100, intensity: 0, inputIntensity: 0)"
+      ".write(o0)\n"
+      "render(o0)\n"));
+  SYNC_REQUIRE((across(view) > 0) == (across(image) > 0) && std::abs(across(view)) > 32);
+  SYNC_REQUIRE((down(view) > 0) == (down(image) > 0) && std::abs(down(view)) > 32);
 }
 
 SYNC_TEST(an_overlay_trace_does_not_stop_the_picture) {
