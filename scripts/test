@@ -17,7 +17,9 @@ cd "$root"
 # Prefer a system temporary directory; never build inside the checkout.
 tmp_base=${TMPDIR:-/tmp}
 build_dir=$(mktemp -d "$tmp_base/sync-scripts-test.XXXXXX")
-trap 'rm -rf "$build_dir"' EXIT
+# Keep the failing status: on bash 3.2 the trap's own last status would
+# otherwise become the script's exit status, reporting a failure as a pass.
+trap 'status=$?; rm -rf "$build_dir"; exit "$status"' EXIT
 
 missing_dependencies() {
   local missing=()
@@ -62,7 +64,8 @@ if command -v ninja >/dev/null 2>&1; then
 fi
 
 echo "scripts/test: configuring native build in $build_dir" >&2
-cmake -S "$root" -B "$build_dir" "${generator_args[@]}" -DCMAKE_BUILD_TYPE=Debug
+# bash 3.2 (macOS /bin/bash) treats "${empty[@]}" as unbound under set -u.
+cmake -S "$root" -B "$build_dir" ${generator_args[@]+"${generator_args[@]}"} -DCMAKE_BUILD_TYPE=Debug
 
 # Cap the build parallelism so a large host does not exhaust memory.
 parallel=$(nproc 2>/dev/null || echo 2)
