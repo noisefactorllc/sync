@@ -71,6 +71,11 @@ class LinuxUpdateTests(unittest.TestCase):
         self.runner.responses['--show-keys'] = 'pub:::::::::\nfpr:::::::::'+'A'*40+':\n'
         self.runner.responses['--print-architecture'] = 'amd64\n'
         self.engine.enable(1000)
+        # gpg reads the key with a private empty home, never root's ~/.gnupg.
+        show = next(call for call in self.runner.calls if '--show-keys' in call)
+        home = show[show.index('--homedir')+1]
+        self.assertTrue(Path(home).name.startswith('noisedeck-sync-gpg-'))
+        self.assertFalse(Path(home).exists())
         source = (self.root/'etc/apt/sources.list.d/noisedeck-sync.sources').read_text()
         self.assertIn('Signed-By: /usr/share/keyrings/noisedeck-sync-archive-keyring.gpg', source)
         # The published repository (the Linux guide's URL), not a path that answers 404.

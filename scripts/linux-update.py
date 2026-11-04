@@ -200,7 +200,12 @@ class Maintenance:
         self.trusted(KEY)
         fingerprint = self.trusted(FINGERPRINT).read_text().strip()
         if not re.fullmatch(r'[A-F0-9]{40}', fingerprint): raise Deferred('invalid packaged keyring fingerprint')
-        result = self.run(['/usr/bin/gpg', '--batch', '--no-options', '--with-colons', '--show-keys', KEY])
+        # With --no-options, gpg does not create its default home directory and
+        # stops when root has no ~/.gnupg, as on a fresh install. Reading a key
+        # file needs no keyring, so give it an empty private home.
+        with tempfile.TemporaryDirectory(prefix='noisedeck-sync-gpg-') as home:
+            result = self.run(['/usr/bin/gpg', '--batch', '--no-options', '--homedir', home,
+                               '--with-colons', '--show-keys', KEY])
         primary = []
         pending = False
         for line in result.splitlines():
