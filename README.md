@@ -45,9 +45,11 @@ not validate sample values. Physical 32-channel capture and sustained combined
 1080p60 delivery remain unqualified. The
 [Windows platform report](https://sync.noisedeck.app/performance/research-2026-09-18-windows-platform-parity/)
 provides architecture and test evidence, not combined-load platform parity.
-[Native preview 0.2.68](https://sync.noisedeck.app/#download)
-and [SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
-are published from that source. Current evidence is not a general hardware
+Native preview 0.2.68 and
+[SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
+were published from that source on September 14, 2026. The
+[download page](https://sync.noisedeck.app/#download) lists the current native
+preview. Current evidence is not a general hardware
 compatibility claim. See the
 [audio research, design, and qualification matrix](docs/audio-input.md).
 

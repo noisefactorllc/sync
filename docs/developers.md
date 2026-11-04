@@ -66,7 +66,7 @@ Its files use relative imports between the client, protocol, diagnostics, and qu
 
 The SDK does not install or update the native Sync companion.
 Check the [download page](https://sync.noisedeck.app/#download) for available installers.
-Native preview 0.2.68 includes the audio extension, but clients must still check
+Native previews from 0.2.68 include the audio extension, but clients must still check
 the connected companion's capabilities instead of relying on its product or
 protocol version. A compatible runtime advertises a selected and available
 `audio` provider whose direction is `receive`.

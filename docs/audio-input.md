@@ -11,9 +11,11 @@ That exact source passed the
 [cross-platform CI matrix](https://github.com/noisefactorllc/sync/actions/runs/34803984585)
 and the separate
 [Windows camera end-to-end workflow](https://github.com/noisefactorllc/sync/actions/runs/34803984593).
-[Native preview 0.2.68](https://sync.noisedeck.app/#download) and
+Native preview 0.2.68 and
 [SDK 0.3.0](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0)
-are published from that source. The SDK and companion product versions are
+were published from that source on September 14, 2026; the
+[download page](https://sync.noisedeck.app/#download) lists the current native
+preview. The SDK and companion product versions are
 independent. Check for a selected and available `audio` provider with direction
 `receive`; do not infer audio support from a product or protocol version.
 [Video protocol](protocol-v1.md),
@@ -265,14 +267,14 @@ frames with zero mismatches and 1,024 reported dropped frames.
 
 | Gate | Current result | Release requirement |
 | --- | --- | --- |
-| SDK 0.3.0 | Package manifest and runtime version are 0.3.0. Exact source `1972af1ce3f0d14054f3693e250c668aff536884` passed the full cross-platform CI matrix. Current local totals are 153 SDK/package tests, 247 JavaScript unit tests, 22 macOS native groups, and 30 macOS real-loopback tests. The tarball, modules ZIP, and checksum file were published as `sdk-v0.3.0` on September 14, 2026. | Keep capability checks in consuming applications because SDK and companion versions are independent. [SDK release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0), [CI run](https://github.com/noisefactorllc/sync/actions/runs/34803984585), [retained evidence](reviews/evidence/2026-09-14/audio-qualification.json). |
+| SDK 0.3.0 | Package manifest and runtime version are 0.3.0. Exact source `1972af1ce3f0d14054f3693e250c668aff536884` passed the full cross-platform CI matrix. The tarball, modules ZIP, and checksum file were published as `sdk-v0.3.0` on September 14, 2026. | Keep capability checks in consuming applications because SDK and companion versions are independent. [SDK release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0), [CI run](https://github.com/noisefactorllc/sync/actions/runs/34803984585), [retained evidence](reviews/evidence/2026-09-14/audio-qualification.json). |
 | Noisedeck audio integration | Source `3ac22df8a8dcc5450bee25e48350a200137bbb96` passed 902 Node tests with one existing skip and ten browser tests: the seven standalone synthetic fixture cases plus three credential-coexistence cases covering video-to-audio token propagation, pending fresh audio consent without losing video recovery, and stale consent failure after a newer credential. A focused set of 89 output and credential tests also passed. Independent review reported no remaining findings. Preview deployment, HTTP and browser smoke, promotion, production deployment, and post-promotion health passed. Production metadata identified merge `2df3966f48ba6fbd931f9a41c262826c375db5ba`, and all 29 changed application files matched the source byte for byte. The new three cases test credential behavior; they do not add physical, production-driver, or sustained combined-load evidence. | Qualify installed native-to-Noisedeck capture on each available interface; the synthetic fixture suite cannot certify hardware. [Retained code, test, and deployment record](reviews/evidence/2026-09-14/audio-qualification.json). |
 | macOS CoreAudio | One built-in microphone was listed as one channel at 48 kHz; this was discovery, not a new physical capture test. | Test a signed installed bundle, denied and revoked permission, and physical multichannel input. [Recorded inventory](reviews/evidence/2026-09-13/audio-input.json). |
-| Linux ALSA/JACK | The exact-source Ubuntu 24.04 x86_64 release job passed package verification and both final 32-channel, 48 kHz signed-pattern probes: JACK validated 94,208 frames and PipeWire via `pw-jack` validated 95,168, both with zero mismatches, cursor discontinuities, or drops. The current 30-second Chromium/Noisedeck software-source run validated 1,480,640 frames with zero mismatches and 1,024 native-ring drops; native video was not running. The September 13 result with 1,088 drops is retained only as historical evidence. | Keep physical interface claims and combined audio/video claims pending. [CI job](https://github.com/noisefactorllc/sync/actions/runs/34803984585/job/103852091230), [current evidence](reviews/evidence/2026-09-14/audio-qualification.json), [historical JACK evidence](reviews/evidence/2026-09-13/audio-jack.json). |
+| Linux ALSA/JACK | The exact-source Ubuntu 24.04 x86_64 release job passed package verification and both final 32-channel, 48 kHz signed-pattern probes: JACK validated 94,208 frames and PipeWire via `pw-jack` validated 95,168, both with zero mismatches, cursor discontinuities, or drops. The September 14, 2026 30-second Chromium/Noisedeck software-source run validated 1,480,640 frames with zero mismatches and 1,024 native-ring drops; native video was not running. The September 13 result with 1,088 drops is retained only as historical evidence. | Keep physical interface claims and combined audio/video claims pending. [CI job](https://github.com/noisefactorllc/sync/actions/runs/34803984585/job/103852091230), [current evidence](reviews/evidence/2026-09-14/audio-qualification.json), [historical JACK evidence](reviews/evidence/2026-09-13/audio-jack.json). |
 | Windows WASAPI | Exact-source hosted Windows build/runtime gates passed, and the physical Windows camera end-to-end gate passed separately. The retained WASAPI inventory was empty; no audio source was opened and no WASAPI PCM capture passed. | Record a non-empty endpoint inventory and capture its opened channel count, sample rate, signed samples, discontinuities, and drops before making a Windows audio compatibility claim. [Cross-platform CI](https://github.com/noisefactorllc/sync/actions/runs/34803984585), [camera workflow](https://github.com/noisefactorllc/sync/actions/runs/34803984593), [retained evidence](reviews/evidence/2026-09-14/audio-qualification.json). |
 | Physical AudioFuse | A suitable host has been requested; no physical capture result is recorded. | Record the host audio profile, opened format, numbered input identity, signed raw behavior where supported, and selector isolation. |
 | Simultaneous audio and video | Not established by the retained JACK run. | Measure channel identity, discontinuities, ring drops, CPU, memory, and video delivery under sustained combined load. [Video verification approach](reviews/2026-09-10-interoperability.md). |
-| Public release | Native preview 0.2.68 and SDK 0.3.0 are published from exact source `1972af1ce3f0d14054f3693e250c668aff536884`; immutable and rolling installer URLs plus both SDK packages returned HTTP 200 with their expected sizes and SHA-256 hashes. Noisedeck source `3ac22df8a8dcc5450bee25e48350a200137bbb96` passed preview deployment, HTTP and browser smoke, promotion, production deployment, and post-promotion health. All 29 changed production application files matched that source byte for byte. | Physical audio and combined audio/video remain separate requirements before broad hardware or production-performance claims. [Download page](https://sync.noisedeck.app/#download), [SDK release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0), [retained byte and test proof](reviews/evidence/2026-09-14/audio-qualification.json). |
+| Public release | On September 14, 2026, native preview 0.2.68 and SDK 0.3.0 were published from exact source `1972af1ce3f0d14054f3693e250c668aff536884`; immutable and rolling installer URLs plus both SDK packages returned HTTP 200 with their expected sizes and SHA-256 hashes. Noisedeck source `3ac22df8a8dcc5450bee25e48350a200137bbb96` passed preview deployment, HTTP and browser smoke, promotion, production deployment, and post-promotion health. All 29 changed production application files matched that source byte for byte. | Physical audio and combined audio/video remain separate requirements before broad hardware or production-performance claims. [Download page](https://sync.noisedeck.app/#download), [SDK release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0), [retained byte and test proof](reviews/evidence/2026-09-14/audio-qualification.json). |
 
 ## Verification and limits of the evidence
 
@@ -284,8 +286,6 @@ attribution, not the current SDK version.
 
 The current automated checks exercise native buffering, strict parsing,
 channel identity, SDK decoding, and the real localhost daemon-to-browser route.
-Current local totals are 153 SDK/package tests, 247 JavaScript unit tests,
-22 macOS native test groups, and 30 macOS real-loopback tests, all passing.
 [Native test definitions](../CMakeLists.txt),
 [loopback tests](../test/integration/loopback.test.js),
 [browser tests](../test/browser/client.test.js),
@@ -416,7 +416,7 @@ Completed for the public preview:
    installed virtual-camera acceptance. The retained Windows audio inventory
    was empty, and none of the physical video or virtual-camera gates exercised
    native audio. [Qualification evidence](reviews/evidence/2026-09-14/audio-qualification.json).
-2. Native preview 0.2.68 and SDK 0.3.0 were published. Public byte checks matched
+2. On September 14, 2026, native preview 0.2.68 and SDK 0.3.0 were published. Public byte checks matched
    the expected size and SHA-256 for all immutable and rolling installers plus
    both SDK packages. [Download page](https://sync.noisedeck.app/#download),
    [SDK release](https://github.com/noisefactorllc/sync/releases/tag/sdk-v0.3.0),
