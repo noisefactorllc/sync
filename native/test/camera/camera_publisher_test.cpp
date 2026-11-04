@@ -86,7 +86,53 @@ const std::array<std::byte, 16> kRedPayload{
     std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
     std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255}};
 
+// Stands in for a sink whose constructor acts on the system, as the macOS sink
+// does when it starts the Sync Camera sink stream.
+struct ConstructionCountingSink final : CameraSink {
+  static inline int constructed = 0;
+  bool is_available;
+
+  explicit ConstructionCountingSink(bool available) : is_available(available) { ++constructed; }
+
+  auto available() const noexcept -> bool override { return is_available; }
+  auto unavailable_reason() const noexcept -> CameraSinkUnavailableReason override {
+    return is_available ? CameraSinkUnavailableReason::None
+                        : CameraSinkUnavailableReason::DeviceNotFound;
+  }
+  auto unavailable_status() const noexcept -> std::int32_t override { return 0; }
+  auto submit(const CameraSinkFrame&) noexcept -> CameraSinkSubmit override {
+    return CameraSinkSubmit::Accepted;
+  }
+};
+
 }  // namespace
+
+SYNC_TEST(selected_camera_constructs_no_sink_for_a_run_without_the_camera) {
+  using noisefactor::sync::camera::SelectedCamera;
+  ConstructionCountingSink::constructed = 0;
+  {
+    SelectedCamera<ConstructionCountingSink> camera(false, true);
+    SYNC_REQUIRE(ConstructionCountingSink::constructed == 0);
+    SYNC_REQUIRE(camera.sink() == nullptr);
+    SYNC_REQUIRE(camera.publisher() == nullptr);
+  }
+  SYNC_REQUIRE(ConstructionCountingSink::constructed == 0);
+
+  // A run that selects the camera still builds and drives it.
+  SelectedCamera<ConstructionCountingSink> camera(true, true);
+  SYNC_REQUIRE(ConstructionCountingSink::constructed == 1);
+  SYNC_REQUIRE(camera.sink() != nullptr);
+  SYNC_REQUIRE(camera.publisher() != nullptr);
+  SYNC_REQUIRE(camera.publisher()->available());
+  SYNC_REQUIRE(camera.publisher()->open_sender("a", "first"));
+  SYNC_REQUIRE(camera.publisher()->driving_sender() == "a");
+
+  SelectedCamera<ConstructionCountingSink> unavailable(true, false);
+  SYNC_REQUIRE(ConstructionCountingSink::constructed == 2);
+  SYNC_REQUIRE(!unavailable.publisher()->available());
+  SYNC_REQUIRE(unavailable.publisher()->unavailable_reason() ==
+               CameraSinkUnavailableReason::DeviceNotFound);
+}
 
 SYNC_TEST(camera_publisher_reports_sink_availability_and_reason) {
   FakeSink sink;

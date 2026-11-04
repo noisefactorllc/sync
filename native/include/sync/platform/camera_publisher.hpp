@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include <sync/frame_receiver.hpp>
 #include <sync/platform/camera_sink.hpp>
@@ -48,6 +49,38 @@ class CameraFramePublisher final : public FramePublisher {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+// A camera sink and its publisher, constructed only when the run selects the
+// camera. A sink acts on the system in its constructor: the macOS sink starts
+// the Sync Camera sink stream and opens the shared frame ring, which takes the
+// camera from the daemon that feeds it. A run that names other publishers must
+// leave the camera alone, so it builds neither.
+template <typename Sink>
+class SelectedCamera final {
+ public:
+  template <typename... Args>
+  explicit SelectedCamera(bool selected, Args&&... args) {
+    if (!selected) return;
+    sink_.emplace(std::forward<Args>(args)...);
+    publisher_.emplace(*sink_);
+  }
+
+  SelectedCamera(const SelectedCamera&) = delete;
+  auto operator=(const SelectedCamera&) -> SelectedCamera& = delete;
+  SelectedCamera(SelectedCamera&&) = delete;
+  auto operator=(SelectedCamera&&) -> SelectedCamera& = delete;
+
+  // Null when the run did not select the camera.
+  [[nodiscard]] auto sink() noexcept -> Sink* { return sink_.has_value() ? &*sink_ : nullptr; }
+  [[nodiscard]] auto publisher() noexcept -> CameraFramePublisher* {
+    return publisher_.has_value() ? &*publisher_ : nullptr;
+  }
+
+ private:
+  // The publisher holds a reference to the sink, so it is destroyed first.
+  std::optional<Sink> sink_;
+  std::optional<CameraFramePublisher> publisher_;
 };
 
 }  // namespace noisefactor::sync::camera

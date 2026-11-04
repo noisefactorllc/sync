@@ -257,8 +257,11 @@ int run_with_providers(nfsync::ServerOptions &options,
   });
   const std::array<nfsync::MetalFrameConsumer *, 1> consumers{{&syphon}};
   nfsync::MetalFramePublisher metal(consumers);
-  nfsync::camera::CmioCameraSink camera_sink;
-  nfsync::camera::CameraFramePublisher camera(camera_sink);
+  // Constructed only when this run selects the camera. The sink's constructor
+  // starts the Sync Camera sink stream and opens the shared frame ring, and
+  // the extension feeds from the last client that started. A `syncd
+  // --publisher syphon` beside Sync.app's helper used to take the camera.
+  nfsync::camera::SelectedCamera<nfsync::camera::CmioCameraSink> camera(camera_selected);
 #endif
 #if defined(_WIN32)
   nfsync::SpoutFramePublisher spout({
@@ -339,10 +342,16 @@ int run_with_providers(nfsync::ServerOptions &options,
 // extension against a Media Foundation virtual camera -- but they meet at
 // CameraFramePublisher, so the provider looks the same from here.
 #if defined(__APPLE__)
-  const bool camera_available = camera.available();
-  nfsync::FramePublisher *const camera_publisher = &camera;
-  const std::string camera_reason_text = nfsync::camera::describe_unavailability(
-      camera.unavailable_reason(), camera.unavailable_status());
+  // Null whenever this run did not select the camera; ProviderAssembly::offer
+  // drops an unconfigured provider before it looks at availability.
+  nfsync::camera::CameraFramePublisher *const camera_output = camera.publisher();
+  const bool camera_available = camera_output != nullptr && camera_output->available();
+  nfsync::FramePublisher *const camera_publisher = camera_output;
+  const std::string camera_reason_text =
+      camera_output != nullptr
+          ? nfsync::camera::describe_unavailability(camera_output->unavailable_reason(),
+                                                    camera_output->unavailable_status())
+          : std::string("the camera was not selected for this run");
   const char *const camera_reason = camera_reason_text.c_str();
 #elif defined(_WIN32)
   // Unset whenever this run did not select the camera, in which case nothing
