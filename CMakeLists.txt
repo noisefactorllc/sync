@@ -713,7 +713,10 @@ else()
   set_target_properties(sync_ndi_stub_runtime PROPERTIES
     PREFIX "lib" OUTPUT_NAME "ndi" SUFFIX ".so.5")
 endif()
+# The publisher loads the runtime's fixed file name in every configuration.
+# RtAudio sets a default debug postfix on Windows; it must not rename the stub.
 set_target_properties(sync_ndi_stub_runtime PROPERTIES
+  DEBUG_POSTFIX ""
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-runtime
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-runtime)
 add_dependencies(sync_ndi_publisher_tests sync_ndi_stub_runtime)
