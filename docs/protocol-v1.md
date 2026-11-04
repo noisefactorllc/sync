@@ -295,8 +295,17 @@ The daemon can return these control error codes:
 - `sender_not_found`
 - `internal_error`
 
-The daemon keeps an authenticated control connection open after an ordinary command error.
+The [audio input extension](audio-input.md#wire-format) adds these codes:
+
+- `audio_pairing_required`: the origin's grant holds video consent only. A new pairing grants audio.
+- `audio_unavailable`: the audio source is unavailable, busy, disconnected or denied by the operating system, or the capture failed.
+- `audio_busy`: the connection sent an audio request while its previous audio request was still pending.
+
+The daemon keeps an authenticated control connection open after an ordinary command error, including `audio_pairing_required` and a failed audio open or read (`audio_unavailable`).
 An authentication error closes the connection.
+`audio_busy` closes the connection with code 1008.
+So does `audio_unavailable` when the daemon cannot start the connection's audio worker.
+Each of these closes also removes the senders that the connection owns.
 
 ## Sender data connection
 
@@ -411,7 +420,7 @@ The daemon emits these WebSocket close codes:
 | 1002 | WebSocket framing error or malformed binary frame |
 | 1003 | Wrong text or binary opcode for the endpoint |
 | 1007 | Invalid UTF-8 text payload |
-| 1008 | Authentication, pairing policy, hello timeout, or incomplete-frame timeout |
+| 1008 | Authentication, pairing policy, hello timeout, incomplete-frame timeout, `audio_busy`, or an audio worker that cannot start |
 | 1011 | A native provider failed while it published a frame, or the daemon could not convert or decode a format `2` or `3` frame |
 | 1013 | The inbound payload has no remaining budget |
 

@@ -198,7 +198,8 @@ The audio extension uses these authenticated `/control` requests:
 Discovery returns `audioSources` with `id`, `name`, `channelCount`, and
 `sampleRate`. Open returns `audioSourceOpened` with the actual format. Close
 returns `audioSourceClosed`. Read returns a binary packet; errors remain bounded
-JSON. An open has a 60-second SDK deadline to accommodate OS permission.
+JSON. [Control errors](protocol-v1.md#control-errors) lists the audio error codes
+and the ones that close the connection. An open has a 60-second SDK deadline to accommodate OS permission.
 Ordinary reads keep the configured control deadline. One client must not try to
 read or close another connection's capture. [Parser and response encoders](../native/src/control.cpp),
 [SDK](../browser/client.js).
