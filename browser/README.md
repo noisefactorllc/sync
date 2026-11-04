@@ -15,6 +15,7 @@ For candidate testing, run the daemon from the same source checkout.
 Passive `probe()` and `connect()` calls do not start pairing.
 Call `pair(name)` from a deliberate user action, such as a click.
 The browser can show its local network prompt during this call.
+`connect()` can show the same prompt, so call it from a user action too.
 The Sync companion then shows the exact origin in a separate approval prompt.
 
 The SDK returns the approved token to the caller.

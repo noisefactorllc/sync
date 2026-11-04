@@ -733,7 +733,7 @@ test('a stalled passive probe permission query is bounded without making a healt
   }
 });
 
-test('a stalled passive connect permission query is bounded without creating a socket', async () => {
+test('a stalled permission query after a failed connect is bounded', async () => {
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
   const timers = new Set();
@@ -751,12 +751,14 @@ test('a stalled passive connect permission query is bounded without creating a s
       timer.active = false;
       timers.delete(timer);
     };
-    FakeWebSocket.reset(() => {});
-    bridge = client({ permissions: { query: async () => new Promise(() => {}) } });
+    FakeWebSocket.reset((socket) => socket.fail());
+    let queries = 0;
+    bridge = client({ permissions: { query: async () => { queries += 1; return new Promise(() => {}); } } });
     const outcome = await outcomeWithinTurns(bridge.connect());
     assert.equal(outcome?.status, 'rejected');
     assert.ok(outcome.error instanceof SyncTimeoutError);
-    assert.equal(FakeWebSocket.instances.length, 0);
+    assert.equal(FakeWebSocket.instances.length, 1);
+    assert.equal(queries, 1);
     assert.equal(timers.size, 0);
   } finally {
     bridge?.close();
@@ -863,7 +865,9 @@ test('close owns passive permission queries and prevents their late network cont
     },
   };
   let fetchCalls = 0;
-  scriptedControl();
+  // The control socket fails, so connect waits on the permission query that
+  // explains the failure while the probe waits on its passive gate.
+  FakeWebSocket.reset((socket) => socket.fail());
   const bridge = client({
     permissions,
     fetch: async () => {
@@ -888,11 +892,11 @@ test('close owns passive permission queries and prevents their late network cont
   assert.equal(probeOutcome.value.available, false);
   assert.equal(probeOutcome.value.code, SYNC_ERROR_CODE.LIFECYCLE);
   assert.equal(typeof probeOutcome.value.message, 'string');
-  assert.equal(FakeWebSocket.instances.length, 0);
+  assert.equal(FakeWebSocket.instances.length, 1, 'no socket opens after close');
   assert.equal(fetchCalls, 0);
 });
 
-test('connect enforces configuration before permission and passively gates socket creation', async () => {
+test('connect enforces configuration first and opens the socket while permission is prompt', async () => {
   {
     const scripted = permissionScript(['prompt']);
     const bridge = new SyncBridgeClient({
@@ -905,26 +909,39 @@ test('connect enforces configuration before permission and passively gates socke
     assert.equal(scripted.calls.length, 0);
     assert.equal(FakeWebSocket.instances.length, 0);
   }
+  {
+    // An explicit connect lets the browser show its permission prompt: the
+    // control socket opens with no passive query in front of it.
+    const scripted = permissionScript(['prompt']);
+    scriptedControl();
+    const bridge = client({ permissions: scripted.permissions });
+    assert.deepEqual(await bridge.connect(), WELCOME);
+    assert.deepEqual(scripted.calls, []);
+    assert.equal(FakeWebSocket.instances.length, 1);
+    bridge.close();
+  }
+  // A control socket that fails is explained by the permission state after it.
   for (const [state, ErrorClass] of [
     ['prompt', SyncPermissionRequiredError],
     ['denied', SyncPermissionDeniedError],
+    ['granted', SyncUnavailableError],
   ]) {
     const scripted = permissionScript([state]);
-    FakeWebSocket.reset(() => {});
+    FakeWebSocket.reset((socket) => socket.fail());
     await assert.rejects(client({ permissions: scripted.permissions }).connect(), ErrorClass);
     assert.deepEqual(scripted.calls, [{ name: 'loopback-network' }]);
-    assert.equal(FakeWebSocket.instances.length, 0);
+    assert.equal(FakeWebSocket.instances.length, 1);
   }
 });
 
-test('connect retains the direct socket path when both permission descriptors are unsupported', async () => {
+test('connect keeps the socket failure when both permission descriptors are unsupported', async () => {
   const scripted = permissionScript([
     unsupportedPermission(),
     Object.assign(new Error('unsupported'), { name: 'NotSupportedError' }),
   ]);
-  scriptedControl();
+  FakeWebSocket.reset((socket) => socket.fail());
   const bridge = client({ permissions: scripted.permissions });
-  assert.deepEqual(await bridge.connect(), WELCOME);
+  await assert.rejects(bridge.connect(), SyncUnavailableError);
   assert.deepEqual(scripted.calls, [
     { name: 'loopback-network' },
     { name: 'local-network-access' },

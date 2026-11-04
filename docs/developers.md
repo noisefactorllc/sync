@@ -117,8 +117,10 @@ connection. Already authenticated sessions remain open; rotation affects later
 authentication attempts. [Pairing-store replacement](../native/src/pairing_store.cpp),
 [control authentication](../native/src/server.cpp).
 
-`probe()` and `connect()` are passive operations.
-They return or throw a permission result instead of starting pairing.
+`probe()` and `connect()` do not start pairing.
+`probe()` is passive: while the loopback permission is in the prompt state, it returns a permission result and does not reach the daemon.
+`connect()` opens the control connection, so the browser can show its local network prompt.
+If that connection fails, `connect()` throws the permission result.
 
 The default daemon endpoint is `http://127.0.0.1:53979`.
 The `endpoint` option also accepts an explicit IPv4 or IPv6 loopback URL with a port.

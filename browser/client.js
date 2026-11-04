@@ -1359,16 +1359,27 @@ export class SyncBridgeClient {
   }
 
   async _connect() {
-    const attempt = this._beginPassiveAttempt();
+    // connect() is the explicit call that can show the browser's loopback
+    // permission prompt, as pair() is: an app calls it from a user action such
+    // as Connect Sync. It opens the control socket first and reads the
+    // permission state only to explain an open that failed.
+    let socket;
     try {
-      await this._enforcePassivePermission(attempt);
+      socket = await this._openSocket(
+        `${this._endpoint.wsOrigin}/control`, undefined, 'control connection',
+      );
+    } catch (error) {
       if (this._closed) throw new SyncLifecycleError();
-    } finally {
-      this._finishPassiveAttempt(attempt);
+      if (!(error instanceof SyncUnavailableError)) throw error;
+      const attempt = this._beginPassiveAttempt();
+      try {
+        await this._enforcePassivePermission(attempt);
+        if (this._closed) throw new SyncLifecycleError();
+      } finally {
+        this._finishPassiveAttempt(attempt);
+      }
+      throw error;
     }
-    const socket = await this._openSocket(
-      `${this._endpoint.wsOrigin}/control`, undefined, 'control connection',
-    );
     if (this._closed) {
       socket.close();
       throw new SyncLifecycleError();

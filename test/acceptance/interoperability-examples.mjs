@@ -100,7 +100,9 @@ try {
   const httpsOrigin = `https://127.0.0.1:${httpsServer.address().port}`;
   browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 960, height: 800 } });
-  for (const origin of [httpOrigin, httpsOrigin]) await context.grantPermissions(['local-network-access'], { origin });
+  // The loopback-served example runs with no site permission set, as a user's
+  // browser has it: Connect itself must reach the daemon.
+  await context.grantPermissions(['local-network-access'], { origin: httpsOrigin });
   const page = await context.newPage();
   const origins = new Set();
   const captures = [];
