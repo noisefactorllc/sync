@@ -295,8 +295,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 Microsoft Visual C++ Runtime
-Source: the redistributable folder (Microsoft.VC143.CRT) of the Visual Studio
-2022 toolset that builds this release
+Source: the redistributable Visual C++ runtime folder (Microsoft.VC*.CRT) of
+the Visual Studio toolset that builds this release
 
 The installer carries the Visual C++ runtime DLLs that Sync's binaries import
 (msvcp140*.dll and vcruntime140*.dll), copied unmodified from that folder, so
