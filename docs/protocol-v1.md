@@ -329,14 +329,14 @@ The payload starts immediately after the 64-byte header.
 | 4 | 2 | `uint16` | Version | `1` |
 | 6 | 2 | `uint16` | Header size | `64` |
 | 8 | 4 | `uint32` | Flags | `1`, top-down rows |
-| 12 | 2 | `uint16` | Pixel format | `1`, RGBA8 unorm |
-| 14 | 2 | `uint16` | Color space | `1` or `2` |
-| 16 | 2 | `uint16` | Alpha mode | `1`, `2`, or `3` |
+| 12 | 2 | `uint16` | Pixel format | `1`, `2`, or `3` |
+| 14 | 2 | `uint16` | Color space | `1` or `2`; format `3` requires `1` |
+| 16 | 2 | `uint16` | Alpha mode | `1`, `2`, or `3`; formats `2` and `3` require `1` |
 | 18 | 2 | `uint16` | Reserved | `0` |
-| 20 | 4 | `uint32` | Width | 1 through 4096 |
-| 24 | 4 | `uint32` | Height | 1 through 4096 |
-| 28 | 4 | `uint32` | Row stride | At least `width * 4` |
-| 32 | 4 | `uint32` | Payload bytes | Exactly `rowStride * height` |
+| 20 | 4 | `uint32` | Width | 1 through 4096; even for formats `2` and `3` |
+| 24 | 4 | `uint32` | Height | 1 through 4096; even for formats `2` and `3` |
+| 28 | 4 | `uint32` | Row stride | Format `1`: at least `width * 4`. Format `2`: even and at least `width`. Format `3`: `0` |
+| 32 | 4 | `uint32` | Payload bytes | Format `1`: exactly `rowStride * height`. Format `2`: exactly `rowStride * (height + height / 2)`. Format `3`: 1 through 8388608 |
 | 36 | 8 | `uint64` | Sequence | Monotonic sender sequence |
 | 44 | 8 | `uint64` | Presentation time | Microseconds on the sender clock |
 | 52 | 12 | bytes | Reserved | All zero |
@@ -346,6 +346,8 @@ Pixel-format enum:
 | Value | Meaning |
 | ---: | --- |
 | 1 | Four 8-bit unorm channels in RGBA order |
+| 2 | NV12: an 8-bit Y plane, then an interleaved 8-bit CbCr plane at half width and half height |
+| 3 | H.264 Annex B: one compressed access unit |
 
 Color-space enum:
 
@@ -363,9 +365,23 @@ Alpha-mode enum:
 | 3 | Premultiplied alpha |
 
 The first payload row is the top image row.
-Each row starts with `width` RGBA pixels and can end with stride padding.
 The payload cannot exceed 64 MiB.
 The complete WebSocket message must equal `64 + payloadBytes` bytes.
+
+Format `1` (RGBA): each row starts with `width` RGBA pixels and can end with stride padding.
+
+Format `2` (NV12): the payload holds `height` rows of the Y plane, then `height / 2` rows of the CbCr plane.
+Both planes use `rowStride`, and each row can end with stride padding.
+Each CbCr row holds `width / 2` Cb and Cr byte pairs, one pair for each 2 by 2 block of Y samples.
+The daemon converts the frame to opaque RGBA with the ITU-R BT.709 matrix and video range (Y 16 through 235, Cb and Cr 16 through 240).
+It then publishes that RGBA in the frame's color space.
+
+Format `3` (H.264 Annex B): the payload is one access unit with start codes, at most 8 MiB.
+The frame carries no row stride, the color space is sRGB, and the alpha mode is opaque.
+The width and height state the decoded picture size.
+The macOS daemon decodes it to opaque RGBA from Sync 0.2.84.
+The Windows and Linux daemons accept the header but do not decode the access unit.
+They count the frame as failed and close the data socket with code 1011.
 
 The receiver drops a sequence value that is not greater than the previous valid sequence.
 It records the latest sequence and presentation time before it calls the providers.
@@ -396,7 +412,7 @@ The daemon emits these WebSocket close codes:
 | 1003 | Wrong text or binary opcode for the endpoint |
 | 1007 | Invalid UTF-8 text payload |
 | 1008 | Authentication, pairing policy, hello timeout, or incomplete-frame timeout |
-| 1011 | A native provider failed while it published a frame |
+| 1011 | A native provider failed while it published a frame, or the daemon could not convert or decode a format `2` or `3` frame |
 | 1013 | The inbound payload has no remaining budget |
 
 Code 1008 can use the reason `incomplete_frame_timeout`.
@@ -414,6 +430,9 @@ The welcome and paired responses state the selected version.
 
 Frame headers do not negotiate a version.
 A v1 receiver rejects any frame whose header version or size differs from v1.
+Pixel formats `2` and `3` are v1 formats.
+A daemon that predates a format closes the data socket with code 1002 when it receives that format.
+Only the macOS daemon decodes format `3`, from Sync 0.2.84.
 Future senders must use a negotiated future control version before they send a different frame format.
 
 The SDK version and daemon product version are independent.
