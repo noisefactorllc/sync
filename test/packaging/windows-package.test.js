@@ -16,8 +16,10 @@ function source(relative) {
   return readFileSync(path.join(sourceDirectory, relative), "utf8");
 }
 
+// Skipped only when no package directory is named. A run that names
+// SYNC_PACKAGE_DIR checks that package, and a missing bundle there fails.
 const stagedOnWindows = {
-  skip: process.platform !== "win32" || !existsSync(bundle),
+  skip: process.platform !== "win32" || !process.env.SYNC_PACKAGE_DIR,
 };
 
 test("packaged Sync bundle is self-contained and x64", stagedOnWindows, () => {

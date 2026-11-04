@@ -47,11 +47,11 @@ function walk(directory) {
   });
 }
 
-// Skipped unless a bundle has actually been staged: the plain build job
-// compiles the tree without running the packaging target, and a test that
-// asserted otherwise would fail every run for reasons unrelated to the code.
+// Skipped only when no package directory is named: the plain build job
+// compiles the tree without running the packaging target. A run that names
+// SYNC_PACKAGE_DIR checks that package, and a missing bundle there fails.
 const stagedOnMacos = {
-  skip: process.platform !== "darwin" || !existsSync(app),
+  skip: process.platform !== "darwin" || !process.env.SYNC_PACKAGE_DIR,
 };
 
 test("packaged Sync app is self-contained and carries its preview metadata",
@@ -392,8 +392,10 @@ test("a half-configured render build is refused before anything is packaged", {
 const dmgs = existsSync(packageDirectory)
   ? readdirSync(packageDirectory).filter((name) => /^Sync-.+-arm64\.dmg$/.test(name))
   : [];
+// The release checks the bundle before it signs it and builds the DMG, so a
+// named package directory may hold no DMG yet.
 const stagedDmgOnMacos = {
-  skip: process.platform !== "darwin" || dmgs.length === 0,
+  skip: stagedOnMacos.skip || dmgs.length === 0,
 };
 
 const resolveAlias = `ObjC.import("Foundation");

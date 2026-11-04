@@ -808,6 +808,165 @@ jobs:
           if ($output -notmatch 'seance') { throw "unexpected sync-render --help output:`n$output" }
           Write-Output $output
 
+  # The macOS app is a shipped product: build its bundle and DMG the way the
+  # preview release does (macOS 13 deployment target, pinned libuv, OpenSSL
+  # and Syphon, Qt's own packages for the render helper), then run its
+  # packaging checks on what was built. Unsigned: signing belongs to the
+  # release.
+  macos-package:
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
+    name: macOS package
+    runs-on: macos-latest
+    timeout-minutes: 75
+    env:
+      SYNC_EXPECT_RENDER: '1'
+      SYPHON_REVISION: 71351d4b484cd2d1917867f7846a5cdca724552d
+      LIBUV_REVISION: 1cfa32ff59c076ffb6ed735bbc8c18361558661f
+      OPENSSL_REVISION: aae016bfd52fcad2bc9657c2c782cfdf73b1ed5f
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: sync
+          persist-credentials: false
+
+      - name: Check out pinned Syphon source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: Syphon/Syphon-Framework
+          ref: 71351d4b484cd2d1917867f7846a5cdca724552d
+          path: syphon
+          persist-credentials: false
+
+      - name: Check out pinned libuv source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: libuv/libuv
+          ref: 1cfa32ff59c076ffb6ed735bbc8c18361558661f
+          path: libuv
+          persist-credentials: false
+
+      - name: Check out pinned OpenSSL source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: openssl/openssl
+          ref: aae016bfd52fcad2bc9657c2c782cfdf73b1ed5f
+          path: openssl
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Install packaging tools
+        run: brew install cmake pkg-config dylibbundler librsvg jq
+
+      # Homebrew's libuv and OpenSSL target the runner's macOS, newer than the
+      # bundle's minimum, and the bundle verifier rejects them.
+      - name: Build pinned libuv and OpenSSL for macOS 13
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C libuv rev-parse HEAD)" = "$LIBUV_REVISION"
+          test "$(git -C openssl rev-parse HEAD)" = "$OPENSSL_REVISION"
+          SYNC_DEPS="$RUNNER_TEMP/sync-deps"
+          cmake -S libuv -B "$RUNNER_TEMP/libuv-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$SYNC_DEPS" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DLIBUV_BUILD_SHARED=ON \
+            -DLIBUV_BUILD_TESTS=OFF \
+            -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/libuv-build" --target install --parallel 4
+          pushd openssl
+          MACOSX_DEPLOYMENT_TARGET=13.0 ./Configure \
+            darwin64-arm64-cc shared no-tests \
+            --prefix="$SYNC_DEPS" \
+            --openssldir="$SYNC_DEPS/ssl" \
+            -mmacosx-version-min=13.0
+          make -j4
+          make install_sw
+          popd
+          {
+            echo "SYNC_DEPS=$SYNC_DEPS"
+            echo "PKG_CONFIG_PATH=$SYNC_DEPS/lib/pkgconfig:$SYNC_DEPS/lib64/pkgconfig"
+          } >> "$GITHUB_ENV"
+
+      - name: Build pinned Syphon framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C syphon rev-parse HEAD)" = "$SYPHON_REVISION"
+          xcodebuild \
+            -project syphon/Syphon.xcodeproj \
+            -scheme Syphon \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/syphon-derived" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            build
+          SYPHON_FRAMEWORK=$(find "$RUNNER_TEMP/syphon-derived/Build/Products/Release" \
+            -type d -name Syphon.framework -print -quit)
+          test -n "$SYPHON_FRAMEWORK"
+          echo "SYPHON_FRAMEWORK=$SYPHON_FRAMEWORK" >> "$GITHUB_ENV"
+
+      # Qt's own binary packages, as the release uses; macdeployqt copies the
+      # Qt the render helper links into the app.
+      - name: Install Qt for the render helper
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.11.1'
+          modules: 'qtwebsockets qtmultimedia qtimageformats'
+          cache: true
+
+      - name: Build the app bundle and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYNC_BUILD="$RUNNER_TEMP/sync-build"
+          test -d "$QT_ROOT_DIR"
+          cmake -S sync -B "$SYNC_BUILD" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_PREFIX_PATH="$SYNC_DEPS;$QT_ROOT_DIR" \
+            -DSYNC_BUILD_RENDER=ON \
+            -DOPENSSL_ROOT_DIR="$SYNC_DEPS" \
+            -DSYNC_SYPHON_FRAMEWORK_PATH="$SYPHON_FRAMEWORK" \
+            -DSYNC_DYLIB_SEARCH_PATH="$SYNC_DEPS/lib"
+          cmake --build "$SYNC_BUILD" --target sync_macos_dmg --parallel 4
+          {
+            echo "SYNC_BUILD=$SYNC_BUILD"
+            echo "SYNC_PACKAGE_DIR=$SYNC_BUILD/package"
+            echo "SYNC_APP=$SYNC_BUILD/package/Sync.app"
+          } >> "$GITHUB_ENV"
+
+      # Every bundle case runs here: a skipped case fails the job.
+      - name: Run the macOS packaging tests on the built package
+        shell: bash
+        working-directory: sync
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap test/packaging/macos-package.test.js \
+            | tee "$RUNNER_TEMP/macos-package.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/macos-package.tap"
+
+      - name: Verify the bundle
+        shell: bash
+        working-directory: sync
+        run: |
+          set -euo pipefail
+          version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - \
+            "$SYNC_APP/Contents/Info.plist")
+          scripts/verify-macos-bundle.sh "$SYNC_APP" "$version"
+
+      - name: Smoke the unsigned app
+        working-directory: sync
+        run: scripts/smoke-macos-app.sh "$SYNC_APP"
+
   scripts:
     needs: changes
     if: needs.changes.outputs.product == 'true'
