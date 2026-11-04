@@ -518,6 +518,19 @@ SYNC_TEST(cli_render_inputs_need_a_session_and_safe_values) {
   SYNC_REQUIRE(parse({"--render-join", "a", "--render-audio", "WING"}).ok());
 }
 
+SYNC_TEST(cli_usage_names_the_render_inputs_inside_the_render_join_group) {
+  std::ostringstream usage;
+  cli::print_usage(usage);
+  const std::string text = usage.str();
+  const auto group = text.find("[--render-join <session-id-or-link> ");
+  const auto audio = text.find("[--render-audio <default|source>]");
+  // The media flag repeats, and the bracket after it closes the group.
+  const auto media = text.find("[--render-media <camera|camera:<name>|file:<path>>]...]");
+  SYNC_REQUIRE(group != std::string::npos);
+  SYNC_REQUIRE(audio != std::string::npos && audio > group);
+  SYNC_REQUIRE(media != std::string::npos && media > audio);
+}
+
 SYNC_TEST(cli_render_flags_are_not_part_of_management_or_camera_commands) {
   SYNC_REQUIRE(!parse({"--list-pairings", "--render-join", "a"}).ok());
   SYNC_REQUIRE(!parse({"--register-camera", "--render-join", "a"}).ok());
