@@ -36,6 +36,8 @@ test("Linux package is a complete conservative amd64 daemon artifact",
     "./usr/lib/udev/rules.d/70-noisedeck-sync-camera.rules",
     "./usr/share/noisedeck-sync/noisedeck-sync-camera.modprobe",
     "./usr/share/noisedeck-sync/noisedeck-sync-camera.modules-load",
+    "./usr/share/noisedeck-sync/apt-key-fingerprint",
+    "./usr/share/keyrings/noisedeck-sync-archive-keyring.gpg",
     "./usr/share/icons/hicolor/256x256/apps/noisedeck-sync.png",
     "./usr/share/metainfo/io.noisefactor.sync.metainfo.xml",
     "./usr/share/doc/noisedeck-sync/copyright",
@@ -85,5 +87,32 @@ test("Linux package is a complete conservative amd64 daemon artifact",
     assert.match(scripts, /cmp -s/);
   } finally {
     await rm(controlRoot, { recursive: true, force: true });
+  }
+});
+
+test("Linux package verifier refuses an update helper without its archive keyring",
+     { skip: process.platform !== "linux" }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sync-package-verify-"));
+  try {
+    const stage = path.join(root, "stage");
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    for (const directory of ["DEBIAN", "usr/bin", "usr/libexec"]) {
+      await mkdir(path.join(stage, directory), { recursive: true });
+    }
+    await writeFile(path.join(stage, "DEBIAN/control"), [
+      "Package: noisedeck-sync", "Version: 1.0.0", "Architecture: amd64",
+      "Maintainer: Noise Factor <team@noisefactor.io>", "Description: verifier fixture", "",
+    ].join("\n"));
+    for (const file of ["usr/bin/syncd", "usr/bin/syncctl", "usr/libexec/noisedeck-sync-update"]) {
+      await writeFile(path.join(stage, file), "fixture\n", { mode: 0o755 });
+    }
+    const archive = path.join(root, "fixture.deb");
+    await execFile("dpkg-deb", ["--root-owner-group", "--build", stage, archive]);
+    await assert.rejects(
+      execFile("sh", [path.resolve("scripts/verify-linux-package.sh"), archive, "1.0.0"]),
+      error => /update helper without .*noisedeck-sync-archive-keyring\.gpg/.test(error.stderr),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

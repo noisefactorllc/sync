@@ -73,6 +73,8 @@ class LinuxUpdateTests(unittest.TestCase):
         self.engine.enable(1000)
         source = (self.root/'etc/apt/sources.list.d/noisedeck-sync.sources').read_text()
         self.assertIn('Signed-By: /usr/share/keyrings/noisedeck-sync-archive-keyring.gpg', source)
+        # The published repository (the Linux guide's URL), not a path that answers 404.
+        self.assertIn('URIs: https://downloads.noisefactor.io/public-downloads/sync/apt/\n', source)
         self.assertNotIn('Trusted:', source)
         pins = (self.root/'etc/apt/preferences.d/noisedeck-sync').read_text()
         self.assertIn('Package: *\nPin: origin downloads.noisefactor.io\nPin-Priority: -1', pins)

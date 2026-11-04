@@ -19,6 +19,11 @@ if pgrep -x syncd >/dev/null 2>&1; then
   echo "syncd remained running after invalid-option smoke" >&2
   exit 1
 fi
+# The packaged update command enrolls with the packaged archive keyring.
+update_user=${SUDO_USER:-$(id -un)}
+/usr/bin/syncctl update enable --user "$update_user"
+/usr/bin/syncctl update status | grep -q '"state": "enabled"'
+/usr/bin/syncctl update disable
 dpkg --remove noisedeck-sync
 dpkg --purge noisedeck-sync
 test ! -e /usr/bin/syncd

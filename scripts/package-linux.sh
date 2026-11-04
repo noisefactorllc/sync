@@ -37,7 +37,7 @@ mkdir -p "$stage/DEBIAN" "$stage/usr/bin" \
   "$stage/usr/share/noisedeck-sync" "$stage/usr/share/doc/noisedeck-sync" \
   "$stage/usr/share/icons/hicolor/256x256/apps" "$stage/usr/share/metainfo" \
   "$stage/usr/lib/systemd/system" "$stage/usr/lib/tmpfiles.d" "$stage/usr/libexec" \
-  "$package_dir"
+  "$stage/usr/share/keyrings" "$package_dir"
 
 install -m 0755 "$build_dir/syncd" "$stage/usr/bin/syncd"
 install -m 0755 "$build_dir/syncctl" "$stage/usr/bin/syncctl"
@@ -45,6 +45,11 @@ strip --strip-unneeded "$stage/usr/bin/syncd" "$stage/usr/bin/syncctl"
 install -m 0644 "$source_dir/packaging/linux/noisedeck-sync.service" \
   "$stage/usr/lib/systemd/user/noisedeck-sync.service"
 install -m 0755 "$source_dir/scripts/linux-update.py" "$stage/usr/libexec/noisedeck-sync-update"
+# The update helper trusts only this archive key and its recorded fingerprint.
+install -m 0644 "$source_dir/packaging/linux/noisedeck-sync-archive-keyring.gpg" \
+  "$stage/usr/share/keyrings/noisedeck-sync-archive-keyring.gpg"
+install -m 0644 "$source_dir/packaging/linux/apt-key-fingerprint" \
+  "$stage/usr/share/noisedeck-sync/apt-key-fingerprint"
 for unit in noisedeck-sync-update.service noisedeck-sync-update.timer; do
   install -m 0644 "$source_dir/packaging/linux/$unit" "$stage/usr/lib/systemd/system/$unit"
 done
