@@ -128,7 +128,12 @@ int main(int argc, char** argv) {
       if (exit_after >= 0 && written >= exit_after) return exit_code;
     }
     if (fps > 0) {
+      // A frame that is due late is not made up with a burst: two frames
+      // written back to back would skip one for any poller, which is not
+      // what a renderer holding its frame rate does.
       next_frame += period;
+      const auto now = std::chrono::steady_clock::now();
+      if (next_frame < now) next_frame = now + period;
       std::this_thread::sleep_until(next_frame);
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
