@@ -95,10 +95,14 @@ export interface Sender<Source = unknown> {
   getStats(): Promise<NativeStats>;
   close(options?: CloseOptions): void;
 }
+// The bytes SyncFrameSink sends: a Uint8Array over a plain ArrayBuffer. Uint8Array's
+// own slice() return type names that view under every TypeScript release, generic
+// typed arrays (5.7 and later) or not, so a DOM WebSocket satisfies FrameSocket.
+export type FrameSocketBytes = ReturnType<Uint8Array['slice']>;
 export interface FrameSocket {
   readonly readyState: number;
   readonly bufferedAmount: number;
-  send(data: ArrayBuffer | ArrayBufferView): void;
+  send(data: ArrayBuffer | FrameSocketBytes): void;
   close(): void;
 }
 export class SyncFrameSink<Source = unknown> {
