@@ -628,9 +628,12 @@ CompanionProcess::~CompanionProcess() {
   impl_->health_session = nil;
 }
 
+// An explicit selection restricts the helper to exactly these providers, so
+// every macOS provider is named. NDI loads the operator-installed runtime at
+// start; without one, /health lists it as selected and unavailable.
 std::vector<std::string> CompanionProcess::launch_arguments() const {
-  return {"--publisher", "syphon", "--publisher", "camera", "--syphon-framework",
-          impl_->options.framework_path};
+  return {"--publisher", "syphon", "--publisher", "camera", "--publisher", "ndi",
+          "--syphon-framework", impl_->options.framework_path};
 }
 
 std::optional<int> CompanionProcess::owned_pid() const noexcept {

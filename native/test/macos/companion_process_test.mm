@@ -288,8 +288,8 @@ SYNC_TEST(companion_process_uses_exact_bundle_paths_and_drains_stderr) {
   });
   const auto arguments = process.launch_arguments();
   SYNC_REQUIRE(arguments == std::vector<std::string>({
-      "--publisher", "syphon", "--publisher", "camera", "--syphon-framework",
-      "/private/Sync.app/Contents/Frameworks/Syphon.framework"}));
+      "--publisher", "syphon", "--publisher", "camera", "--publisher", "ndi",
+      "--syphon-framework", "/private/Sync.app/Contents/Frameworks/Syphon.framework"}));
 
   std::string captured_stderr;
   std::string error;
