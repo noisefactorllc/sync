@@ -1,6 +1,7 @@
 #include "test_harness.hpp"
 
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 #endif
 
+#include <sync/render/render_ring.hpp>
 #include <sync/render/render_supervisor.hpp>
 
 namespace {
@@ -165,6 +167,48 @@ SYNC_TEST(a_hung_helper_is_ended_and_replaced) {
     SYNC_REQUIRE(run_until(&loop, [&] { return supervisor.status().launches >= 2; }, 15'000));
     SYNC_REQUIRE(supervisor.status().exits >= 1);
     supervisor.stop();
+    drain(&loop);
+  }
+  SYNC_REQUIRE(uv_loop_close(&loop) == 0);
+}
+
+SYNC_TEST(a_helper_blocked_past_sigterm_is_killed_and_replaced) {
+  uv_loop_t loop{};
+  SYNC_REQUIRE(uv_loop_init(&loop) == 0);
+  CountingPublisher publisher;
+  {
+    // The fake's main loop blocks for good, so a SIGTERM handler that only
+    // sets a flag never gets the helper to exit on its own.
+    RenderSupervisor supervisor(&loop, publisher, options("blocked", {"--fake-block-after", "2"}));
+    SYNC_REQUIRE(supervisor.start());
+    SYNC_REQUIRE(run_until(&loop, [&] { return supervisor.status().launches >= 2; }, 15'000));
+    SYNC_REQUIRE(supervisor.status().exits >= 1);
+#if !defined(_WIN32)
+    SYNC_REQUIRE(supervisor.status().last_exit_status == -SIGKILL);
+#endif
+    supervisor.stop();
+    drain(&loop);
+  }
+  SYNC_REQUIRE(uv_loop_close(&loop) == 0);
+}
+
+SYNC_TEST(stopping_a_responsive_helper_lets_it_close_its_ring) {
+  uv_loop_t loop{};
+  SYNC_REQUIRE(uv_loop_init(&loop) == 0);
+  CountingPublisher publisher;
+  {
+    const RenderSupervisorOptions closes = options("closes");
+    RenderSupervisor supervisor(&loop, publisher, closes);
+    SYNC_REQUIRE(supervisor.start());
+    SYNC_REQUIRE(run_until(&loop, [&] { return publisher.published >= 2; }));
+    std::string error;
+    auto section = RenderRingSection::open(closes.ring_name, error);
+    SYNC_REQUIRE(section.has_value());
+    const RenderRingReader reader(section->bytes());
+    SYNC_REQUIRE(reader.valid());
+    SYNC_REQUIRE(!reader.writer_closed());
+    supervisor.stop();
+    SYNC_REQUIRE(run_until(&loop, [&] { return reader.writer_closed(); }));
     drain(&loop);
   }
   SYNC_REQUIRE(uv_loop_close(&loop) == 0);

@@ -27,6 +27,10 @@ struct RenderSupervisorOptions {
   std::uint64_t poll_interval_ms = 2;
   std::uint64_t restart_base_ms = 500;
   std::uint64_t restart_max_ms = 30'000;
+  // How long a hung helper has to exit after its SIGTERM before it is
+  // killed. The helper's SIGTERM handler only sets a flag its main thread
+  // reads, so a helper whose main thread is blocked does not exit on SIGTERM.
+  std::uint64_t hung_kill_grace_ms = 5'000;
 };
 
 // Runs sync-render as a child of syncd on syncd's own libuv loop: spawns it,

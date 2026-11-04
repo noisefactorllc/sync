@@ -17,6 +17,9 @@ struct RenderSupervisor::Child {
   uv_pipe_t out{};
   int open_handles = 0;
   bool exited = false;
+  bool terminated = false;  // sent SIGTERM as hung
+  bool killed = false;      // then sent SIGKILL for not exiting
+  std::uint64_t terminated_at_us = 0;
   std::string pending;  // a partial event line waiting for its newline
 
   void close_all() {
@@ -249,14 +252,27 @@ void RenderSupervisor::schedule_restart() {
 }
 
 void RenderSupervisor::poll() {
-  const RenderSource::Poll result = source_.poll(render_clock_us());
+  const std::uint64_t now_us = render_clock_us();
+  const RenderSource::Poll result = source_.poll(now_us);
   if (result == RenderSource::Poll::WriterGone) {
     status_.attached = false;
     std::cerr << "syncd: render ring " << render_poll_name(result) << '\n';
     // A helper that is still running but has stopped stamping its heartbeat
     // is hung, not idle (it heartbeats every tick even with no program).
     // Ending it routes recovery through the ordinary exit-and-restart path.
-    if (child_ != nullptr && !child_->exited) uv_process_kill(&child_->process, SIGTERM);
+    if (child_ != nullptr && !child_->exited) {
+      uv_process_kill(&child_->process, SIGTERM);
+      child_->terminated = true;
+      child_->terminated_at_us = now_us;
+    }
+  }
+  // A hung helper whose main thread stays blocked never acts on its SIGTERM,
+  // so after the grace period it is killed, and its exit restarts it.
+  if (child_ != nullptr && child_->terminated && !child_->killed && !child_->exited &&
+      now_us - child_->terminated_at_us >= options_.hung_kill_grace_ms * 1'000) {
+    child_->killed = true;
+    std::cerr << "syncd: render helper did not exit after SIGTERM; killing it\n";
+    uv_process_kill(&child_->process, SIGKILL);
   }
 }
 

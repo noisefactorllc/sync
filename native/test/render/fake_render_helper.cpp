@@ -8,6 +8,11 @@
 //   --fake-exit-after <n>     exit after writing n frames
 //   --fake-exit-code <code>   the code to exit with then (default 0)
 //   --fake-stall-after <n>    stop writing and heartbeating after n frames
+//   --fake-block-after <n>    after n frames, block the loop for good, as a
+//                             helper whose main thread is stuck: SIGTERM only
+//                             sets the stop flag, which nothing reads any more.
+//                             Closing stdin still ends the process, so a test
+//                             never leaves one behind.
 
 #include <atomic>
 #include <cerrno>
@@ -31,6 +36,7 @@
 namespace {
 
 std::atomic<bool> g_stop{false};
+std::atomic<bool> g_blocked{false};
 extern "C" void on_signal(int) { g_stop.store(true); }
 
 // Raw reads, never stdio: a thread blocked in fgetc(stdin) holds glibc's
@@ -61,6 +67,7 @@ int main(int argc, char** argv) {
   bool watch_stdin = false;
   long exit_after = -1;
   long stall_after = -1;
+  long block_after = -1;
   int exit_code = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -70,12 +77,14 @@ int main(int argc, char** argv) {
     else if (arg == "--fake-exit-after") exit_after = std::strtol(next(), nullptr, 10);
     else if (arg == "--fake-exit-code") exit_code = static_cast<int>(std::strtol(next(), nullptr, 10));
     else if (arg == "--fake-stall-after") stall_after = std::strtol(next(), nullptr, 10);
+    else if (arg == "--fake-block-after") block_after = std::strtol(next(), nullptr, 10);
   }
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
   if (watch_stdin) {
     std::thread([] {
       wait_for_stdin_eof();
+      if (g_blocked.load()) std::_Exit(0);
       g_stop.store(true);
     }).detach();
   }
@@ -95,6 +104,10 @@ int main(int argc, char** argv) {
   std::vector<std::byte> frame(std::size_t{geometry.width} * 4 * geometry.height);
   long written = 0;
   while (!g_stop.load()) {
+    if (block_after >= 0 && written >= block_after) {
+      g_blocked.store(true);
+      for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
     if (stall_after < 0 || written < stall_after) {
       std::memset(frame.data(), static_cast<int>(written & 0xFF), frame.size());
       if (writer.write(frame, geometry.width * 4, render_clock_us())) ++written;
