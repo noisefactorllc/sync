@@ -12,7 +12,11 @@ what's specific to Sync.
 
 Sync requires CMake 3.21 or newer, a C++20 compiler, OpenSSL 3, libuv, and
 pkg-config. On macOS, the native publisher also uses the system Foundation and
-Metal frameworks.
+Metal frameworks. CMake configure downloads RtAudio, and with
+`-DSYNC_BUILD_RENDER=ON` also RtMidi and noisemaker-for-qt, so it needs network
+access unless you supply those sources; see
+[Building the native daemon](README.md#building-the-native-daemon) for the
+pinned revisions and the offline overrides.
 
 ```bash
 cmake -S . -B build
