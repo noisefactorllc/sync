@@ -3,10 +3,13 @@
 #include <QColor>
 
 #include <algorithm>
+#include <QBuffer>
 #include <QFile>
 #include <QCoreApplication>
 #include <QDir>
 #include <QImage>
+#include <QImageReader>
+#include <QTransform>
 
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +32,62 @@ const QString kMedia = QStringLiteral("search synth\nmedia().write(o0)\nrender(o
       .filePath(QStringLiteral("sync-render-media-test-%1-%2")
                     .arg(QCoreApplication::applicationPid())
                     .arg(QString::fromLatin1(name)));
+}
+
+// An asymmetric picture as authored: red top-left, green top-right, blue
+// bottom-left and white bottom-right quadrants.
+[[nodiscard]] auto authored_quadrants(QSize size) -> QImage {
+  QImage image(size, QImage::Format_RGBA8888);
+  const int half_w = size.width() / 2;
+  const int half_h = size.height() / 2;
+  for (int y = 0; y < size.height(); ++y) {
+    for (int x = 0; x < size.width(); ++x) {
+      const bool right = x >= half_w;
+      const bool bottom = y >= half_h;
+      const QColor color = !bottom ? (right ? QColor(0, 255, 0) : QColor(255, 0, 0))
+                                   : (right ? QColor(255, 255, 255) : QColor(0, 0, 255));
+      image.setPixelColor(x, y, color);
+    }
+  }
+  return image;
+}
+
+// Saves `stored` as a JPEG that carries one EXIF APP1 segment holding only
+// the Orientation tag, right after the start-of-image marker.
+[[nodiscard]] auto save_tagged_jpeg(const QImage& stored, quint8 orientation, const QString& path)
+    -> bool {
+  QByteArray jpeg;
+  QBuffer buffer(&jpeg);
+  if (!buffer.open(QIODevice::WriteOnly) || !stored.save(&buffer, "JPEG", 95)) return false;
+  QByteArray exif = QByteArray::fromHex(
+      "45786966" "0000"            // "Exif" and its padding
+      "49492a00" "08000000"        // little-endian TIFF header, first IFD at 8
+      "0100"                       // one IFD entry:
+      "1201" "0300" "01000000"     //   Orientation, SHORT, count 1,
+      "00000000"                   //   value (set below)
+      "00000000");                 // no next IFD
+  exif[6 + 8 + 2 + 8] = static_cast<char>(orientation);
+  QByteArray segment = QByteArray::fromHex("ffe1");
+  const int length = static_cast<int>(exif.size()) + 2;
+  segment.append(static_cast<char>(length >> 8)).append(static_cast<char>(length & 0xff));
+  segment.append(exif);
+  jpeg.insert(2, segment);
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) && file.write(jpeg) == jpeg.size();
+}
+
+// The quadrant centres of a frame that shows authored_quadrants() as authored.
+void require_authored_quadrants(const QImage& frame) {
+  const int w = frame.width();
+  const int h = frame.height();
+  const auto near = [](const QColor& c, int r, int g, int b) {
+    const auto close = [](int value, int target) { return std::abs(value - target) <= 40; };
+    return close(c.red(), r) && close(c.green(), g) && close(c.blue(), b);
+  };
+  SYNC_REQUIRE(near(frame.pixelColor(w / 4, h / 4), 255, 0, 0));
+  SYNC_REQUIRE(near(frame.pixelColor(w * 3 / 4, h / 4), 0, 255, 0));
+  SYNC_REQUIRE(near(frame.pixelColor(w / 4, h * 3 / 4), 0, 0, 255));
+  SYNC_REQUIRE(near(frame.pixelColor(w * 3 / 4, h * 3 / 4), 255, 255, 255));
 }
 
 SYNC_TEST(media_specs_name_a_camera_or_a_file) {
@@ -117,6 +176,52 @@ SYNC_TEST(an_image_file_reaches_the_media_step_at_its_real_size) {
   SYNC_REQUIRE(std::abs(again.red() - 200) <= 2);
 
   QFile::remove(png);
+}
+
+SYNC_TEST(a_tagged_photo_reaches_the_media_step_in_its_exif_orientation) {
+  const QSize size(64, 48);
+  const QImage authored = authored_quadrants(size);
+  // Orientation 2 stores the picture mirrored left to right. Orientation 6
+  // stores it turned a quarter counterclockwise, so a reader turns it a
+  // quarter clockwise to show it.
+  struct Case {
+    quint8 orientation;
+    QImageIOHandler::Transformation stored_as;
+    QImage stored;
+    const char* name;
+  };
+  const Case cases[] = {
+      {2, QImageIOHandler::TransformationMirror, authored.flipped(Qt::Horizontal), "o2.jpg"},
+      {6, QImageIOHandler::TransformationRotate90, authored.transformed(QTransform().rotate(-90)),
+       "o6.jpg"},
+  };
+
+  ProgramCompiler compiler(data_root());
+  QString error;
+  for (const Case& c : cases) {
+    const QString jpeg = temp_path(c.name);
+    SYNC_REQUIRE(save_tagged_jpeg(c.stored, c.orientation, jpeg));
+    // The fixture carries its tag, and Qt applies it only when asked to.
+    QImageReader plain(jpeg);
+    SYNC_REQUIRE(plain.transformation() == c.stored_as);
+    QImageReader oriented(jpeg);
+    oriented.setAutoTransform(true);
+    require_authored_quadrants(oriented.read());
+
+    RenderEngine engine(RenderEngine::Options{size, 60.0, 10.0, data_root(),
+                                              temp_path("tagged.frames").toStdString()});
+    SYNC_REQUIRE(engine.start(error));
+    MediaInputs inputs({MediaSpec{MediaSpec::Kind::File, jpeg}});
+    SYNC_REQUIRE(inputs.start(error));
+    engine.set_before_render([&](nm::Backend& backend, nm::Graph& graph, quint64 generation) {
+      inputs.apply(backend, graph, generation, compiler.registry());
+    });
+    engine.set_program(compiler.compile(kMedia).graph);
+    engine.freeze_time(0.0);
+    engine.tick();
+    require_authored_quadrants(engine.read_surface());
+    QFile::remove(jpeg);
+  }
 }
 
 SYNC_TEST(shared_images_render_without_local_sources_and_survive_recompilation) {

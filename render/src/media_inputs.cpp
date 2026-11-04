@@ -231,9 +231,11 @@ auto MediaInputs::start(QString& error) -> bool {
         error = QStringLiteral("media file not found: %1").arg(spec.value);
         return false;
       }
-      // A still image is read once. Anything Qt's image readers do not
-      // recognise is handed to the media player as a video.
+      // A still image is read once, in the orientation its EXIF tag gives,
+      // as shared images are. Anything Qt's image readers do not recognise
+      // is handed to the media player as a video.
       QImageReader reader(spec.value);
+      reader.setAutoTransform(true);
       if (reader.canRead()) {
         s.still = reader.read().convertToFormat(QImage::Format_RGBA8888);
         if (s.still.isNull()) {
