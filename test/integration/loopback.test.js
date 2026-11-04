@@ -3405,3 +3405,40 @@ test("closing a sender after its own data socket dropped is a no-op, not an erro
     await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
   }
 });
+
+// docs/protocol-v1.md "Lifecycle": closing the owner control connection removes
+// its senders, and the daemon closes their data sockets with code 1000. The
+// owner's transport can also end with no close frame at all (a crashed tab, a
+// dropped network). Those data sockets used to lose their transport with no
+// close frame, which a WebSocket client reports as 1006.
+test("a dropped owner control socket closes its data sockets with code 1000", async () => {
+  const daemon = await spawnDaemon();
+  try {
+    const control = await authenticateControl(daemon.ready, ORIGIN, TOKEN);
+    assert.equal((await control.client.nextJson("welcome")).type, "welcome");
+    const answered = await createTestSender(control.client, daemon.ready.port, "Answering sender");
+    const silent = await createTestSender(control.client, daemon.ready.port, "Silent sender");
+
+    // End the owner's TCP connection without a WebSocket close frame.
+    control.client.destroy();
+
+    for (const [label, sender] of [["answering", answered], ["silent", silent]]) {
+      const close = await sender.data.nextFrame(`${label} data close after the owner dropped`);
+      assert.equal(close.opcode, 0x8, `${label} data socket got a close frame`);
+      assert.ok(close.payload.length >= 2, `${label} close frame carries a status code`);
+      assert.equal(close.payload.readUInt16BE(0), 1000);
+    }
+
+    // A client that answers completes the close handshake.
+    answered.data.send(0x8, Buffer.from([0x03, 0xe8]));
+    await answered.data.waitClosed();
+
+    // A client that never answers is closed at the 750 ms close deadline.
+    const waiting = performance.now();
+    await silent.data.waitClosed();
+    const waited = performance.now() - waiting;
+    assert.ok(waited < 2_500, `unanswered close ended the transport after ${waited.toFixed(0)} ms`);
+  } finally {
+    await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
+  }
+});

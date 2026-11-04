@@ -622,7 +622,11 @@ class Server {
 
     if (connection.role == ConnectionRole::ControlAuthenticated ||
         connection.role == ConnectionRole::ControlUnauthenticated) {
-      remove_owned_senders(connection, false);
+      // docs/protocol-v1.md "Lifecycle": the data sockets of a removed owner
+      // close with code 1000, also when the owner's transport ended without a
+      // close frame. Shutdown closes every connection anyway, so it does not
+      // start close handshakes on the way out.
+      remove_owned_senders(connection, !stopping_);
     } else if (connection.role == ConnectionRole::Data && connection.sender_slot.has_value()) {
       Sender& sender = senders_[*connection.sender_slot];
       if (sender.occupied && sender.data == &connection) {
