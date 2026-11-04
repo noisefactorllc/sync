@@ -59,12 +59,22 @@ static_assert(sizeof(Api) == 52 * sizeof(void*));
 int sender_token = 0;
 
 void log_line(const char* line) {
+#if defined(_MSC_VER)
+// MSVC deprecates getenv and fopen in favour of _dupenv_s and fopen_s, which
+// MinGW lacks. Neither is unsafe here: the test sets the variable before it
+// loads this runtime, and each line is written and closed at once.
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
   const char* path = std::getenv("SYNC_NDI_STUB_LOG");
   if (path == nullptr) return;
   if (std::FILE* file = std::fopen(path, "a")) {
     std::fputs(line, file);
     std::fclose(file);
   }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 }
 
 void log_frame(const char* call, const VideoFrame* frame) {
@@ -80,8 +90,9 @@ void log_frame(const char* call, const VideoFrame* frame) {
                   "%s %d %d %ld %d %d %d %lld %u,%u,%u,%u %u,%u,%u,%u\n", call, frame->xres,
                   frame->yres, static_cast<long>(frame->four_cc), frame->frame_rate_n,
                   frame->frame_rate_d, frame->line_stride_in_bytes,
-                  static_cast<long long>(frame->timecode), first[0], first[1], first[2],
-                  first[3], last_row[0], last_row[1], last_row[2], last_row[3]);
+                  static_cast<long long>(frame->timecode), unsigned{first[0]}, unsigned{first[1]},
+                  unsigned{first[2]}, unsigned{first[3]}, unsigned{last_row[0]},
+                  unsigned{last_row[1]}, unsigned{last_row[2]}, unsigned{last_row[3]});
   }
   log_line(line);
 }
