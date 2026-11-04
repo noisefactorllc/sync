@@ -1385,7 +1385,10 @@ elseif(WIN32)
   target_compile_features(sync_virtual_camera_e2e_tests PRIVATE cxx_std_20)
   target_include_directories(sync_virtual_camera_e2e_tests PRIVATE native/test)
   target_link_libraries(sync_virtual_camera_e2e_tests PRIVATE
-    sync_mf_camera_sink sync_camera_nv12 mf mfplat mfreadwrite mfuuid ole32)
+    sync_mf_camera_sink sync_camera_nv12 sync_companion_process mf mfplat mfreadwrite mfuuid ole32)
+  # One case starts syncd through CompanionProcess from this directory, as
+  # the tray app does, and ctest does not build dependencies.
+  add_dependencies(sync_virtual_camera_e2e_tests syncd)
   add_test(NAME sync_virtual_camera_e2e_tests COMMAND sync_virtual_camera_e2e_tests)
   set_tests_properties(sync_virtual_camera_e2e_tests PROPERTIES LABELS sync_camera_e2e)
 

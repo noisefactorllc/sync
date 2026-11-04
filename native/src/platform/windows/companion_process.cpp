@@ -1103,8 +1103,12 @@ CompanionProcess::~CompanionProcess() {
 }
 
 std::vector<std::wstring> CompanionProcess::launch_arguments() const {
+  // An explicit selection restricts syncd to exactly the providers it names,
+  // so every Windows output the tray app offers has to be listed here: the
+  // camera included, or the helper never constructs the camera sink and the
+  // camera the tray menu enabled stays on its waiting card.
   std::vector<std::wstring> arguments{L"--publisher", L"spout", L"--publisher",
-                                      L"ndi"};
+                                      L"ndi",         L"--publisher", L"camera"};
   if (!impl_->options.spout_library_path.empty()) {
     arguments.push_back(L"--spout-library");
     arguments.push_back(impl_->options.spout_library_path);

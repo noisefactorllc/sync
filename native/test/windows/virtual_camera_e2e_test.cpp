@@ -9,19 +9,31 @@
 #include <objbase.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sync/camera/nv12.hpp>
+#include <sync/companion_model.hpp>
 #include <sync/platform/camera_identity.hpp>
 #include <sync/platform/mf_camera_sink.hpp>
+
+#include "../../src/platform/windows/companion_process.hpp"
 
 namespace {
 
 using Microsoft::WRL::ComPtr;
+using noisefactor::sync::companion::CompanionProcess;
+using noisefactor::sync::companion::CompanionProcessOptions;
+using noisefactor::sync::companion::HealthSnapshot;
 using noisefactor::sync::camera::CameraSinkFrame;
 using noisefactor::sync::camera::CameraSinkSubmit;
 using noisefactor::sync::camera::CameraSinkUnavailableReason;
@@ -239,6 +251,84 @@ SYNC_TEST(the_camera_shows_the_waiting_card_with_no_sender_and_the_frame_with_on
   }
   SYNC_REQUIRE(saw_live);
   source->Shutdown();
+}
+
+// Probes the helper until it answers, or gives up after about ten seconds.
+[[nodiscard]] auto ProbeUntilReachable(CompanionProcess& companion) -> std::optional<HealthSnapshot> {
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    std::optional<HealthSnapshot> health;
+    std::atomic<bool> done{false};
+    companion.probe([&](std::optional<HealthSnapshot> snapshot, std::string) {
+      health = std::move(snapshot);
+      done.store(true, std::memory_order_release);
+    });
+    while (!done.load(std::memory_order_acquire)) ::Sleep(10);
+    if (health.has_value() && health->reachable) return health;
+    ::Sleep(200);
+  }
+  return std::nullopt;
+}
+
+SYNC_TEST(the_helper_the_tray_app_starts_offers_the_camera) {
+  // Called for the side effect: COM and Media Foundation come up once for
+  // the whole binary.
+  (void)environment();
+
+  // Start syncd the way Sync.exe does, through CompanionProcess and its own
+  // launch arguments, rather than constructing the sink here: the tray app's
+  // helper is what users run, and only its arguments decide whether it
+  // constructs the camera sink at all.
+  wchar_t module[MAX_PATH] = {};
+  const DWORD length = ::GetModuleFileNameW(nullptr, module, MAX_PATH);
+  SYNC_REQUIRE(length > 0 && length < MAX_PATH);
+  CompanionProcessOptions options;
+  options.helper_path = std::filesystem::path(module).replace_filename(L"syncd.exe").wstring();
+  SYNC_REQUIRE(::GetFileAttributesW(options.helper_path.c_str()) != INVALID_FILE_ATTRIBUTES);
+  options.dispatch_to_owner = [](std::function<void()> work) { work(); };
+  CompanionProcess companion(std::move(options));
+
+  // The helper listens on the default port, which the launch arguments leave
+  // implicit, so a Sync already running on this desktop would answer the
+  // probe in its place.
+  {
+    std::optional<HealthSnapshot> stale;
+    std::atomic<bool> done{false};
+    companion.probe([&](std::optional<HealthSnapshot> snapshot, std::string) {
+      stale = std::move(snapshot);
+      done.store(true, std::memory_order_release);
+    });
+    while (!done.load(std::memory_order_acquire)) ::Sleep(10);
+    if (stale.has_value() && stale->reachable) {
+      std::printf("another Sync is already answering on the helper's port; quit it first\n");
+      std::fflush(stdout);
+    }
+    SYNC_REQUIRE(!(stale.has_value() && stale->reachable));
+  }
+
+  std::string error;
+  SYNC_REQUIRE(companion.start([](std::string_view) {}, [](int) {}, error));
+
+  // AvailableProviders holds only providers that are both selected and
+  // available, so this is the helper reporting a camera it constructed.
+  const auto health = ProbeUntilReachable(companion);
+  SYNC_REQUIRE(health.has_value());
+  SYNC_REQUIRE(health->providers.contains("camera"));
+
+  const auto source = ActivateSyncCamera();
+  SYNC_REQUIRE(source);
+  ComPtr<IMFSourceReader> reader;
+  SYNC_REQUIRE(SUCCEEDED(::MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader)));
+  std::vector<BYTE> frame;
+  GUID subtype = GUID_NULL;
+  SYNC_REQUIRE(ReadOneFrame(reader, frame, subtype));
+  SYNC_REQUIRE(!frame.empty());
+  reader.Reset();
+  source->Shutdown();
+
+  std::atomic<bool> stopped{false};
+  companion.terminate([&stopped] { stopped.store(true, std::memory_order_release); });
+  for (int wait = 0; wait < 500 && !stopped.load(std::memory_order_acquire); ++wait) ::Sleep(10);
+  SYNC_REQUIRE(stopped.load(std::memory_order_acquire));
 }
 
 }  // namespace

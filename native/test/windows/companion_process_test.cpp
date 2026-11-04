@@ -4,14 +4,19 @@
 
 #include <sync/companion_model.hpp>
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
 using noisefactor::sync::companion::AvailableProviders;
 using noisefactor::sync::companion::classify_revocation;
+using noisefactor::sync::companion::CompanionProcess;
+using noisefactor::sync::companion::CompanionProcessOptions;
 using noisefactor::sync::companion::HealthSnapshot;
 using noisefactor::sync::companion::parse_health;
 using noisefactor::sync::companion::parse_pairings_json;
@@ -204,6 +209,32 @@ SYNC_TEST(resolve_helper_path_replaces_the_executable_name_only) {
   // A path with both separator styles uses whichever is rightmost.
   SYNC_REQUIRE(resolve_helper_path("C:/Users/Jess\\dev/Sync.exe") ==
               "C:/Users/Jess\\dev/syncd.exe");
+}
+
+CompanionProcessOptions launch_options(std::wstring spout_library_path) {
+  CompanionProcessOptions options;
+  options.helper_path = L"C:\\Program Files\\Sync\\syncd.exe";
+  options.spout_library_path = std::move(spout_library_path);
+  options.dispatch_to_owner = [](std::function<void()> work) { work(); };
+  return options;
+}
+
+SYNC_TEST(launch_arguments_select_every_windows_output_including_the_camera) {
+  const CompanionProcess companion(launch_options(L""));
+  const std::vector<std::wstring> expected{
+      L"--publisher", L"spout", L"--publisher", L"ndi", L"--publisher", L"camera"};
+  SYNC_REQUIRE(companion.launch_arguments() == expected);
+}
+
+SYNC_TEST(launch_arguments_pass_the_bundled_spout_library_after_the_selection) {
+  const CompanionProcess companion(
+      launch_options(L"C:\\Program Files\\Sync\\SpoutLibrary.dll"));
+  const std::vector<std::wstring> expected{
+      L"--publisher",     L"spout",
+      L"--publisher",     L"ndi",
+      L"--publisher",     L"camera",
+      L"--spout-library", L"C:\\Program Files\\Sync\\SpoutLibrary.dll"};
+  SYNC_REQUIRE(companion.launch_arguments() == expected);
 }
 
 SYNC_TEST(companion_process_pairing_parser_requires_normalized_origins) {
