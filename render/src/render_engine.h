@@ -60,6 +60,10 @@ class RenderEngine final : public QObject {
 
   // Swaps the program. Surfaces are keyed by texture id in the backend, so a
   // recompiled program with the same structure keeps its feedback state.
+  // The program on screen stays the fallback until the new one has rendered:
+  // a new program whose first render fails (a shader the GPU does not
+  // compile) gives way to the last program that rendered, as a program that
+  // does not compile at all never replaces it.
   void set_program(std::shared_ptr<nm::Graph> graph);
 
   // Runs before each render with the GL context current: the place to feed
@@ -91,6 +95,11 @@ class RenderEngine final : public QObject {
 
  signals:
   void render_failed(const QString& message);
+  // The newest program rendered its first frame.
+  void program_rendered();
+  // The newest program failed its first render, and the last program that
+  // rendered is back on screen.
+  void program_reverted(const QString& message);
 
  private:
   void schedule_next();
@@ -106,6 +115,8 @@ class RenderEngine final : public QObject {
   std::optional<render::RenderRingSection> section_;
   std::optional<render::RenderRingWriter> writer_;
   std::shared_ptr<nm::Graph> graph_;
+  bool graph_rendered_ = false;
+  std::shared_ptr<nm::Graph> last_rendered_graph_;
   quint64 generation_ = 0;
   BeforeRender before_render_;
   bool reported_render_error_ = false;

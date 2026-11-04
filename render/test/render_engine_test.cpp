@@ -2,9 +2,12 @@
 
 #include <QCoreApplication>
 #include <QImage>
+#include <QStringList>
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "program_compiler.h"
@@ -181,6 +184,82 @@ SYNC_TEST(swapping_programs_changes_the_output) {
   engine.tick();
   const QImage perlin = engine.read_surface();
   SYNC_REQUIRE(gradient != perlin);
+}
+
+// A copy of the data tree in which the gradient program still compiles but
+// its shader does not compile on the GPU: a failure only a render finds.
+[[nodiscard]] auto broken_gradient_root(const char* tag) -> QString {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::path(ring_name(tag) + "-data");
+  fs::remove_all(root);
+  fs::copy(fs::path(data_root().toStdString()), root, fs::copy_options::recursive);
+  const fs::path shader = root / "shaders" / "effects" / "synth" / "gradient" / "gradient.frag";
+  std::ifstream in(shader);
+  std::stringstream text;
+  text << in.rdbuf();
+  in.close();
+  std::string source = text.str();
+  const std::string body = "void main() {";
+  const auto at = source.find(body);
+  if (at == std::string::npos) return {};
+  source.insert(at + body.size(), "\n    fragColor = vec4(this_symbol_is_undefined);");
+  std::ofstream(shader, std::ios::trunc) << source;
+  return QString::fromStdString(root.string());
+}
+
+SYNC_TEST(a_program_that_fails_its_first_render_gives_way_to_the_last_that_rendered) {
+  const QString root = broken_gradient_root("revert");
+  SYNC_REQUIRE(!root.isEmpty());
+  ProgramCompiler compiler(root);
+  RenderEngine::Options options = engine_options("revert");
+  options.data_root = root;
+  {
+    RenderEngine engine(options);
+    QString error;
+    SYNC_REQUIRE(engine.start(error));
+    int rendered = 0;
+    QStringList reverted;
+    QStringList failed;
+    QObject::connect(&engine, &RenderEngine::program_rendered, [&] { ++rendered; });
+    QObject::connect(&engine, &RenderEngine::program_reverted,
+                     [&](const QString& message) { reverted << message; });
+    QObject::connect(&engine, &RenderEngine::render_failed,
+                     [&](const QString& message) { failed << message; });
+    engine.freeze_time(0.5);
+    engine.set_program(compiler.compile(kPerlin).graph);
+    engine.tick();
+    const QImage perlin = engine.read_surface();
+    SYNC_REQUIRE(rendered == 1);
+
+    // The gradient program compiles; only its first render fails.
+    auto failing = compiler.compile(kGradient).graph;
+    SYNC_REQUIRE(failing != nullptr);
+    engine.set_program(failing);
+    engine.tick();
+    SYNC_REQUIRE(reverted.size() == 1);
+    SYNC_REQUIRE(reverted.front().contains(QStringLiteral("this_symbol_is_undefined")));
+
+    // The last program that rendered is back, and its frames reach the ring.
+    engine.drain();
+    const quint64 written = engine.frames_written();
+    const quint64 renders = engine.stats().rendered;
+    engine.tick();
+    engine.drain();
+    SYNC_REQUIRE(engine.stats().rendered == renders + 1);
+    SYNC_REQUIRE(engine.frames_written() > written);
+    SYNC_REQUIRE(engine.read_surface() == perlin);
+    SYNC_REQUIRE(failed.isEmpty());
+
+    // A later good edit shows its own frames.
+    engine.set_program(
+        compiler.compile(QStringLiteral("search synth\nperlin(seed: 7).write(o0)\nrender(o0)\n")).graph);
+    engine.tick();
+    SYNC_REQUIRE(rendered == 2);
+    SYNC_REQUIRE(engine.read_surface() != perlin);
+    SYNC_REQUIRE(reverted.size() == 1 && failed.isEmpty());
+    engine.stop();
+  }
+  std::filesystem::remove_all(std::filesystem::path(root.toStdString()));
 }
 
 SYNC_TEST(an_overlay_trace_does_not_stop_the_picture) {

@@ -132,7 +132,9 @@ void RenderEngine::stop() {
 }
 
 void RenderEngine::set_program(std::shared_ptr<nm::Graph> graph) {
+  if (graph_ && graph_rendered_) last_rendered_graph_ = graph_;
   graph_ = std::move(graph);
+  graph_rendered_ = false;
   ++generation_;
   reported_render_error_ = false;
 }
@@ -165,8 +167,22 @@ void RenderEngine::tick() {
     if (before_render_) before_render_(backend_, *graph_, generation_);
     backend_.render(*graph_, normalized_time(), static_cast<double>(now_us) / 1000.0);
     ++stats_.rendered;
+    if (!graph_rendered_) {
+      graph_rendered_ = true;
+      emit program_rendered();
+    }
   } catch (const std::exception& e) {
     ++stats_.render_errors;
+    if (!graph_rendered_ && last_rendered_graph_ && last_rendered_graph_ != graph_) {
+      // The new program never rendered: the last one that did comes back,
+      // with a new generation so its inputs are bound to it again.
+      graph_ = last_rendered_graph_;
+      graph_rendered_ = true;
+      ++generation_;
+      reported_render_error_ = false;
+      emit program_reverted(QString::fromUtf8(e.what()));
+      return;
+    }
     if (!reported_render_error_) {
       reported_render_error_ = true;
       emit render_failed(QString::fromUtf8(e.what()));

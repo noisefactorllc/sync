@@ -446,6 +446,19 @@ int main(int argc, char** argv) {
                               parser.value(origin_opt)});
   ProgramCompiler::Result candidate;
   QJsonObject candidate_fields;
+  // The shared-image bindings of the newest program and of the last program
+  // that rendered, so a program the engine gives up for the last one that
+  // rendered (see RenderEngine::set_program) takes that program's images back.
+  QHash<int, QImage> newest_bindings;
+  QHash<int, QImage> rendered_bindings;
+  QObject::connect(&engine, &RenderEngine::program_rendered, &app,
+                   [&] { rendered_bindings = newest_bindings; });
+  QObject::connect(&engine, &RenderEngine::program_reverted, &app, [&](const QString& message) {
+    newest_bindings = rendered_bindings;
+    media.set_shared_images(rendered_bindings);
+    events.write(QStringLiteral("render_error"),
+                 {{QStringLiteral("message"), message}, {QStringLiteral("reverted"), true}});
+  });
   QObject::connect(&shared_images, &SharedImages::ready, &app, [&] {
     if (!candidate.graph) return;
     const auto images = shared_images.images();
@@ -453,6 +466,7 @@ int main(int argc, char** argv) {
     for (auto it = candidate.shared_images.constBegin(); it != candidate.shared_images.constEnd(); ++it) {
       bindings.insert(it.key(), images.value(it.value()));
     }
+    newest_bindings = bindings;
     media.set_shared_images(std::move(bindings));
     engine.set_program(std::move(candidate.graph));
     candidate_fields.insert(QStringLiteral("ok"), true);
