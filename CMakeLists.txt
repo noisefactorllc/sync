@@ -691,6 +691,28 @@ target_include_directories(sync_ndi_publisher_tests PRIVATE native/test)
 target_link_libraries(sync_ndi_publisher_tests PRIVATE sync_ndi_publisher)
 add_test(NAME sync_ndi_publisher_tests COMMAND sync_ndi_publisher_tests)
 
+# A stand-in NDI runtime with the vendor's dynamic-load entry point that logs
+# each video frame descriptor. It carries the platform's runtime file name in
+# a directory of its own, which the publisher tests pass as the runtime path.
+add_library(sync_ndi_stub_runtime SHARED native/test/ndi_stub_runtime.cpp)
+target_compile_features(sync_ndi_stub_runtime PRIVATE cxx_std_20)
+if(WIN32)
+  set_target_properties(sync_ndi_stub_runtime PROPERTIES
+    PREFIX "" OUTPUT_NAME "Processing.NDI.Lib.x64")
+elseif(APPLE)
+  set_target_properties(sync_ndi_stub_runtime PROPERTIES
+    PREFIX "lib" OUTPUT_NAME "ndi" SUFFIX ".dylib")
+else()
+  set_target_properties(sync_ndi_stub_runtime PROPERTIES
+    PREFIX "lib" OUTPUT_NAME "ndi" SUFFIX ".so.5")
+endif()
+set_target_properties(sync_ndi_stub_runtime PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-runtime
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-runtime)
+add_dependencies(sync_ndi_publisher_tests sync_ndi_stub_runtime)
+target_compile_definitions(sync_ndi_publisher_tests PRIVATE
+  SYNC_NDI_STUB_RUNTIME_DIR="$<TARGET_FILE_DIR:sync_ndi_stub_runtime>")
+
 if(APPLE)
   enable_language(OBJCXX)
   target_sources(sync_audio_native PRIVATE native/src/platform/macos/audio_permission.mm)

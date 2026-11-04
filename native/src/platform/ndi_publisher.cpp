@@ -1,6 +1,7 @@
 #include <sync/platform/ndi_publisher.hpp>
 
 #include "../ndi_frame_copy.hpp"
+#include "../ndi_frame_rate.hpp"
 #include "../replacement_budget.hpp"
 
 #include <array>
@@ -326,12 +327,6 @@ constexpr std::int32_t kNdiFourCcRgba =
 // NDIlib_frame_format_type_e::NDIlib_frame_format_type_progressive.
 constexpr std::int32_t kNdiFrameFormatProgressive = 1;
 
-// The SDK's own NDIlib_video_frame_v2_t C++ default constructor defaults to
-// 30000/1001 (~29.97 fps); protocol::FrameView carries no frame-rate field,
-// so we reuse the vendor's own default rather than inventing one.
-constexpr int kDefaultFrameRateNumerator = 30000;
-constexpr int kDefaultFrameRateDenominator = 1001;
-
 struct ndi_v5 {
   bool (*initialize)(void);
   void (*destroy)(void);
@@ -515,6 +510,9 @@ struct NdiFramePublisher::Impl {
     ndi_send_instance_t handle = nullptr;
     std::array<FrameBuffer, 2> buffers{};
     std::size_t next_buffer_index = 0;
+    // protocol::FrameView carries no frame rate; each frame declares the
+    // cadence of this sender's presentation times (ndi_frame_rate.hpp).
+    ndi::FrameRateTracker frame_rate{};
 
     [[nodiscard]] auto id_view() const noexcept -> std::string_view {
       return {sender_id.data(), sender_id_length};
@@ -778,6 +776,7 @@ auto NdiFramePublisher::open_sender(std::string_view sender_id, std::string_view
   std::memcpy(entry->sender_id.data(), sender_id.data(), sender_id.size());
   entry->handle = handle;
   entry->next_buffer_index = 0;
+  entry->frame_rate = {};
   return true;
 }
 
@@ -837,8 +836,9 @@ auto NdiFramePublisher::publish(std::string_view sender_id, const protocol::Fram
   descriptor.xres = static_cast<int>(frame.width);
   descriptor.yres = static_cast<int>(frame.height);
   descriptor.four_cc = kNdiFourCcRgba;
-  descriptor.frame_rate_n = kDefaultFrameRateNumerator;
-  descriptor.frame_rate_d = kDefaultFrameRateDenominator;
+  const ndi::FrameRate frame_rate = entry->frame_rate.observe(frame.presentation_time_us);
+  descriptor.frame_rate_n = frame_rate.numerator;
+  descriptor.frame_rate_d = frame_rate.denominator;
   descriptor.picture_aspect_ratio = 0.0f;  // 0 means square pixels, per the vendor header.
   descriptor.frame_format_type = kNdiFrameFormatProgressive;
   descriptor.timecode = timecode;

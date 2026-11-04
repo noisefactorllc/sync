@@ -1,14 +1,21 @@
 #include "test_harness.hpp"
 
 #include "../src/ndi_frame_copy.hpp"
+#include "../src/ndi_frame_rate.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <sync/frame_receiver.hpp>
 #include <sync/platform/ndi_publisher.hpp>
@@ -270,4 +277,202 @@ SYNC_TEST(ndi_publisher_close_sender_is_idempotent_and_order_independent) {
   publisher.close_sender("a");
   publisher.close_sender("b");
   publisher.close_sender("a");
+}
+
+// ---------------------------------------------------------------------------
+// Declared frame rate. The NDI SDK defines frame_rate_N / frame_rate_D as the
+// rate of the current frame; Sync frames carry none, so each sender declares
+// the cadence of its own presentation times.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using noisefactor::sync::ndi::FrameRate;
+using noisefactor::sync::ndi::FrameRateTracker;
+using noisefactor::sync::ndi::kInitialFrameRate;
+
+[[nodiscard]] auto frames_per_second(FrameRate rate) -> double {
+  return static_cast<double>(rate.numerator) / rate.denominator;
+}
+
+// A 16x8 opaque straight-alpha frame: the top half red, the bottom half blue.
+struct StubFrame {
+  static constexpr std::uint32_t kWidth = 16;
+  static constexpr std::uint32_t kHeight = 8;
+  std::array<std::byte, kWidth * kHeight * 4> pixels{};
+
+  StubFrame() {
+    for (std::uint32_t row = 0; row < kHeight; ++row) {
+      for (std::uint32_t column = 0; column < kWidth; ++column) {
+        std::byte* pixel = pixels.data() + (row * kWidth + column) * 4;
+        const bool top = row < kHeight / 2;
+        pixel[0] = top ? std::byte{255} : std::byte{0};
+        pixel[1] = std::byte{0};
+        pixel[2] = top ? std::byte{0} : std::byte{255};
+        pixel[3] = std::byte{255};
+      }
+    }
+  }
+
+  [[nodiscard]] auto view(std::uint64_t presentation_time_us, std::uint64_t sequence) const
+      -> FrameView {
+    FrameView frame = make_valid_frame(std::span(pixels));
+    frame.alpha_mode = 2;
+    frame.width = kWidth;
+    frame.height = kHeight;
+    frame.row_stride = kWidth * 4;
+    frame.payload_bytes = static_cast<std::uint32_t>(pixels.size());
+    frame.sequence = sequence;
+    frame.presentation_time_us = presentation_time_us;
+    return frame;
+  }
+};
+
+struct LoggedFrame {
+  int width = 0;
+  int height = 0;
+  long four_cc = 0;
+  int rate_n = 0;
+  int rate_d = 0;
+  int stride = 0;
+  std::array<unsigned, 4> first_pixel{};
+  std::array<unsigned, 4> last_row_pixel{};
+};
+
+void set_stub_log(const std::string& path) {
+#if defined(_WIN32)
+  SYNC_REQUIRE(_putenv_s("SYNC_NDI_STUB_LOG", path.c_str()) == 0);
+#else
+  SYNC_REQUIRE(setenv("SYNC_NDI_STUB_LOG", path.c_str(), 1) == 0);
+#endif
+}
+
+// Publishes `count` frames `interval_us` apart through the stub runtime and
+// returns the descriptors it logged.
+[[nodiscard]] auto publish_through_stub(std::uint64_t interval_us, std::size_t count)
+    -> std::vector<LoggedFrame> {
+  const std::filesystem::path log =
+      std::filesystem::temp_directory_path() /
+      ("sync-ndi-stub-" + std::to_string(interval_us) + "-" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".log");
+  set_stub_log(log.string());
+  {
+    NdiFramePublisher publisher({.runtime_path = SYNC_NDI_STUB_RUNTIME_DIR});
+    SYNC_REQUIRE(publisher.available());
+    SYNC_REQUIRE(publisher.open_sender("sender", "Cadence probe"));
+    const StubFrame frame;
+    for (std::size_t index = 0; index < count; ++index) {
+      SYNC_REQUIRE(publisher.publish("sender", frame.view(1'000'000 + index * interval_us, index)) ==
+                   PublishResult::Accepted);
+    }
+    publisher.close_sender("sender");
+  }
+  set_stub_log("");
+  std::vector<LoggedFrame> frames;
+  std::ifstream input(log);
+  std::string call;
+  while (input >> call) {
+    if (call != "async") {
+      std::string rest;
+      std::getline(input, rest);
+      continue;
+    }
+    LoggedFrame frame;
+    long long timecode = 0;
+    char comma = 0;
+    input >> frame.width >> frame.height >> frame.four_cc >> frame.rate_n >> frame.rate_d >>
+        frame.stride >> timecode;
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      if (channel > 0) input >> comma;
+      input >> frame.first_pixel[channel];
+    }
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+      if (channel > 0) input >> comma;
+      input >> frame.last_row_pixel[channel];
+    }
+    frames.push_back(frame);
+  }
+  input.close();
+  std::filesystem::remove(log);
+  return frames;
+}
+
+void require_cadence(std::uint64_t interval_us, double low_fps, double high_fps) {
+  constexpr std::size_t kFrames = 120;
+  const std::vector<LoggedFrame> frames = publish_through_stub(interval_us, kFrames);
+  SYNC_REQUIRE(frames.size() == kFrames);
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    const LoggedFrame& frame = frames[index];
+    SYNC_REQUIRE(frame.width == static_cast<int>(StubFrame::kWidth));
+    SYNC_REQUIRE(frame.height == static_cast<int>(StubFrame::kHeight));
+    // NDI_LIB_FOURCC('R', 'G', 'B', 'A').
+    SYNC_REQUIRE(frame.four_cc == 0x41424752L);
+    SYNC_REQUIRE(frame.stride == static_cast<int>(StubFrame::kWidth * 4));
+    // Top row first: the first row is red and the last row is blue.
+    SYNC_REQUIRE((frame.first_pixel == std::array<unsigned, 4>{255, 0, 0, 255}));
+    SYNC_REQUIRE((frame.last_row_pixel == std::array<unsigned, 4>{0, 0, 255, 255}));
+    const double fps = static_cast<double>(frame.rate_n) / frame.rate_d;
+    if (index == 0) {
+      // The first frame has no interval yet.
+      SYNC_REQUIRE((FrameRate{frame.rate_n, frame.rate_d} == kInitialFrameRate));
+    } else {
+      SYNC_REQUIRE(fps >= low_fps && fps <= high_fps);
+    }
+  }
+}
+
+}  // namespace
+
+SYNC_TEST(ndi_publisher_declares_a_60_fps_cadence_through_a_stub_runtime) {
+  require_cadence(16'667, 59.4, 60.6);
+}
+
+SYNC_TEST(ndi_publisher_declares_a_30_fps_cadence_through_a_stub_runtime) {
+  require_cadence(33'333, 29.7, 30.3);
+}
+
+SYNC_TEST(ndi_frame_rate_tracker_declares_standard_rates_for_steady_cadences) {
+  const std::array<std::pair<std::uint64_t, FrameRate>, 5> cases{{
+      {16'667, {60, 1}}, {33'333, {30, 1}}, {16'683, {60000, 1001}},
+      {20'000, {50, 1}}, {41'708, {24000, 1001}},
+  }};
+  for (const auto& [interval, expected] : cases) {
+    FrameRateTracker tracker;
+    SYNC_REQUIRE(tracker.observe(0) == kInitialFrameRate);
+    FrameRate declared{};
+    for (std::uint64_t index = 1; index < 30; ++index) declared = tracker.observe(index * interval);
+    SYNC_REQUIRE(declared == expected);
+  }
+}
+
+SYNC_TEST(ndi_frame_rate_tracker_ignores_jitter_drops_and_pauses) {
+  FrameRateTracker tracker;
+  std::uint64_t time = 0;
+  FrameRate declared = tracker.observe(time);
+  // A browser's capture timestamps wobble by a few milliseconds.
+  const std::array<std::int64_t, 6> jitter{3'000, -2'500, 1'200, -3'000, 2'000, -700};
+  for (std::size_t index = 0; index < 60; ++index) {
+    time = static_cast<std::uint64_t>(static_cast<std::int64_t>(time) + 16'667 +
+                                      jitter[index % jitter.size()]);
+    declared = tracker.observe(time);
+    if (index >= 8) SYNC_REQUIRE(frames_per_second(declared) > 59.4 &&
+                                 frames_per_second(declared) < 60.6);
+  }
+  const FrameRate steady = declared;
+  // One dropped frame doubles a single interval.
+  declared = tracker.observe(time += 2 * 16'667);
+  SYNC_REQUIRE(declared == steady);
+  // A pause longer than a second is not the cadence.
+  declared = tracker.observe(time += 5'000'000);
+  SYNC_REQUIRE(declared == steady);
+  // A timestamp that does not advance adds no interval.
+  declared = tracker.observe(time);
+  SYNC_REQUIRE(declared == steady);
+}
+
+SYNC_TEST(ndi_frame_rate_tracker_declares_an_unusual_cadence_as_measured) {
+  FrameRateTracker tracker;
+  FrameRate declared{};
+  for (std::uint64_t index = 0; index < 20; ++index) declared = tracker.observe(index * 12'345);
+  SYNC_REQUIRE(declared == (FrameRate{1'000'000, 12'345}));
 }
