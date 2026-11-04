@@ -355,17 +355,44 @@ group.
 ### macOS
 
 Packaging requires macOS 13 or newer, an Apple Silicon build, `dylibbundler`,
-`librsvg`, and a locally built `Syphon.framework`. The release workflow pins
-Syphon source revision `71351d4b484cd2d1917867f7846a5cdca724552d`; use that
-same revision for local release-equivalent packages.
+`librsvg`, Node.js on `PATH`, a locally built `Syphon.framework`, and, for the
+render helper, Qt 6.9 or newer with the Qt Multimedia, Qt WebSockets and Qt
+Image Formats modules (the release workflow uses Qt 6.11.1). The release
+workflow pins Syphon source revision `71351d4b484cd2d1917867f7846a5cdca724552d`;
+use that same revision for local release-equivalent packages.
+
+The bundle declares macOS 13.0 as its minimum, and
+`scripts/verify-macos-bundle.sh` refuses any binary or library in it that
+targets a newer macOS. Configure with `CMAKE_OSX_DEPLOYMENT_TARGET=13.0`, and
+link libuv and OpenSSL 3 built for macOS 13.0: Homebrew's builds target the
+host's macOS. Build both from source into one prefix:
+
+```bash
+SYNC_DEPS=/absolute/path/to/sync-deps
+cmake -S /path/to/libuv -B libuv-build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$SYNC_DEPS" -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DLIBUV_BUILD_TESTS=OFF
+cmake --build libuv-build --target install
+(cd /path/to/openssl &&
+  MACOSX_DEPLOYMENT_TARGET=13.0 ./Configure darwin64-arm64-cc shared no-tests \
+    --prefix="$SYNC_DEPS" --openssldir="$SYNC_DEPS/ssl" -mmacosx-version-min=13.0 &&
+  make && make install_sw)
+```
+
+Then, from this checkout, build, package and check the app:
 
 ```bash
 SYNC_PRODUCT_VERSION=X.Y.Z
 cmake -S . -B build-package \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+  -DCMAKE_PREFIX_PATH="$SYNC_DEPS;/absolute/path/to/Qt/6.11.1/macos" \
+  -DOPENSSL_ROOT_DIR="$SYNC_DEPS" \
+  -DSYNC_DYLIB_SEARCH_PATH="$SYNC_DEPS/lib" \
+  -DSYNC_BUILD_RENDER=ON \
   -DSYNC_PRODUCT_VERSION="$SYNC_PRODUCT_VERSION" \
   -DSYNC_SYPHON_FRAMEWORK_PATH=/absolute/path/to/Syphon.framework
 cmake --build build-package --target sync_macos_dmg -j4
-SYNC_PACKAGE_DIR=build-package/package \
+SYNC_EXPECT_RENDER=1 SYNC_PACKAGE_DIR=build-package/package \
   node --test test/packaging/macos-package.test.js
 scripts/smoke-macos-app.sh "$PWD/build-package/package/Sync.app"
 ```
@@ -377,17 +404,22 @@ release workflow so credentials never enter this public repository.
 ### Windows
 
 Packaging requires Windows 10 or newer, an x64 MSVC toolchain, Inno Setup 6
-(`ISCC` on `PATH`), ImageMagick (`magick` on `PATH`), and a locally built
-`SpoutLibrary.dll`.
+(`ISCC` on `PATH`), ImageMagick (`magick` on `PATH`), Node.js on `PATH`, a
+locally built `SpoutLibrary.dll`, and, for the render helper, Qt 6.9 or newer
+for MSVC 2022 x64 with the Qt Multimedia, Qt WebSockets and Qt Image Formats
+modules (CI packages with Qt 6.10.3).
 
 ```powershell
 $SyncProductVersion = "X.Y.Z"
 cmake -S . -B build-package -A x64 `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DCMAKE_PREFIX_PATH=C:\absolute\path\to\Qt\6.10.3\msvc2022_64 `
+  -DSYNC_BUILD_RENDER=ON `
   -DSYNC_PRODUCT_VERSION="$SyncProductVersion" `
   -DSYNC_SPOUT_LIBRARY_PATH=C:\absolute\path\to\SpoutLibrary.dll `
   -DSYNC_WINDOWS_DEPENDENCY_PATH="$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
 cmake --build build-package --config Release --target sync_windows_installer --parallel 4
+$env:SYNC_EXPECT_RENDER = "1"
 $env:SYNC_PACKAGE_DIR = "build-package/package"
 node --test test/packaging/windows-package.test.js
 ./scripts/smoke-windows-app.ps1 -Bundle "$PWD/build-package/package/Sync"
