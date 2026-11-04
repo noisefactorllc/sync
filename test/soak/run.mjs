@@ -58,9 +58,10 @@ const soak = new ProtocolSoak({
   // every SYNC_SOAK_GEOMETRY_EVERY seconds, mirroring the browser format leg
   // on a plane with no renderer, no camera sink and no GL readback. Unset,
   // nothing changes and the run behaves exactly as it always has.
-  // SYNC_SOAK_PUBLISHER=camera runs the daemon against a real publisher instead
-  // of --test-receiver, which drops every frame without reaching one. The
-  // camera publisher scales and permutes each frame into a fixed 1920x1080
+  // SYNC_SOAK_PUBLISHER=camera runs the daemon against the camera publisher
+  // instead of --test-receiver, whose TestPublisher accepts each valid frame
+  // after hashing it: all of a payload up to 1 MiB, only the first 65536 bytes
+  // of a larger one. The camera publisher scales and permutes each frame into a fixed 1920x1080
   // canvas, so a rotation that changes source size changes its per-frame cost —
   // work a --test-receiver run never performs and therefore never measures.
   publisher: process.env.SYNC_SOAK_PUBLISHER || null,

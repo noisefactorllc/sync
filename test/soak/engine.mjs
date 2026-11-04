@@ -127,12 +127,12 @@ export class ProtocolSoak {
     //
     // --test-receiver DOES reach a publisher: run_server constructs a
     // TestPublisher (server.cpp), a real FramePublisher with per-sender
-    // registration whose publish() runs a byte-at-a-time FNV-1a over the whole
-    // payload. So a --test-receiver run is not "no publisher work" — it is a
-    // full O(payload) scalar pass with a serial dependency chain, and the
-    // throughput ceiling such a run measures is plausibly that loop rather
-    // than the socket path. Read its MB/s as harness capacity, not protocol
-    // capacity.
+    // registration whose publish() accepts each valid frame after a
+    // byte-at-a-time FNV-1a. It hashes all of a payload up to 1 MiB, and only
+    // the first 65536 bytes of a larger one, so at the default 1920x1080 size
+    // (8294400 payload bytes) it hashes under 1% of each frame. Read the MB/s
+    // of such a run as the daemon's receive path plus that bounded hash, not
+    // as the cost of a publisher that touches every byte.
     //
     // What --test-receiver never constructs is the CAMERA publisher, and that
     // is the path with the work this option exists to reach: every frame is
