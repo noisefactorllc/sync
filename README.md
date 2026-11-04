@@ -52,8 +52,17 @@ compatibility claim. See the
 [audio research, design, and qualification matrix](docs/audio-input.md).
 
 Both companions are previews and are not ready for general use.
-Reverse-direction native video sources and automatic updates are not part of the
-current public implementation.
+Reverse-direction native video sources are not part of the current public
+implementation.
+
+The macOS app includes a Sparkle update controller, and the Windows companion
+includes a WinSparkle adapter. A build without an update signing key, which is
+what this source builds by default, reports "Automatic updates are not
+configured in this build" and checks for nothing. The Linux package ships
+`syncctl update`: `sudo syncctl update enable --user <name>` adds the Sync APT
+repository with the archive key that the package installs, and starts a daily
+timer that installs newer Sync packages from it. `sudo syncctl update disable`
+stops the timer.
 
 ## Known issues
 
