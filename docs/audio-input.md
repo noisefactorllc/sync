@@ -160,10 +160,11 @@ automatically. [PipeWire JACK wrapper](https://pipewire.pages.freedesktop.org/pi
 
 ### Buffering, clocks, and ownership
 
-The callback writes interleaved float32 into a fixed 4,096-frame ring. It does
-not allocate or wait for a mutex. If the consumer holds the lock, the callback
-drops that block; overflow drops the oldest frames. Samples with nonfinite
-values become zero. The packet cursor and cumulative drop count let the browser
+The callback writes interleaved float32 into a ring that holds 65,536 frames by
+default (`CaptureBuffer`). It does not allocate. It waits for the ring's mutex
+while a read copies a packet out, so it never drops a block because the
+consumer holds the lock; overflow drops the oldest frames. Samples with
+nonfinite values become zero. The packet cursor and cumulative drop count let the browser
 discard queued data across discontinuities. Driver-reported overflow currently
 fails the capture; automatic recovery is not implemented.
 [Ring buffer](../native/src/audio_capture.cpp), [driver callback](../native/src/audio_native.cpp).
