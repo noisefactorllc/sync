@@ -103,9 +103,8 @@ fix ships.
 - **The native render helper (sync-render) has rough edges.** A Seance
   session with guests turned off refuses the helper's anonymous identity and
   the render path stops. A render error that repeats every frame, other than
-  audio, leaves the output dark with no restart. The Windows helper needs the
-  Visual C++ runtime installed. Linux does not package the helper yet
-  (it needs Qt 6.9; Ubuntu 24.04 ships 6.4).
+  audio, leaves the output dark with no restart. Linux does not package the
+  helper yet (it needs Qt 6.9; Ubuntu 24.04 ships 6.4).
 - **Syphon receivers can hang when they stop mid-stream.** Syphon's `-stop`
   and `-newFrameImage` take the same lock in opposite orders, upstream too.
   Sync's own receiver probe works around it (`ab97ae5`, `c8f880c`); any

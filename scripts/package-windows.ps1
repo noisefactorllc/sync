@@ -37,6 +37,12 @@ param(
   # dylib search path.
   [string]$DependencySearchPath = '',
 
+  # The redistributable Visual C++ runtime folder of the toolset that built
+  # the executables (CMake finds it). Required by `bundle`: the bundle carries
+  # each runtime DLL its import tables name, copied from here and never from
+  # the build machine's System32.
+  [string]$RuntimeDir = '',
+
   # Directory the executables were actually written to. Single-config
   # generators (Ninja) put them at the build root; multi-config generators
   # (Visual Studio) put them in a per-configuration subdirectory, so CMake
@@ -138,6 +144,11 @@ if (-not [System.IO.Path]::IsPathRooted($SpoutLibrary) -or
   Fail "SpoutLibrary.dll must be an absolute path to an existing file: $SpoutLibrary"
 }
 $SpoutLibrary = (Resolve-Path -LiteralPath $SpoutLibrary).ProviderPath
+
+$RuntimeDir = Resolve-AbsoluteDirectory $RuntimeDir 'the Visual C++ runtime directory'
+if (-not (Test-Path -LiteralPath (Join-Path $RuntimeDir 'vcruntime140.dll') -PathType Leaf)) {
+  Fail "the Visual C++ runtime directory holds no vcruntime140.dll: $RuntimeDir"
+}
 if ([System.IO.Path]::GetFileName($SpoutLibrary) -ne 'SpoutLibrary.dll') {
   Fail "the pinned Spout module must be named SpoutLibrary.dll, got $SpoutLibrary"
 }
@@ -232,8 +243,9 @@ if ($WinSparkleDll) {
 
 # sync-render sits beside syncd.exe, which finds it there, with its effect and
 # shader data in noisemaker\, the helper's own first data-root candidate.
-# windeployqt copies the Qt DLLs and plugins it links. The MSVC runtime is left
-# to the resolver below, as for the other executables.
+# windeployqt copies the Qt DLLs and plugins it links. The Visual C++ runtime
+# is left to the resolver below, which copies it from the toolset's
+# redistributable folder for every binary in the bundle, Qt's included.
 if ($renderBinary) {
   Copy-Item -LiteralPath $renderBinary -Destination (Join-Path $bundleDir 'sync-render.exe')
   # The whole data tree the build placed beside the helper: effects and
@@ -277,6 +289,7 @@ $dependencyScript = Join-Path $SourceDir 'packaging/windows/bundle-dependencies.
 & $cmake `
   "-DSYNC_BUNDLE_DIR=$bundleDir" `
   "-DSYNC_SEARCH_PATH=$DependencySearchPath" `
+  "-DSYNC_RUNTIME_DIR=$RuntimeDir" `
   -P $dependencyScript
 if ($LASTEXITCODE -ne 0) { Fail "runtime dependency bundling failed with exit code $LASTEXITCODE" }
 

@@ -110,6 +110,96 @@ foreach ($binary in $binaries) {
   }
 }
 
+# Every DLL a bundled binary imports, directly or delay-loaded, must be in the
+# bundle or be part of Windows, or the installed app fails to start on a
+# machine that lacks it. "Part of Windows" is an API set name, or a file in
+# System32 other than the Visual C++ runtime. A build machine has that runtime
+# in System32 too, and Windows signs it there like its own files, but its
+# version resource names Visual Studio, and a user's machine may not have it.
+Add-Type -Namespace SyncVerify -Name PeImports -MemberDefinition @'
+static uint ToOffset(byte[] image, int sections, int count, uint rva) {
+  for (int i = 0; i < count; i++) {
+    int section = sections + i * 40;
+    uint size = System.BitConverter.ToUInt32(image, section + 8);
+    uint address = System.BitConverter.ToUInt32(image, section + 12);
+    uint raw = System.BitConverter.ToUInt32(image, section + 20);
+    if (rva >= address && rva < address + System.Math.Max(size, System.BitConverter.ToUInt32(image, section + 16))) {
+      return rva - address + raw;
+    }
+  }
+  throw new System.IO.InvalidDataException("RVA outside every section");
+}
+
+static string ReadName(byte[] image, uint offset) {
+  int end = (int)offset;
+  while (end < image.Length && image[end] != 0) end++;
+  return System.Text.Encoding.ASCII.GetString(image, (int)offset, end - (int)offset);
+}
+
+public static string[] Read(string path) {
+  byte[] image = System.IO.File.ReadAllBytes(path);
+  int header = System.BitConverter.ToInt32(image, 0x3c);
+  int optional = header + 24;
+  bool plus = System.BitConverter.ToUInt16(image, optional) == 0x20b;
+  int directories = optional + (plus ? 112 : 96);
+  int count = System.BitConverter.ToUInt16(image, header + 6);
+  int sections = optional + System.BitConverter.ToUInt16(image, header + 20);
+  var names = new System.Collections.Generic.List<string>();
+  // Data directory 1 is the import table: 20-byte descriptors, the name
+  // RVA at offset 12, ending at an all-zero descriptor.
+  uint imports = System.BitConverter.ToUInt32(image, directories + 8);
+  if (imports != 0) {
+    for (uint d = ToOffset(image, sections, count, imports); ; d += 20) {
+      uint name = System.BitConverter.ToUInt32(image, (int)d + 12);
+      if (name == 0) break;
+      names.Add(ReadName(image, ToOffset(image, sections, count, name)));
+    }
+  }
+  // Data directory 13 is the delay-load table: 32-byte descriptors, the
+  // name RVA at offset 4, ending at an all-zero descriptor.
+  uint delayed = System.BitConverter.ToUInt32(image, directories + 13 * 8);
+  if (delayed != 0) {
+    for (uint d = ToOffset(image, sections, count, delayed); ; d += 32) {
+      uint name = System.BitConverter.ToUInt32(image, (int)d + 4);
+      if (name == 0) break;
+      names.Add(ReadName(image, ToOffset(image, sections, count, name)));
+    }
+  }
+  return names.ToArray();
+}
+'@
+
+$bundled = @{}
+foreach ($file in Get-ChildItem -LiteralPath $Bundle -File -Recurse |
+           Where-Object { $_.Extension -in @('.exe', '.dll') }) {
+  $bundled[$file.Name.ToLowerInvariant()] = $true
+}
+$windowsDirectory = Join-Path $env:SystemRoot 'System32'
+$partOfWindows = @{}
+$missing = New-Object System.Collections.ArrayList
+foreach ($binary in Get-ChildItem -LiteralPath $Bundle -File -Recurse |
+         Where-Object { $_.Extension -in @('.exe', '.dll') }) {
+  foreach ($import in [SyncVerify.PeImports]::Read($binary.FullName)) {
+    $name = $import.ToLowerInvariant()
+    if ($bundled.ContainsKey($name)) { continue }
+    if ($name -match '^(api-ms-win-|ext-ms-)') { continue }
+    if (-not $partOfWindows.ContainsKey($name)) {
+      $systemFile = Join-Path $windowsDirectory $name
+      $partOfWindows[$name] = (Test-Path -LiteralPath $systemFile -PathType Leaf) -and
+        ([string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($systemFile).ProductName -notmatch
+          'Visual Studio')
+    }
+    if (-not $partOfWindows[$name]) {
+      $relative = $binary.FullName.Substring($Bundle.Length).TrimStart('\', '/')
+      [void]$missing.Add("$relative imports $import")
+    }
+  }
+}
+if ($missing.Count -gt 0) {
+  Fail ("these imports are neither in the bundle nor part of Windows: " +
+        ($missing -join '; '))
+}
+
 if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion)) {
   foreach ($name in @('Sync.exe', 'syncd.exe')) {
     $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $Bundle $name))

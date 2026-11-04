@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -43,6 +47,35 @@ test("packaged Sync bundle is self-contained and x64", stagedOnWindows, () => {
     const headerOffset = image.readUInt32LE(0x3c);
     assert.equal(image.readUInt32LE(headerOffset), 0x0000_4550, `${binary} is not a PE image`);
     assert.equal(image.readUInt16LE(headerOffset + 4), 0x8664, `${binary} is not x64`);
+  }
+});
+
+function verifyBundle(directory) {
+  return spawnSync("pwsh", [
+    "-NoProfile", "-File", path.join(sourceDirectory, "scripts/verify-windows-bundle.ps1"),
+    "-Bundle", directory,
+  ], { encoding: "utf8" });
+}
+
+// The verifier reads every bundled binary's import table, so a bundle that
+// lacks a DLL its binaries import fails rather than installing an app that
+// cannot start on a machine without that DLL.
+test("the bundle verifier fails on an import the bundle does not carry", stagedOnWindows, () => {
+  const intact = verifyBundle(bundle);
+  assert.equal(intact.status, 0, `the staged bundle fails verification:\n${intact.stderr}`);
+
+  const scratch = mkdtempSync(path.join(tmpdir(), "sync-bundle-"));
+  try {
+    const copy = path.join(scratch, "Sync");
+    cpSync(bundle, copy, { recursive: true });
+    const runtime = readdirSync(copy).find((entry) => entry.toLowerCase() === "vcruntime140.dll");
+    assert.ok(runtime, "the staged bundle carries no vcruntime140.dll");
+    rmSync(path.join(copy, runtime));
+    const broken = verifyBundle(copy);
+    assert.notEqual(broken.status, 0, "the verifier passed a bundle without vcruntime140.dll");
+    assert.match(broken.stderr + broken.stdout, /imports VCRUNTIME140\.dll/i);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

@@ -1680,6 +1680,23 @@ elseif(WIN32)
   set(SYNC_INSTALLER_PATH
       ${SYNC_PACKAGE_DIRECTORY}/Sync-${SYNC_PRODUCT_VERSION}-x64-Setup.exe)
   find_program(SYNC_POWERSHELL NAMES pwsh powershell REQUIRED)
+  # The Visual C++ runtime ships beside the executables, from the
+  # redistributable folder of the toolset building them: bundle-dependencies
+  # copies from there each runtime DLL the bundle's import tables name, so the
+  # build machine's System32 copies never reach the installer. The UCRT is
+  # part of Windows 10 and later and is not bundled.
+  set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+  set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+  include(InstallRequiredSystemLibraries)
+  set(SYNC_MSVC_RUNTIME_DIR "")
+  foreach(_sync_runtime IN LISTS CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+    get_filename_component(_sync_runtime_name "${_sync_runtime}" NAME)
+    string(TOLOWER "${_sync_runtime_name}" _sync_runtime_name)
+    if(_sync_runtime_name STREQUAL "vcruntime140.dll")
+      get_filename_component(SYNC_MSVC_RUNTIME_DIR "${_sync_runtime}" DIRECTORY)
+    endif()
+  endforeach()
+  message(STATUS "Visual C++ runtime for the Windows bundle: ${SYNC_MSVC_RUNTIME_DIR}")
   # As on macOS: with the render helper built, the installer also carries
   # sync-render, its noisemaker data and the Qt it links.
   set(SYNC_BUNDLE_RENDER_ENVIRONMENT)
@@ -1706,6 +1723,7 @@ elseif(WIN32)
       -Version ${SYNC_PRODUCT_VERSION}
       -SpoutLibrary ${SYNC_SPOUT_LIBRARY_PATH}
       -DependencySearchPath ${SYNC_WINDOWS_DEPENDENCY_PATH}
+      -RuntimeDir "${SYNC_MSVC_RUNTIME_DIR}"
       -BinaryDir $<TARGET_FILE_DIR:syncd>
       ${SYNC_WINDOWS_UPDATE_PACKAGE_ARGUMENTS}
     DEPENDS

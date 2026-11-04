@@ -292,3 +292,15 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
 ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
 CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+Microsoft Visual C++ Runtime
+Source: the redistributable folder (Microsoft.VC143.CRT) of the Visual Studio
+2022 toolset that builds this release
+
+The installer carries the Visual C++ runtime DLLs that Sync's binaries import
+(msvcp140*.dll and vcruntime140*.dll), copied unmodified from that folder, so
+Sync starts on a machine without the Visual C++ Redistributable installed.
+Microsoft permits their redistribution with an application as Distributable
+Code under the Visual Studio license terms. They remain Microsoft's software
+and are not covered by Sync's license.
