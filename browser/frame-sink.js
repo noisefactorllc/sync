@@ -7,6 +7,8 @@ import {
 
 const SOCKET_OPEN = 1;
 const MAX_UINT32 = 0xffffffff;
+// The v1 receiver refuses a frame wider or taller than this (docs/protocol-v1.md).
+const MAX_FRAME_DIMENSION = 4096;
 const HEADER_BYTES = 64;
 
 const COLOR_SPACE_ENUM = Object.freeze({
@@ -50,6 +52,9 @@ function validateDescriptor(descriptor) {
   }
   if (!Number.isSafeInteger(descriptor.height) || descriptor.height <= 0) {
     throw new RangeError('descriptor height must be a positive safe integer');
+  }
+  if (descriptor.width > MAX_FRAME_DIMENSION || descriptor.height > MAX_FRAME_DIMENSION) {
+    throw new RangeError(`descriptor width and height must be at most ${MAX_FRAME_DIMENSION}`);
   }
   if (descriptor.format !== 'rgba8unorm') {
     throw new RangeError('descriptor format must be rgba8unorm');

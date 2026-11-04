@@ -129,6 +129,51 @@ test('rejects unsupported metadata and incorrect payload size before framing', (
   assert.throws(() => encodeFrameV1(metadata, payload.subarray(0, 15)), /payload/i);
 });
 
+test('enforces the v1 width, height and payload limits', () => {
+  const MiB = 1024 * 1024;
+  const rgba = { ...metadata, alphaMode: ALPHA_MODE.OPAQUE };
+  const nv12 = { ...rgba, pixelFormat: PIXEL_FORMAT.NV12 };
+
+  // A 4096 by 4096 RGBA frame with a packed stride fills the 64 MiB limit exactly.
+  const largest = encodeFrameV1({ ...rgba, width: 4096, height: 4096, rowStride: 16384 },
+    new Uint8Array(64 * MiB));
+  assert.equal(decodeFrameHeaderV1(largest).payloadBytes, 64 * MiB);
+
+  assert.throws(() => encodeFrameV1({ ...rgba, width: 4097, height: 1, rowStride: 16388 },
+    new Uint8Array(16388)), RangeError);
+  assert.throws(() => encodeFrameV1({ ...rgba, width: 1, height: 4097, rowStride: 4 },
+    new Uint8Array(16388)), RangeError);
+  assert.throws(() => encodeFrameV1({ ...rgba, width: 4096, height: 4096, rowStride: 16388 },
+    new Uint8Array(4)), /protocol v1 limits/);
+  assert.throws(() => encodeFrameV1({ ...nv12, width: 4096, height: 4096, rowStride: 10924 },
+    new Uint8Array(4)), /protocol v1 limits/);
+
+  // Header-only frames carry the same fields to the decoder.
+  const header = (format, { width, height, rowStride, payloadBytes }) => {
+    const bytes = new Uint8Array(encodeFrameV1(format, format.pixelFormat === PIXEL_FORMAT.NV12
+      ? new Uint8Array(6) : new Uint8Array(16))).slice(0, 64);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(20, width, true);
+    view.setUint32(24, height, true);
+    view.setUint32(28, rowStride, true);
+    view.setUint32(32, payloadBytes, true);
+    return bytes;
+  };
+  const nv12Small = { ...nv12, rowStride: 2 };
+  assert.equal(decodeFrameHeaderV1(header(rgba,
+    { width: 4096, height: 1, rowStride: 16384, payloadBytes: 16384 })).width, 4096);
+  assert.equal(decodeFrameHeaderV1(header(rgba,
+    { width: 1, height: 4096, rowStride: 4, payloadBytes: 16384 })).height, 4096);
+  assert.throws(() => decodeFrameHeaderV1(header(rgba,
+    { width: 4097, height: 1, rowStride: 16388, payloadBytes: 16388 })), RangeError);
+  assert.throws(() => decodeFrameHeaderV1(header(rgba,
+    { width: 1, height: 4097, rowStride: 4, payloadBytes: 16388 })), RangeError);
+  assert.throws(() => decodeFrameHeaderV1(header(rgba,
+    { width: 4096, height: 4096, rowStride: 16388, payloadBytes: 67125248 })), /protocol v1 limits/);
+  assert.throws(() => decodeFrameHeaderV1(header(nv12Small,
+    { width: 4096, height: 4096, rowStride: 10924, payloadBytes: 67117056 })), /protocol v1 limits/);
+});
+
 test('rejects malformed v1 headers before accepting a frame', () => {
   const valid = new Uint8Array(encodeFrameV1(metadata, payload));
   const decode = (mutate) => {

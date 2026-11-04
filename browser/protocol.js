@@ -3,6 +3,10 @@ const VERSION = 1;
 const HEADER_BYTES = 64;
 const TOP_DOWN_FLAG = 1;
 const MAX_UINT32 = 0xffffffff;
+// The v1 receiver limits (docs/protocol-v1.md, `Limits` in
+// native/include/sync/protocol.hpp). A frame outside them closes the sender.
+const MAX_FRAME_DIMENSION = 4096;
+const MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 export const PIXEL_FORMAT = Object.freeze({
@@ -64,7 +68,7 @@ function expectedPayloadBytes(width, height, rowStride, pixelFormat) {
     throw new RangeError(`row stride must be at least width${nv12 ? '' : ' * 4'}`);
   }
   const payloadBytes = rowStride * (nv12 ? height + height / 2 : height);
-  if (!Number.isSafeInteger(payloadBytes) || payloadBytes > MAX_UINT32) {
+  if (!Number.isSafeInteger(payloadBytes) || payloadBytes > MAX_PAYLOAD_BYTES) {
     throw new RangeError('payload size exceeds protocol v1 limits');
   }
   return payloadBytes;
@@ -83,6 +87,9 @@ function validateFrameFields({ width, height, rowStride, pixelFormat, colorSpace
   }
   validateUint32(width, 'width', { positive: true });
   validateUint32(height, 'height', { positive: true });
+  if (width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION) {
+    throw new RangeError(`width and height must be at most ${MAX_FRAME_DIMENSION}`);
+  }
   validateUint32(rowStride, 'row stride');
   if (pixelFormat === PIXEL_FORMAT.H264_ANNEXB) {
     if ((width | height) & 1) throw new RangeError('H.264 dimensions must be even');

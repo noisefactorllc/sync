@@ -217,6 +217,15 @@ test('NV12 stream sender writes packed frames with browser stream backpressure',
     colorSpace: COLOR_SPACE.SRGB, alphaMode: ALPHA_MODE.OPAQUE }, new Uint8Array(16));
   await assert.rejects(sender.writeFrame(rgba), SyncConfigurationError);
   assert.equal(writes.length, 1);
+  // A complete NV12 frame wider than the v1 limit is refused before it is written.
+  const wide = new Uint8Array(64 + 4098 * 3);
+  wide.set(new Uint8Array(frame).subarray(0, 64));
+  const wideHeader = new DataView(wide.buffer);
+  wideHeader.setUint32(20, 4098, true);
+  wideHeader.setUint32(28, 4098, true);
+  wideHeader.setUint32(32, 4098 * 3, true);
+  await assert.rejects(sender.writeFrame(wide), SyncConfigurationError);
+  assert.equal(writes.length, 1);
   assert.equal((await sender.getStats()).accepted, 1);
   sender.close();
   await sender.closed;

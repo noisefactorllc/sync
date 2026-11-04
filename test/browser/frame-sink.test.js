@@ -243,6 +243,8 @@ test('configure validates one v1 descriptor and forwards the identical object', 
     { ...DESCRIPTOR, width: 0 },
     { ...DESCRIPTOR, width: 1.5 },
     { ...DESCRIPTOR, height: Number.MAX_SAFE_INTEGER + 1 },
+    { ...DESCRIPTOR, width: 4097 },
+    { ...DESCRIPTOR, height: 4097 },
     { ...DESCRIPTOR, format: 'rgba16float' },
     { ...DESCRIPTOR, colorSpace: 'rec2020' },
     { ...DESCRIPTOR, colorSpace: 'toString' },
@@ -256,6 +258,11 @@ test('configure validates one v1 descriptor and forwards the identical object', 
 
   assert.equal(sink.configure(DESCRIPTOR), undefined);
   assert.equal(exportQueue.descriptor, DESCRIPTOR);
+
+  // The v1 receiver accepts 4096 in each dimension.
+  const largest = { ...DESCRIPTOR, width: 4096, height: 4096 };
+  assert.equal(sink.configure(largest), undefined);
+  assert.equal(exportQueue.descriptor, largest);
 });
 
 test('submit is synchronous, polls first, and drops before readback under socket pressure', () => {
