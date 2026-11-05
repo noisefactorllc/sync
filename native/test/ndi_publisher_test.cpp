@@ -692,6 +692,24 @@ constexpr std::size_t kNoChange = std::numeric_limits<std::size_t>::max();
   return declared;
 }
 
+// A render loop `period_us` apart, with the same capture jitter, that loses
+// `drop_per_mille` of its frames before they are sent.
+[[nodiscard]] auto declare_dropping(double period_us, std::size_t frames, std::uint64_t seed,
+                                    std::uint64_t drop_per_mille) -> std::vector<Declared> {
+  Jitter jitter{seed};
+  FrameRateTracker tracker;
+  std::vector<Declared> declared;
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    const double nominal_us = static_cast<double>(frame) * period_us;
+    const bool dropped = frame > 0 && jitter.next() % 1000U < drop_per_mille;
+    const double offset_us = static_cast<double>(jitter.next() % 4001U) - 2000.0;
+    if (dropped) continue;
+    const auto time_us = static_cast<std::uint64_t>(1'000'000'000.0 + nominal_us + offset_us);
+    declared.push_back({nominal_us / 1'000'000.0, tracker.observe(time_us)});
+  }
+  return declared;
+}
+
 [[nodiscard]] auto changes(const std::vector<Declared>& declared) -> std::size_t {
   std::size_t count = 0;
   for (std::size_t index = 1; index < declared.size(); ++index) {
@@ -716,6 +734,7 @@ constexpr std::size_t kNoChange = std::numeric_limits<std::size_t>::max();
 constexpr std::array<std::uint64_t, 12> kSeeds{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 34, 316};
 
 constexpr double kMicrosecondsPer60Fps = 1'000'000.0 / 60.0;
+constexpr double kMicrosecondsPer48Fps = 1'000'000.0 / 48.0;
 constexpr double kMicrosecondsPer30Fps = 1'000'000.0 / 30.0;
 constexpr double kMicrosecondsPer59_94Fps = 1'000'000.0 * 1001.0 / 60'000.0;
 constexpr double kMicrosecondsPer29_97Fps = 1'000'000.0 * 1001.0 / 30'000.0;
@@ -770,5 +789,62 @@ SYNC_TEST(ndi_frame_rate_tracker_follows_a_change_from_60_to_30_fps_within_a_sec
       }
     }
     SYNC_REQUIRE(settled_at(after, {30, 1}) - change_seconds <= 1.1);
+  }
+}
+
+// Drops lengthen intervals and never change the loop's cadence: a loop that
+// loses up to most of its frames declares its own rate, after at most the one
+// change from the initial 60/1. In 0.2.137 the reference period was the median
+// interval, which drops pull upward, so frames were misnumbered and the fit
+// restarted, and the declared rate flapped between 60/1, 60000/1001 and
+// measured rates.
+SYNC_TEST(ndi_frame_rate_tracker_holds_the_rate_of_a_loop_that_drops_frames) {
+  const std::array<std::pair<double, FrameRate>, 2> loops{{
+      {kMicrosecondsPer48Fps, FrameRate{48, 1}},
+      {kMicrosecondsPer60Fps, FrameRate{60, 1}},
+  }};
+  for (const auto& [period_us, rate] : loops) {
+    const auto frames = static_cast<std::size_t>(std::llround(20'000'000.0 / period_us));
+    for (const std::uint64_t drop_per_mille : {100U, 300U, 470U, 600U}) {
+      for (const std::uint64_t seed : kSeeds) {
+        const std::vector<Declared> declared = declare_dropping(period_us, frames, seed, drop_per_mille);
+        SYNC_REQUIRE(declared.front().rate == kInitialFrameRate);
+        SYNC_REQUIRE(changes(declared) <= 1);
+        SYNC_REQUIRE(declared.back().rate == rate);
+        SYNC_REQUIRE(settled_at(declared, rate) <= 3.0);
+      }
+    }
+  }
+}
+
+// The pattern a headless browser sender produced through Sync.app 0.2.137:
+// presentation times on a 60 Hz grid, two consecutive frames sent and the
+// next two or three dropped, after the stream had started at another rate.
+// That tracker held the rate it had declared before the pattern began (all
+// 246 frames of one receive declared 50/1). The loop's rate is 60/1.
+SYNC_TEST(ndi_frame_rate_tracker_follows_a_paired_frame_pattern_to_its_60_hz_grid) {
+  for (const std::uint64_t seed : kSeeds) {
+    for (const bool lead_in : {false, true}) {
+      Jitter jitter{seed};
+      FrameRateTracker tracker;
+      std::uint64_t time_us = 1'000'000'000;
+      if (lead_in) {
+        for (int frame = 0; frame < 100; ++frame, time_us += 20'000) tracker.observe(time_us);
+        SYNC_REQUIRE((tracker.observe(time_us) == FrameRate{50, 1}));
+      }
+      std::vector<Declared> declared;
+      double grid_us = static_cast<double>(time_us) + kMicrosecondsPer60Fps;
+      for (int pair = 0; pair < 120; ++pair) {
+        for (int frame = 0; frame < 2; ++frame, grid_us += kMicrosecondsPer60Fps) {
+          const double offset_us = static_cast<double>(jitter.next() % 2001U) - 1000.0;
+          declared.push_back({(grid_us - static_cast<double>(time_us)) / 1'000'000.0,
+                              tracker.observe(static_cast<std::uint64_t>(grid_us + offset_us))});
+        }
+        grid_us += (pair % 9 == 8 ? 2.0 : 3.0) * kMicrosecondsPer60Fps;
+      }
+      SYNC_REQUIRE(declared.back().rate == (FrameRate{60, 1}));
+      SYNC_REQUIRE(settled_at(declared, {60, 1}) <= (lead_in ? 2.0 : 0.0));
+      SYNC_REQUIRE(changes(declared) <= (lead_in ? 1U : 0U));
+    }
   }
 }

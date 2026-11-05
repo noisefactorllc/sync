@@ -37,25 +37,44 @@ inline constexpr std::uint64_t kMaximumFrameIntervalUs = 1'000'000;
 // change while the cadence does not.
 //
 // The period is the least-squares slope of presentation time against frame
-// number over the frames since the last restart, up to kFitCapacity of them.
-// A frame's number advances by its interval divided by the median of the
-// recent intervals, rounded, so a dropped frame moves the fit by two periods
-// rather than bending it. The declared rate changes only when the slope's
-// confidence interval, from the fit's own residuals and a Student t value,
-// lies wholly in one place:
+// number over the frames since the last restart, up to kFitCapacity of them. A
+// frame's number advances by its interval divided by the reference period,
+// rounded, so a dropped frame moves the fit by whole periods rather than
+// bending it. Once the fit holds kEstablishedFitFrames frames the reference is
+// the fitted period. Before that it is recent_period(), and whenever a frame
+// arrives every frame of the fit is numbered again from its time, first by
+// recent_period() and then by the fitted period until the numbering holds, so
+// an early reference that a run of drops lengthened leaves nothing behind and
+// a long run of drops is counted in whole periods. Drops only lengthen
+// intervals, so recent_period() comes from the short end of the recent
+// intervals; their median lies well above the period of a loop that drops many
+// frames.
+//
+// The declared rate changes only when the slope's confidence interval, from
+// the fit's own residuals and a Student t value, lies wholly in one place:
 //   - in the rates of another family (59.94 and 60, 29.97 and 30, 23.976 and
 //     24, or one other standard rate): its integer rate;
 //   - outside every standard rate's tolerance: the measured rate;
 //   - in one rate of the declared rate's own family: that rate.
-// Until then the declared rate stands. The interval is at a two-sided 1e-6
-// level while the fit holds fewer than kReliableFitFrames frames: so few
-// residuals can be small by chance, and a fit of three jittered frames can
-// look exact. From kReliableFitFrames on, the choice within a family uses a
-// 1e-3 level. 60 and 59.94 are 0.1% apart, closer than capture jitter moves a
-// short average, so that choice waits for the fit to narrow; families are at
-// least 4% apart and a cadence change between them is clear much sooner. When the median interval moves away from the
-// fitted period the cadence has changed, and the fit restarts from the recent
-// frames that match the new median.
+// Until then the declared rate stands. A fit whose residuals are not small
+// next to its period has numbered some frames wrongly, which a wide spread of
+// frame numbers can hide from the interval; it decides nothing and numbers no
+// frame, and a long one restarts like a cadence change. The interval is at a
+// two-sided 1e-6 level while the fit holds fewer than kReliableFitFrames
+// frames: so few residuals can be small by chance, and a fit of three jittered
+// frames can look exact. From kReliableFitFrames on, the choice within a
+// family uses a 1e-3 level. 60 and 59.94 are 0.1% apart, closer than capture
+// jitter moves a short average, so that choice waits for the fit to narrow;
+// families are at least 4% apart and a cadence change between them is clear
+// much sooner.
+//
+// The cadence has changed when most recent intervals are no whole number of
+// fitted periods, when recent_period() itself moves away from the fitted
+// period, or when the latest kHarmonicIntervals intervals are all the same
+// whole number of periods, two or more: halving the rate, 60 to 30 fps, keeps
+// every interval a whole number of the old period, and random drops do not
+// repeat one gap that often. The fit then restarts from the recent frames that
+// match the new period.
 class FrameRateTracker {
  public:
   // The rate to declare on the frame with this presentation time.
@@ -76,18 +95,33 @@ class FrameRateTracker {
       return declared_;
     }
     record_interval(interval);
-    const double median = median_interval();
+    const double recent = recent_period();
+    const bool long_fit = fit_count_ >= kEstablishedFitFrames;
+    const bool established = long_fit && fit_consistent_;
+    const double reference = established ? fitted_period_ : recent;
     const std::int64_t periods =
-        std::max<std::int64_t>(1, std::llround(static_cast<double>(interval) / median));
+        std::max<std::int64_t>(1, std::llround(static_cast<double>(interval) / reference));
     append_point(point(fit_count_ - 1).index + periods, presentation_time_us);
-    if (fit_count_ >= 3) {
-      const Fit fit = fit_period();
-      if (std::abs(median - fit.period) > kCadenceChange * fit.period) {
-        restart_from_matching_run(median);
+    if (long_fit && (!fit_consistent_ || cadence_changed(recent))) {
+      restart_from_matching_run(recent);
+    } else if (const std::int64_t multiple = established ? repeated_multiple() : 0; multiple >= 2) {
+      restart_from_matching_run(fitted_period_ * static_cast<double>(multiple));
+    } else if (!established) {
+      renumber(reference);
+      for (std::size_t pass = 0; pass < kRenumberPasses && fit_count_ >= 3; ++pass) {
+        const double period = fit_period().period;
+        if (!(period > 0.0) || !renumber(period)) {
+          break;
+        }
       }
     }
     if (fit_count_ >= 3) {
-      decide(fit_period());
+      const Fit fit = fit_period();
+      fit_consistent_ = fit.residual_rms <= kMaximumResidualShare * fit.period;
+      if (fit_consistent_) {
+        fitted_period_ = fit.period;
+        decide(fit);
+      }
     }
     return declared_;
   }
@@ -110,6 +144,7 @@ class FrameRateTracker {
   struct Fit {
     double period = 0.0;
     double standard_error = 0.0;
+    double residual_rms = 0.0;
   };
 
   [[nodiscard]] static auto nearest_standard(double interval_us) noexcept -> const FrameRate* {
@@ -225,13 +260,39 @@ class FrameRateTracker {
     interval_count_ = std::min(interval_count_ + 1, intervals_.size());
   }
 
-  [[nodiscard]] auto median_interval() const noexcept -> double {
-    std::array<std::uint64_t, kMedianWindow> sorted{};
+  // The median of the recent intervals no longer than one and a half times
+  // their tenth percentile. A loop that drops most of its frames still has
+  // single intervals at the tenth percentile, and the bound leaves out every
+  // interval that spans a dropped frame.
+  [[nodiscard]] auto recent_period() const noexcept -> double {
+    std::array<std::uint64_t, kRecentIntervals> sorted{};
     std::copy_n(intervals_.begin(), interval_count_, sorted.begin());
     const auto end = sorted.begin() + static_cast<std::ptrdiff_t>(interval_count_);
-    const auto middle = sorted.begin() + static_cast<std::ptrdiff_t>(interval_count_ / 2);
-    std::nth_element(sorted.begin(), middle, end);
-    return static_cast<double>(*middle);
+    std::sort(sorted.begin(), end);
+    const double bound = 1.5 * static_cast<double>(sorted[(interval_count_ - 1) / 10]);
+    const auto kept = static_cast<std::size_t>(
+        std::upper_bound(sorted.begin(), end, static_cast<std::uint64_t>(bound)) - sorted.begin());
+    return static_cast<double>(sorted[kept / 2]);
+  }
+
+  // Whether the recent intervals left the fitted period: recent_period()
+  // moved by more than kCadenceChange, or more than half of a full window of
+  // intervals lies more than a quarter period from a whole number of periods.
+  [[nodiscard]] auto cadence_changed(double recent) const noexcept -> bool {
+    if (std::abs(recent - fitted_period_) > kCadenceChange * fitted_period_) {
+      return true;
+    }
+    if (interval_count_ < intervals_.size()) {
+      return false;
+    }
+    std::size_t off_period = 0;
+    for (const std::uint64_t interval : intervals_) {
+      const double periods = static_cast<double>(interval) / fitted_period_;
+      if (periods < 0.75 || std::abs(periods - std::round(periods)) > 0.25) {
+        ++off_period;
+      }
+    }
+    return off_period * 2 > intervals_.size();
   }
 
   [[nodiscard]] auto point(std::size_t offset) const noexcept -> const Point& {
@@ -253,17 +314,51 @@ class FrameRateTracker {
     ++fit_count_;
   }
 
-  // Keeps the newest frames whose spacing is a whole number of `median`
-  // periods, numbered by that period.
-  void restart_from_matching_run(double median) noexcept {
+  // The whole number of fitted periods that each of the latest
+  // kHarmonicIntervals intervals spans, or 0 when they differ.
+  [[nodiscard]] auto repeated_multiple() const noexcept -> std::int64_t {
+    if (interval_count_ < kHarmonicIntervals) {
+      return 0;
+    }
+    std::int64_t multiple = 0;
+    for (std::size_t back = 1; back <= kHarmonicIntervals; ++back) {
+      const std::uint64_t interval = intervals_[(next_interval_ + intervals_.size() - back) % intervals_.size()];
+      const double periods = static_cast<double>(interval) / fitted_period_;
+      const std::int64_t whole = std::llround(periods);
+      if (whole < 2 || std::abs(periods - static_cast<double>(whole)) > 0.25 || (multiple != 0 && whole != multiple)) {
+        return 0;
+      }
+      multiple = whole;
+    }
+    return multiple;
+  }
+
+  // Numbers every frame of the fit again from its time, by `period`, and
+  // returns whether any number changed.
+  auto renumber(double period) noexcept -> bool {
+    bool changed = false;
+    for (std::size_t offset = 1; offset < fit_count_; ++offset) {
+      const Point& earlier = point(offset - 1);
+      Point& later = points_[(fit_start_ + offset) % points_.size()];
+      const double gap = static_cast<double>(later.time_us - earlier.time_us);
+      const std::int64_t index = earlier.index + std::max<std::int64_t>(1, std::llround(gap / period));
+      changed = changed || index != later.index;
+      later.index = index;
+    }
+    return changed;
+  }
+
+  // Keeps the newest frames whose spacing is a whole number of `period`,
+  // numbered by that period.
+  void restart_from_matching_run(double period) noexcept {
     std::array<Point, kFitCapacity> run{};
     std::size_t length = 1;
     run[0] = point(fit_count_ - 1);
     for (std::size_t offset = fit_count_ - 1; offset > 0; --offset) {
       const Point& older = point(offset - 1);
       const double gap = static_cast<double>(run[length - 1].time_us - older.time_us);
-      const long long periods = std::llround(gap / median);
-      if (periods < 1 || periods > 3 || std::abs(gap - static_cast<double>(periods) * median) > median / 3.0) {
+      const long long periods = std::llround(gap / period);
+      if (periods < 1 || periods > 3 || std::abs(gap - static_cast<double>(periods) * period) > period / 3.0) {
         break;
       }
       run[length] = {run[length - 1].index - periods, older.time_us};
@@ -303,19 +398,30 @@ class FrameRateTracker {
       const double residual = time - period * index;
       residuals += residual * residual;
     }
-    return {period, std::sqrt(residuals / (count - 2.0) / index_spread)};
+    const double residual_variance = residuals / (count - 2.0);
+    return {period, std::sqrt(residual_variance / index_spread), std::sqrt(residual_variance)};
   }
 
   // Half a second at 60 fps.
-  static constexpr std::size_t kMedianWindow = 30;
+  static constexpr std::size_t kRecentIntervals = 30;
+  // Half a second at 60 fps: enough frames that the fitted period, rather
+  // than recent_period(), numbers the next frame.
+  static constexpr std::size_t kEstablishedFitFrames = 30;
+  // Consecutive intervals of one repeated gap that make a new, slower cadence.
+  static constexpr std::size_t kHarmonicIntervals = 12;
+  // The largest residual RMS, as a share of the period, that a fit may have
+  // and still decide: capture jitter leaves far less.
+  static constexpr double kMaximumResidualShare = 0.2;
+  // Refits that number a young fit by its own period, until it holds.
+  static constexpr std::size_t kRenumberPasses = 4;
   // About four seconds at 60 fps.
   static constexpr std::size_t kFitCapacity = 256;
-  // A median this far from the fitted period is a new cadence.
+  // A recent_period() this far from the fitted period is a new cadence.
   static constexpr double kCadenceChange = 0.15;
   // About a second at 60 fps: enough residuals for the fit's own error.
   static constexpr std::size_t kReliableFitFrames = 60;
 
-  std::array<std::uint64_t, kMedianWindow> intervals_{};
+  std::array<std::uint64_t, kRecentIntervals> intervals_{};
   std::size_t next_interval_ = 0;
   std::size_t interval_count_ = 0;
   std::array<Point, kFitCapacity> points_{};
@@ -324,6 +430,8 @@ class FrameRateTracker {
   bool has_previous_ = false;
   std::uint64_t previous_us_ = 0;
   FrameRate declared_ = kInitialFrameRate;
+  double fitted_period_ = 0.0;
+  bool fit_consistent_ = false;
 };
 
 }  // namespace noisefactor::sync::ndi
