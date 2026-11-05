@@ -42,6 +42,14 @@ if [[ "$identifier" != "io.noisefactor.sync" || "$agent" != "true" ]]; then
   echo "verify-macos-bundle: invalid identity or LSUIElement metadata" >&2
   exit 1
 fi
+# syncd sends NDI to receivers on the local network. macOS asks the user
+# before that, and the prompt shows this string; a bundle without it has no
+# text to show.
+local_network="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$info" 2>/dev/null || true)"
+if [[ -z "${local_network//[[:space:]]/}" ]]; then
+  echo "verify-macos-bundle: Info.plist lacks NSLocalNetworkUsageDescription" >&2
+  exit 1
+fi
 if [[ -n "$expected_version" && "$version" != "$expected_version" ]]; then
   echo "verify-macos-bundle: expected version $expected_version, found $version" >&2
   exit 1

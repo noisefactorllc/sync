@@ -145,6 +145,44 @@ test("macOS bundle verifier accepts Mach-O targets below the advertised minimum"
   }
 });
 
+// syncd sends NDI to receivers on the local network, and macOS shows this
+// string when it asks the user to allow that.
+test("the Sync app template explains its local network use", () => {
+  const template = readFileSync(path.join(sourceDirectory, "packaging/macos/Info.plist.in"), "utf8");
+  const description = template.match(
+    /<key>NSLocalNetworkUsageDescription<\/key>\s*<string>([^<]*)<\/string>/,
+  );
+  assert.ok(description, "Info.plist.in must carry NSLocalNetworkUsageDescription");
+  assert.notEqual(description[1].trim(), "");
+  const verifier = readFileSync(
+    path.join(sourceDirectory, "scripts/verify-macos-bundle.sh"), "utf8",
+  );
+  assert.match(verifier, /NSLocalNetworkUsageDescription/);
+});
+
+test("packaged Sync app explains its local network use and the verifier requires it",
+     stagedOnMacos, () => {
+  assert.notEqual(plist("NSLocalNetworkUsageDescription"), "");
+  const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "sync-verify-test-"));
+  const copiedApp = path.join(temporaryDirectory, "Sync.app");
+  try {
+    execFileSync("/usr/bin/ditto", [app, copiedApp]);
+    execFileSync("/usr/bin/plutil", [
+      "-remove", "NSLocalNetworkUsageDescription",
+      path.join(copiedApp, "Contents", "Info.plist"),
+    ]);
+    const result = spawnSync(path.join(sourceDirectory, "scripts/verify-macos-bundle.sh"), [
+      copiedApp,
+      plist("CFBundleShortVersionString"),
+    ], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /lacks NSLocalNetworkUsageDescription/);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("distributed third-party notices cover every linked native dependency", () => {
   const notices = readFileSync(
     path.join(sourceDirectory, "packaging/macos/Third-Party-Notices.txt"), "utf8",
