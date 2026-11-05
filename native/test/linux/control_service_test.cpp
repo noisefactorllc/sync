@@ -1,5 +1,9 @@
 #include "../test_harness.hpp"
 
+#include "../../src/syncctl_cli.hpp"
+
+#include <sync/pairing.hpp>
+#include <sync/pairing_store.hpp>
 #include <sync/platform/linux_control_protocol.hpp>
 #include <sync/platform/linux_control_service.hpp>
 
@@ -8,7 +12,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -131,9 +138,10 @@ std::string receive_json(int descriptor) {
   return output;
 }
 
-control::LinuxControlService make_service(const TempDirectory& directory,
-                                           Management& management,
-                                           control::LinuxRuntimeStatus& status) {
+control::LinuxControlService make_service(
+    const TempDirectory& directory, Management& management,
+    control::LinuxRuntimeStatus& status,
+    std::uint32_t issuance_wait_ms = 30'000) {
   injected_uid.store(static_cast<std::uint32_t>(::geteuid()));
   return control::LinuxControlService({
       .runtime_directory = directory.path().string(),
@@ -141,7 +149,70 @@ control::LinuxControlService make_service(const TempDirectory& directory,
       .management = &management,
       .status = &status,
       .peer_uid = peer_uid,
+      .issuance_wait_ms = issuance_wait_ms,
   });
+}
+
+// Waits for the decision the terminal sends, within the prompt deadline.
+pairing::PromptResult wait_for_decision(control::LinuxControlService& service) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto result = service.poll();
+    if (result.available) return result;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return {};
+}
+
+struct TerminalPairing {
+  pairing::PromptResult decision{};
+  int exit = -1;
+  std::string output;
+  std::string error;
+};
+
+// Runs `syncctl pair` against the service and answers its prompt with y.
+// `issue` then plays the server's part for the approved generation.
+TerminalPairing pair_from_terminal(
+    const TempDirectory& directory, control::LinuxControlService& service,
+    std::string_view requested_origin,
+    const std::function<void(std::uint64_t)>& issue) {
+  SYNC_REQUIRE(::setenv("XDG_RUNTIME_DIR", directory.path().c_str(), 1) == 0);
+  pairing::PromptRequest request;
+  SYNC_REQUIRE(request.assign(7, origin(requested_origin), "Noisedeck"));
+  TerminalPairing result;
+  std::istringstream input("y\n");
+  std::ostringstream output;
+  std::ostringstream error;
+  std::thread terminal([&] {
+    const std::array<std::string_view, 1> arguments{"pair"};
+    result.exit = noisefactor::sync::syncctl::execute(
+        noisefactor::sync::syncctl::parse(arguments).options, input, output,
+        error);
+  });
+  if (service.begin(request)) {
+    result.decision = wait_for_decision(service);
+    if (result.decision.available &&
+        result.decision.decision == pairing::PromptDecision::Approved) {
+      issue(result.decision.generation);
+    }
+  }
+  terminal.join();
+  result.output = output.str();
+  result.error = error.str();
+  return result;
+}
+
+// Plays the server's part: commits the token for the approved origin to a
+// real store and reports how the commit ended.
+void issue_to(noisefactor::sync::PairingStore& store,
+              control::LinuxControlService& service, std::uint64_t generation,
+              std::string_view requested_origin) {
+  pairing::StorePairingAuthority authority(store);
+  noisefactor::sync::PairingCommitGate gate;
+  const auto issued = authority.issue(origin(requested_origin), gate);
+  service.report_issuance(generation, pairing::issuance_failure(issued));
 }
 
 }  // namespace
@@ -243,13 +314,122 @@ SYNC_TEST(linux_control_service_rendezvous_accepts_only_current_owner_decision) 
                std::string::npos);
   send_json(after,
             R"({"version":1,"command":"decision","generation":9,"approved":true})");
-  SYNC_REQUIRE(receive_json(after).find(R"("status":"accepted")") !=
-               std::string::npos);
-  ::close(after);
-  const auto approved = service.poll();
+  const auto approved = wait_for_decision(service);
   SYNC_REQUIRE(approved.available);
   SYNC_REQUIRE(approved.generation == 9);
   SYNC_REQUIRE(approved.decision == pairing::PromptDecision::Approved);
+  // The reply to an approval waits for the issuance result.
+  pollfd waiting{.fd = after, .events = POLLIN, .revents = 0};
+  SYNC_REQUIRE(::poll(&waiting, 1, 100) == 0);
+  service.report_issuance(8, {});
+  SYNC_REQUIRE(::poll(&waiting, 1, 100) == 0);
+  service.report_issuance(9, {});
+  SYNC_REQUIRE(receive_json(after) ==
+               R"({"version":1,"type":"decision","status":"paired"})");
+  ::close(after);
+}
+
+SYNC_TEST(syncctl_pair_prints_paired_only_after_a_durable_commit) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  auto service = make_service(directory, management, status);
+  SYNC_REQUIRE(service.start());
+  noisefactor::sync::PairingStore store;
+  SYNC_REQUIRE(store.open({.path = (directory.path() / "state" / "pairings.v1")
+                                       .string()}) == PairingStoreError::None);
+
+  const auto paired = pair_from_terminal(
+      directory, service, "https://visuals.example",
+      [&](std::uint64_t generation) {
+        issue_to(store, service, generation, "https://visuals.example");
+      });
+  SYNC_REQUIRE(paired.decision.generation == 7);
+  SYNC_REQUIRE(paired.exit == noisefactor::sync::syncctl::kSuccessExit);
+  SYNC_REQUIRE(paired.output.ends_with("[y/N] paired\n"));
+  SYNC_REQUIRE(paired.error.empty());
+}
+
+SYNC_TEST(syncctl_pair_reports_a_full_store_and_exits_nonzero) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  auto service = make_service(directory, management, status);
+  SYNC_REQUIRE(service.start());
+  noisefactor::sync::PairingStore store;
+  SYNC_REQUIRE(store.open({.path = (directory.path() / "state" / "pairings.v1")
+                                       .string()}) == PairingStoreError::None);
+  for (std::size_t index = 0;
+       index < noisefactor::sync::kMaximumPairingOrigins; ++index) {
+    SYNC_REQUIRE(store.issue(origin("https://host" + std::to_string(index) +
+                                    ".example"))
+                     .error == PairingStoreError::None);
+  }
+
+  const auto refused = pair_from_terminal(
+      directory, service, "https://overflow.example",
+      [&](std::uint64_t generation) {
+        issue_to(store, service, generation, "https://overflow.example");
+      });
+  SYNC_REQUIRE(refused.decision.decision == pairing::PromptDecision::Approved);
+  SYNC_REQUIRE(refused.exit == noisefactor::sync::syncctl::kFailureExit);
+  SYNC_REQUIRE(refused.output.find("paired") == std::string::npos);
+  SYNC_REQUIRE(refused.error == "syncctl: pairing failed: origin_limit\n");
+}
+
+SYNC_TEST(syncctl_pair_reports_an_uncertain_commit_and_exits_nonzero) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  auto service = make_service(directory, management, status);
+  SYNC_REQUIRE(service.start());
+  noisefactor::sync::PairingStore store;
+  SYNC_REQUIRE(
+      store.open({.path = (directory.path() / "state" / "pairings.v1").string(),
+                  .fail_point = noisefactor::sync::PairingStoreFailPoint::
+                      AfterRenameBeforeDirectorySync}) ==
+      PairingStoreError::None);
+
+  const auto uncertain = pair_from_terminal(
+      directory, service, "https://visuals.example",
+      [&](std::uint64_t generation) {
+        issue_to(store, service, generation, "https://visuals.example");
+      });
+  SYNC_REQUIRE(uncertain.decision.decision ==
+               pairing::PromptDecision::Approved);
+  SYNC_REQUIRE(uncertain.exit == noisefactor::sync::syncctl::kFailureExit);
+  SYNC_REQUIRE(uncertain.output.find("paired") == std::string::npos);
+  SYNC_REQUIRE(uncertain.error ==
+               "syncctl: pairing failed: store_durability_uncertain\n");
+}
+
+SYNC_TEST(syncctl_pair_fails_when_the_issuance_result_never_arrives_or_is_canceled) {
+  TempDirectory directory;
+  Management management;
+  DaemonMetrics metrics;
+  control::LinuxRuntimeStatus status(metrics);
+  auto service = make_service(directory, management, status, 200);
+  SYNC_REQUIRE(service.start());
+
+  const auto unanswered = pair_from_terminal(
+      directory, service, "https://visuals.example", [](std::uint64_t) {});
+  SYNC_REQUIRE(unanswered.decision.decision ==
+               pairing::PromptDecision::Approved);
+  SYNC_REQUIRE(unanswered.exit == noisefactor::sync::syncctl::kFailureExit);
+  SYNC_REQUIRE(unanswered.output.find("paired") == std::string::npos);
+  SYNC_REQUIRE(unanswered.error ==
+               "syncctl: pairing failed: pairing_timeout\n");
+
+  const auto canceled = pair_from_terminal(
+      directory, service, "https://visuals.example",
+      [&](std::uint64_t generation) { service.cancel(generation); });
+  SYNC_REQUIRE(canceled.exit == noisefactor::sync::syncctl::kFailureExit);
+  SYNC_REQUIRE(canceled.output.find("paired") == std::string::npos);
+  SYNC_REQUIRE(canceled.error ==
+               "syncctl: pairing failed: pairing_canceled\n");
 }
 
 SYNC_TEST(linux_control_service_does_not_deliver_an_unowned_cancel_to_the_next_client) {

@@ -231,12 +231,24 @@ struct LinuxControlService::Impl {
   dev_t socket_device = 0;
   ino_t socket_inode = 0;
 
+  // The reply to an approval waits for the issuance the approval starts, so
+  // it carries the store's result. The deadline bounds the wait when no
+  // result arrives.
+  struct PendingIssuance {
+    int descriptor = -1;
+    std::uint64_t generation = 0;
+    std::chrono::steady_clock::time_point deadline{};
+    bool reported = false;
+    std::array<char, 33> failure{};
+  };
+
   std::mutex prompt_mutex;
   pairing::PromptRequest active_request{};
   bool active_prompt = false;
   pairing::PromptResult prompt_result{};
   std::uint64_t canceled_generation = 0;
   int pair_owner_descriptor = -1;
+  PendingIssuance issuance;
 
   void wake() noexcept {
     if (wake_pipe[1] < 0) return;
@@ -255,6 +267,7 @@ struct LinuxControlService::Impl {
     std::lock_guard lock(prompt_mutex);
     if (pair_owner_descriptor != descriptor) return;
     pair_owner_descriptor = -1;
+    if (issuance.descriptor == descriptor) issuance = {};
     if (active_prompt) {
       prompt_result = {.available = true,
                        .generation = active_request.generation,
@@ -367,6 +380,18 @@ struct LinuxControlService::Impl {
                                          : pairing::PromptDecision::Denied,
         };
         active_prompt = false;
+        if (request.approved) {
+          issuance = {
+              .descriptor = client.descriptor,
+              .generation = active_request.generation,
+              .deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(options.issuance_wait_ms),
+              .reported = false,
+              .failure = {},
+          };
+          reset_input(client);
+          return;
+        }
         pair_owner_descriptor = -1;
         client.pair_owner = false;
         queue(client,
@@ -479,11 +504,28 @@ struct LinuxControlService::Impl {
     return !client.close_after_output;
   }
 
-  void reconcile_prompt(std::vector<Client>& clients) {
+  // Returns the poll timeout: the milliseconds left for a pending issuance,
+  // or -1 when none is pending.
+  int reconcile_prompt(std::vector<Client>& clients) {
     std::lock_guard lock(prompt_mutex);
+    const auto now = std::chrono::steady_clock::now();
     for (auto& client : clients) {
       if (client.descriptor != pair_owner_descriptor) continue;
-      if (canceled_generation != 0) {
+      if (issuance.descriptor == client.descriptor) {
+        if (issuance.reported || now >= issuance.deadline) {
+          const std::string_view failure = issuance.reported
+                                               ? array_text(issuance.failure)
+                                               : "pairing_timeout";
+          client.pair_owner = false;
+          pair_owner_descriptor = -1;
+          queue(client,
+                failure.empty()
+                    ? "{\"version\":1,\"type\":\"decision\",\"status\":\"paired\"}"
+                    : error_json(failure),
+                true);
+          issuance = {};
+        }
+      } else if (canceled_generation != 0) {
         client.pair_owner = false;
         pair_owner_descriptor = -1;
         queue(client, error_json("prompt_canceled"), true);
@@ -495,6 +537,14 @@ struct LinuxControlService::Impl {
       }
       break;
     }
+    if (issuance.descriptor < 0) return -1;
+    const auto remaining =
+        std::chrono::ceil<std::chrono::milliseconds>(issuance.deadline - now)
+            .count();
+    if (remaining <= 0) return 0;
+    return remaining >= std::numeric_limits<int>::max()
+               ? std::numeric_limits<int>::max()
+               : static_cast<int>(remaining);
   }
 
   void accept_clients(std::vector<Client>& clients) {
@@ -531,7 +581,7 @@ struct LinuxControlService::Impl {
     std::vector<Client> clients;
     clients.reserve(kMaximumClients);
     while (!stopping.load(std::memory_order_acquire)) {
-      reconcile_prompt(clients);
+      const int timeout = reconcile_prompt(clients);
       std::array<pollfd, kMaximumClients + 2> descriptors{};
       descriptors[0] = {.fd = listener, .events = POLLIN, .revents = 0};
       descriptors[1] = {
@@ -547,7 +597,8 @@ struct LinuxControlService::Impl {
         };
       }
       const std::size_t polled_client_count = clients.size();
-      const int ready = ::poll(descriptors.data(), polled_client_count + 2, -1);
+      const int ready =
+          ::poll(descriptors.data(), polled_client_count + 2, timeout);
       if (ready < 0) {
         if (errno == EINTR) continue;
         break;
@@ -734,15 +785,40 @@ void LinuxControlService::cancel(std::uint64_t generation) noexcept {
   if (impl_ == nullptr || generation == 0) return;
   {
     std::lock_guard lock(impl_->prompt_mutex);
-    if (!impl_->active_prompt || impl_->active_request.generation != generation) {
+    auto& pending = impl_->issuance;
+    if (impl_->active_prompt && impl_->active_request.generation == generation) {
+      impl_->prompt_result = {.available = true,
+                              .generation = generation,
+                              .decision = pairing::PromptDecision::Denied};
+      impl_->active_prompt = false;
+      impl_->canceled_generation =
+          impl_->pair_owner_descriptor >= 0 ? generation : 0;
+    } else if (pending.descriptor >= 0 && pending.generation == generation &&
+               !pending.reported) {
+      // The server canceled the prompt before it started the issuance.
+      pending.reported = true;
+      copy_text(pending.failure, "pairing_canceled");
+    } else {
       return;
     }
-    impl_->prompt_result = {.available = true,
-                            .generation = generation,
-                            .decision = pairing::PromptDecision::Denied};
-    impl_->active_prompt = false;
-    impl_->canceled_generation =
-        impl_->pair_owner_descriptor >= 0 ? generation : 0;
+  }
+  impl_->wake();
+}
+
+void LinuxControlService::report_issuance(std::uint64_t generation,
+                                          std::string_view failure) noexcept {
+  if (impl_ == nullptr || generation == 0) return;
+  {
+    std::lock_guard lock(impl_->prompt_mutex);
+    auto& pending = impl_->issuance;
+    if (pending.descriptor < 0 || pending.generation != generation ||
+        pending.reported) {
+      return;
+    }
+    pending.reported = true;
+    copy_text(pending.failure, failure.size() < pending.failure.size()
+                                   ? failure
+                                   : std::string_view("store_failure"));
   }
   impl_->wake();
 }

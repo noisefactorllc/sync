@@ -59,6 +59,11 @@ struct ParseResult {
                                         std::string_view token);
 [[nodiscard]] std::string encode_error(std::string_view code,
                                        std::string_view message);
+// The pairing error code for an issuance that did not commit its token
+// durably, or an empty view for one that did. The browser receives this code,
+// and the prompt that approved the pairing reports the same one.
+[[nodiscard]] std::string_view issuance_failure(
+    const PairingIssueResult &result) noexcept;
 
 enum class PromptDecision { Approved, Denied, TimedOut };
 
@@ -89,6 +94,12 @@ public:
   [[nodiscard]] virtual bool begin(const PromptRequest &request) noexcept = 0;
   [[nodiscard]] virtual PromptResult poll() noexcept = 0;
   virtual void cancel(std::uint64_t generation) noexcept = 0;
+  // The server reports how the issuance that follows an approved decision
+  // ended, once for each approval: an empty failure means the store
+  // committed the token durably, otherwise it is the pairing error code. A
+  // prompt that shows the result of the pairing (the Linux control service)
+  // overrides this; a prompt that shows only the question ignores it.
+  virtual void report_issuance(std::uint64_t, std::string_view) noexcept {}
 };
 
 class PairingAuthority {

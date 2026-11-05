@@ -77,6 +77,33 @@ constexpr std::string_view kIncompleteFrameReason =
 
 class Server;
 
+// Reports the issuance that answers one approved prompt on every path out of
+// the scope that holds it, so a prompt that waits for the store's result
+// never waits for a result that will not come.
+class IssuanceReport final {
+public:
+  IssuanceReport(pairing::PairingPrompt *prompt,
+                 std::uint64_t generation) noexcept
+      : prompt_(prompt), generation_(generation) {}
+  ~IssuanceReport() {
+    if (prompt_ != nullptr && generation_ != 0)
+      prompt_->report_issuance(generation_, failure_);
+  }
+  IssuanceReport(const IssuanceReport &) = delete;
+  IssuanceReport &operator=(const IssuanceReport &) = delete;
+
+  void set_failure(std::string_view failure) noexcept { failure_ = failure; }
+  // Hands the report to a pending issuance, which makes it when it ends.
+  [[nodiscard]] std::uint64_t release() noexcept {
+    return std::exchange(generation_, 0);
+  }
+
+private:
+  pairing::PairingPrompt *prompt_;
+  std::uint64_t generation_;
+  std::string_view failure_ = "store_failure";
+};
+
 enum class ConnectionRole {
   Http,
   ControlUnauthenticated,
@@ -137,6 +164,9 @@ struct Connection {
   bool pairing_message_received = false;
   AuthorityState authority_state = AuthorityState::None;
   std::uint64_t authority_generation = 0;
+  // The prompt generation whose approval the pending issuance answers. The
+  // prompt hears how that issuance ends.
+  std::uint64_t issuance_prompt_generation = 0;
 
   // SENDERS THIS CONNECTION OWNED THAT THE DAEMON REAPED UNDER IT.
   //
@@ -1025,6 +1055,7 @@ class Server {
       } else if (expired == DeadlineKind::PairingPrompt) {
         if (connection->authority_state ==
             AuthorityState::PairingIssuePending) {
+          report_issuance(*connection, "pairing_timeout");
           invalidate_authority(*connection);
         } else {
           if (connection->pairing_generation == active_pairing_generation_ &&
@@ -1068,8 +1099,15 @@ class Server {
     const pairing::PromptResult result = options_.pairing_prompt->poll();
     uv_update_time(&loop_);
     const std::uint64_t observed_at = uv_now(&loop_);
-    if (!result.available || result.generation == 0 ||
-        result.generation != active_pairing_generation_)
+    if (!result.available || result.generation == 0)
+      return;
+    // An approval that does not start an issuance below ends here.
+    IssuanceReport report(options_.pairing_prompt,
+                          result.decision == pairing::PromptDecision::Approved
+                              ? result.generation
+                              : 0);
+    report.set_failure("pairing_canceled");
+    if (result.generation != active_pairing_generation_)
       return;
     Connection *target = nullptr;
     for (Connection *connection : connections_) {
@@ -1086,6 +1124,7 @@ class Server {
     target->pairing_generation = 0;
     if (target->deadline_kind != DeadlineKind::PairingPrompt ||
         target->deadline_ms <= observed_at) {
+      report.set_failure("pairing_timeout");
       clear_deadline(*target);
       apply_pairing_cooldown(target->origin, observed_at);
       try {
@@ -1118,12 +1157,14 @@ class Server {
       const std::uint64_t generation = next_authority_generation();
       if (authority_worker_ == nullptr ||
           !authority_worker_->submit_issue(generation, target->origin)) {
+        report.set_failure("store_failure");
         clear_deadline(*target);
         queue_pairing_error(*target, "store_failure", "Pairing store failed");
         return;
       }
       target->authority_state = AuthorityState::PairingIssuePending;
       target->authority_generation = generation;
+      target->issuance_prompt_generation = report.release();
     } catch (...) {
       close_connection(*target);
     }
@@ -1136,7 +1177,17 @@ class Server {
     return next_authority_generation_;
   }
 
+  void report_issuance(Connection &connection,
+                       std::string_view failure) noexcept {
+    const std::uint64_t generation =
+        std::exchange(connection.issuance_prompt_generation, 0);
+    if (generation != 0 && options_.pairing_prompt != nullptr)
+      options_.pairing_prompt->report_issuance(generation, failure);
+  }
+
   void invalidate_authority(Connection &connection) noexcept {
+    // An issuance that ends without its result never reaches the browser.
+    report_issuance(connection, "pairing_canceled");
     if (connection.authority_generation != 0 && authority_worker_ != nullptr)
       (void)authority_worker_->cancel(connection.authority_generation);
     connection.authority_state = AuthorityState::None;
@@ -1171,6 +1222,10 @@ class Server {
       if (target == nullptr)
         continue;
       const AuthorityState state = target->authority_state;
+      // This result ends the issuance, so the report comes from here.
+      IssuanceReport report(
+          options_.pairing_prompt,
+          std::exchange(target->issuance_prompt_generation, 0));
       invalidate_authority(*target);
       const DeadlineKind expected_deadline =
           state == AuthorityState::AuthenticationPending
@@ -1178,6 +1233,7 @@ class Server {
               : DeadlineKind::PairingPrompt;
       if (target->deadline_kind != expected_deadline ||
           target->deadline_ms <= observed_at) {
+        report.set_failure("pairing_timeout");
         continue;
       }
       try {
@@ -1200,26 +1256,28 @@ class Server {
           continue;
         clear_deadline(*target);
         PairingIssueResult &issued = result.issuance;
-        if (issued.commit == PairingCommitState::CommittedDurable) {
+        const std::string_view failure = pairing::issuance_failure(issued);
+        if (failure.empty()) {
           std::string paired = pairing::encode_paired(1, issued.token.view());
           ScopedStringCleanse paired_cleanser(paired);
           if (paired.empty()) {
             queue_pairing_error(*target, "store_failure",
                                 "Pairing store failed");
           } else {
-            queue_text(*target, paired, true);
+            report.set_failure("pairing_canceled");
+            const bool queued = queue_text(*target, paired, true);
             start_websocket_close(*target, 1000);
+            if (queued)
+              report.set_failure({});
           }
-        } else if (issued.commit ==
-                   PairingCommitState::CommittedDurabilityUncertain) {
+        } else if (failure == "store_durability_uncertain") {
+          report.set_failure(failure);
           queue_pairing_error(
-              *target, "store_durability_uncertain",
+              *target, failure,
               "Pairing committed without durability confirmation");
         } else {
-          const auto code = issued.error == PairingStoreError::Capacity
-                                ? std::string_view("origin_limit")
-                                : std::string_view("store_failure");
-          queue_pairing_error(*target, code, "Pairing store failed");
+          report.set_failure(failure);
+          queue_pairing_error(*target, failure, "Pairing store failed");
         }
       } catch (...) {
         close_connection(*target);

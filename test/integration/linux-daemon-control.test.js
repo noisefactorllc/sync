@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,8 @@ const execFile = promisify(execFileCallback);
 const SYNCD = process.env.SYNC_DAEMON_PATH;
 const SYNCCTL = process.env.SYNC_CTL_PATH;
 const ORIGIN = "https://linux-control.example";
+// kMaximumPairingOrigins in native/include/sync/pairing_store.hpp.
+const STORE_ORIGIN_LIMIT = 64;
 
 function withTimeout(promise, label, milliseconds = 5_000) {
   let timer;
@@ -155,6 +157,71 @@ async function waitForExit(child, label) {
   return withTimeout(once(child, "exit"), label);
 }
 
+// Writes a pairing store that already holds the origin limit, in the format
+// PairingStore::reload reads (native/src/pairing_store.cpp): the magic, the
+// version and the record count, then each origin with a token digest.
+async function writeFullStore(home) {
+  const directory = path.join(home, ".config", "noisefactor-sync");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const origins = Array.from({ length: STORE_ORIGIN_LIMIT },
+                             (_, index) => `https://host${index}.example`);
+  const header = Buffer.alloc(16);
+  header.write("NFSYNCPR", 0, "ascii");
+  header.writeUInt32LE(2, 8);
+  header.writeUInt32LE(origins.length, 12);
+  const records = origins.map(origin => {
+    const lengths = Buffer.alloc(4);
+    lengths.writeUInt16LE(origin.length, 0);
+    return Buffer.concat([lengths, Buffer.from(origin, "ascii"), randomBytes(32)]);
+  });
+  const file = path.join(directory, "pairings.v1");
+  await writeFile(file, Buffer.concat([header, ...records]), { mode: 0o600 });
+  await chmod(file, 0o600);
+  return origins;
+}
+
+function startDaemon(port, env) {
+  const daemon = spawn(SYNCD, ["--port", String(port), "--publisher", "ndi"], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  daemon.output = "";
+  daemon.errors = "";
+  daemon.stdout.setEncoding("utf8");
+  daemon.stderr.setEncoding("utf8");
+  daemon.stdout.on("data", chunk => { daemon.output += chunk; });
+  daemon.stderr.on("data", chunk => { daemon.errors += chunk; });
+  daemon.ready = withTimeout(new Promise((resolve, reject) => {
+    const inspect = () => daemon.output.includes("\n") && resolve();
+    daemon.stdout.on("data", inspect);
+    daemon.once("exit", code => reject(new Error(
+      `syncd exited before ready (${code}): ${daemon.errors}`)));
+  }), "syncd ready record");
+  return daemon;
+}
+
+// Starts `syncctl pair`, sends the browser's pairing request, and answers the
+// terminal prompt with y.
+async function approveFromTerminal(port, env, origin) {
+  const terminal = spawn(SYNCCTL, ["pair"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  terminal.output = "";
+  terminal.errors = "";
+  terminal.stdout.setEncoding("utf8");
+  terminal.stderr.setEncoding("utf8");
+  terminal.stdout.on("data", chunk => { terminal.output += chunk; });
+  terminal.stderr.on("data", chunk => { terminal.errors += chunk; });
+  const pairing = await websocket(port, "/pair", origin);
+  pairing.sendJson({ type: "pair", protocolVersions: [1], name: "Noisedeck A" });
+  await withTimeout(new Promise(resolve => {
+    const inspect = () => terminal.output.includes("Allow this browser") && resolve();
+    terminal.stdout.on("data", inspect);
+    inspect();
+  }), "terminal pairing prompt");
+  terminal.stdin.end("y\n");
+  return { terminal, pairing };
+}
+
 test("Linux production daemon pairs, authenticates, lists, and revokes through syncctl",
      { skip: process.platform !== "linux" || !SYNCD || !SYNCCTL }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "sync-linux-control-"));
@@ -210,6 +277,8 @@ test("Linux production daemon pairs, authenticates, lists, and revokes through s
     pairing.close();
     const [pairExit] = await waitForExit(pairingCtl, "syncctl pair exit");
     assert.equal(pairExit, 0, pairError);
+    assert.equal(pairError, "");
+    assert.match(pairOutput, /\[y\/N\] paired\n$/, "syncctl prints paired after the commit");
     assert.ok(!pairOutput.includes(paired.token), "syncctl output never includes token");
 
     const pairings = JSON.parse(await runCtl(["pairings", "--json"], env));
@@ -229,6 +298,37 @@ test("Linux production daemon pairs, authenticates, lists, and revokes through s
   } finally {
     await stop(daemon);
     assert.ok(!daemonStdout.includes("token"), "daemon stdout contains no token field");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("syncctl pair exits nonzero without printing paired when the store is full",
+     { skip: process.platform !== "linux" || !SYNCD || !SYNCCTL }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sync-linux-control-"));
+  const home = path.join(root, "home");
+  const runtime = path.join(root, "runtime");
+  await mkdir(home, { mode: 0o700 });
+  await mkdir(runtime, { mode: 0o700 });
+  const stored = await writeFullStore(home);
+  const port = await freePort();
+  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: runtime };
+  const daemon = startDaemon(port, env);
+  try {
+    await daemon.ready;
+    const { terminal, pairing } = await approveFromTerminal(port, env, ORIGIN);
+    const refused = await pairing.readJson();
+    assert.equal(refused.type, "error");
+    assert.equal(refused.code, "origin_limit");
+    pairing.close();
+    const [exitCode] = await waitForExit(terminal, "syncctl pair exit");
+    assert.notEqual(exitCode, 0);
+    assert.ok(!terminal.output.includes("paired"), terminal.output);
+    assert.equal(terminal.errors, "syncctl: pairing failed: origin_limit\n");
+
+    const pairings = JSON.parse(await runCtl(["pairings", "--json"], env));
+    assert.deepEqual(pairings.origins, stored);
+  } finally {
+    await stop(daemon);
     await rm(root, { recursive: true, force: true });
   }
 });

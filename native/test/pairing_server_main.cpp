@@ -10,6 +10,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #if defined(_WIN32)
 #include <cstdio>
@@ -32,7 +33,8 @@ constexpr long long kLateApprovalDelayMs = 30'200;
 class FakePrompt final : public noisefactor::sync::pairing::PairingPrompt {
 public:
   enum class Mode { Approve, Deny, Timeout, Hang, LateApprove, Saturate };
-  explicit FakePrompt(Mode mode) : mode_(mode) {}
+  FakePrompt(Mode mode, std::string report_path)
+      : mode_(mode), report_path_(std::move(report_path)) {}
   bool begin(const noisefactor::sync::pairing::PromptRequest &request) noexcept
       override {
     if (mode_ == Mode::Saturate || active_)
@@ -68,9 +70,19 @@ public:
     if (active_ && generation == generation_)
       active_ = false;
   }
+  // One line for each report, so a test sees both the result and that the
+  // server reported it once.
+  void report_issuance(std::uint64_t, std::string_view failure) noexcept
+      override {
+    std::ofstream output(report_path_,
+                         std::ios::out | std::ios::app | std::ios::binary);
+    output << (failure.empty() ? std::string_view("committed") : failure)
+           << '\n';
+  }
 
 private:
   Mode mode_;
+  std::string report_path_;
   std::uint64_t generation_ = 0;
   bool active_ = false;
   std::chrono::steady_clock::time_point started_{};
@@ -237,7 +249,7 @@ int main(int argc, char **argv) {
     return 1;
   HoldingStoreAuthority authority(store, authority_mode,
                                   release_path);
-  FakePrompt prompt(mode);
+  FakePrompt prompt(mode, std::string(argv[1]) + ".issuance");
   noisefactor::sync::ServerOptions options;
   options.port = 0;
   options.test_receiver = true;

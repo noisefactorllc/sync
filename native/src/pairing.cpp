@@ -343,6 +343,14 @@ std::string encode_error(std::string_view code, std::string_view message) {
   return "{\"type\":\"error\",\"code\":\"" + std::string(code) +
          "\",\"message\":\"" + std::string(message) + "\"}";
 }
+std::string_view issuance_failure(const PairingIssueResult &result) noexcept {
+  if (result.commit == PairingCommitState::CommittedDurable)
+    return {};
+  if (result.commit == PairingCommitState::CommittedDurabilityUncertain)
+    return "store_durability_uncertain";
+  return result.error == PairingStoreError::Capacity ? "origin_limit"
+                                                     : "store_failure";
+}
 bool PromptRequest::assign(std::uint64_t value,
                            const NormalizedOrigin &request_origin,
                            std::string_view request_name) noexcept {

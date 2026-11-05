@@ -1669,6 +1669,11 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     });
 
     await stop(daemon);
+    assert.equal(
+      await readFile(path.join(directory, "state", "approved.store.issuance"), "utf8"),
+      "committed\n",
+      "the prompt hears once that the approved token was committed durably",
+    );
     daemon = await start("approved.store", "approve");
     const persistedControl = await authenticateControl(daemon.ready, originA, paired.token);
     activeClients.add(persistedControl.client);
@@ -1729,6 +1734,11 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     assert.equal(uncertain.code, "store_durability_uncertain");
     assert.equal(Object.hasOwn(uncertain, "token"), false);
     await stop(daemon);
+    assert.equal(
+      await readFile(path.join(directory, "state", "uncertain.store.issuance"), "utf8"),
+      "store_durability_uncertain\n",
+      "the prompt hears the same failure the browser received",
+    );
 
     daemon = await start("held-auth.store", "hold-auth");
     const heldAuthToken = await pairWithDaemon(daemon.ready, originA, "Held auth seed");

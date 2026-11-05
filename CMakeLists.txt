@@ -312,7 +312,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_features(sync_linux_control_service_tests PRIVATE cxx_std_20)
   target_include_directories(sync_linux_control_service_tests PRIVATE native/test)
   target_link_libraries(sync_linux_control_service_tests
-    PRIVATE sync_linux_control_service)
+    PRIVATE sync_linux_control_service syncctl_cli)
   add_test(NAME sync_linux_control_service_tests
     COMMAND sync_linux_control_service_tests)
 

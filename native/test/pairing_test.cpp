@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include <sync/pairing.hpp>
 #include <sync/secure_memory.hpp>
@@ -311,6 +312,49 @@ SYNC_TEST(pairing_prompt_values_are_fixed_and_generation_scoped) {
   SYNC_REQUIRE(!invalid.assign(1, normalized.origin, std::string("\xC2\x85")));
   SYNC_REQUIRE(
       !invalid.assign(1, normalized.origin, std::string("\xED\xA0\x80")));
+}
+
+SYNC_TEST(issuance_failure_names_the_pairing_error_of_each_commit_result) {
+  using noisefactor::sync::PairingStoreError;
+  using noisefactor::sync::PairingStoreFailPoint;
+  using noisefactor::sync::pairing::issuance_failure;
+
+  TemporaryAuthorityStore full_directory;
+  noisefactor::sync::PairingStore full;
+  SYNC_REQUIRE(full.open({.path = full_directory.path()}) ==
+               PairingStoreError::None);
+  noisefactor::sync::pairing::StorePairingAuthority full_authority(full);
+  for (std::size_t index = 0;
+       index < noisefactor::sync::kMaximumPairingOrigins; ++index) {
+    noisefactor::sync::PairingCommitGate gate;
+    const auto issued = full_authority.issue(
+        normalized_origin("https://host" + std::to_string(index) +
+                          ".example"),
+        gate);
+    SYNC_REQUIRE(issuance_failure(issued).empty());
+  }
+  noisefactor::sync::PairingCommitGate overflow_gate;
+  SYNC_REQUIRE(issuance_failure(full_authority.issue(
+                   normalized_origin("https://overflow.example"),
+                   overflow_gate)) == "origin_limit");
+
+  for (const auto& [fail_point, failure] : {
+           std::pair{PairingStoreFailPoint::AfterRenameBeforeDirectorySync,
+                     std::string_view("store_durability_uncertain")},
+           std::pair{PairingStoreFailPoint::BeforeRename,
+                     std::string_view("store_failure")},
+       }) {
+    TemporaryAuthorityStore directory;
+    noisefactor::sync::PairingStore store;
+    SYNC_REQUIRE(store.open({.path = directory.path(),
+                             .fail_point = fail_point}) ==
+                 PairingStoreError::None);
+    noisefactor::sync::pairing::StorePairingAuthority authority(store);
+    noisefactor::sync::PairingCommitGate gate;
+    SYNC_REQUIRE(issuance_failure(authority.issue(
+                     normalized_origin("https://deck.example"), gate)) ==
+                 failure);
+  }
 }
 
 SYNC_TEST(store_pairing_authority_lists_and_revokes_its_live_store) {

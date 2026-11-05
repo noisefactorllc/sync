@@ -74,6 +74,10 @@ class LinuxControlService final : public pairing::PairingPrompt {
     LinuxUpdateMaintenanceSource* updates = nullptr;
     // Test seam. Production obtains SO_PEERCRED directly when this is null.
     std::uint32_t (*peer_uid)(int descriptor) noexcept = nullptr;
+    // Bounds how long the reply to an approval waits for the issuance
+    // result. The server's prompt deadline, which also bounds the issuance,
+    // ends first. Tests shorten it.
+    std::uint32_t issuance_wait_ms = 30'000;
   };
 
   explicit LinuxControlService(Options options);
@@ -87,6 +91,8 @@ class LinuxControlService final : public pairing::PairingPrompt {
       -> bool override;
   [[nodiscard]] auto poll() noexcept -> pairing::PromptResult override;
   void cancel(std::uint64_t generation) noexcept override;
+  void report_issuance(std::uint64_t generation,
+                       std::string_view failure) noexcept override;
 
  private:
   struct Impl;

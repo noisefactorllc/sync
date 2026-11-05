@@ -280,6 +280,26 @@ bool response_is_error(std::string_view response) noexcept {
   return response.find("\"type\":\"error\"") != std::string_view::npos;
 }
 
+// The reason in the daemon's error reply to an approval, for the terminal.
+std::string_view pairing_failure_reason(std::string_view response) noexcept {
+  constexpr std::string_view prefix =
+      R"({"version":1,"type":"error","code":")";
+  constexpr std::string_view suffix = R"("})";
+  if (response.size() <= prefix.size() + suffix.size() ||
+      !response.starts_with(prefix) || !response.ends_with(suffix)) {
+    return "invalid_response";
+  }
+  const std::string_view code = response.substr(
+      prefix.size(), response.size() - prefix.size() - suffix.size());
+  if (code.size() > 32 ||
+      !std::all_of(code.begin(), code.end(), [](char byte) {
+        return (byte >= 'a' && byte <= 'z') || byte == '_';
+      })) {
+    return "invalid_response";
+  }
+  return code;
+}
+
 }  // namespace
 
 auto parse(std::span<const std::string_view> arguments) -> ParseResult {
@@ -442,13 +462,29 @@ auto execute(const Options& options, std::istream& input,
         "{\"version\":1,\"command\":\"decision\",\"generation\":" +
         std::to_string(prompt.generation) + ",\"approved\":" +
         (approved ? "true" : "false") + "}";
-    if (!send_request(descriptor, decision) ||
-        !receive_frame(descriptor, response) || response_is_error(response)) {
-      error << "syncctl: pairing decision was not accepted\n";
+    if (!approved) {
+      if (!send_request(descriptor, decision) ||
+          !receive_frame(descriptor, response) || response_is_error(response)) {
+        error << "syncctl: pairing decision was not accepted\n";
+        return close_and_return(kFailureExit);
+      }
+      output << "denied\n";
       return close_and_return(kFailureExit);
     }
-    output << (approved ? "paired\n" : "denied\n");
-    return close_and_return(approved ? kSuccessExit : kFailureExit);
+    // The daemon answers an approval only after the store keeps the token
+    // durably, or with the reason it did not.
+    if (!send_request(descriptor, decision) ||
+        !receive_frame(descriptor, response)) {
+      error << "syncctl: pairing failed: no_response\n";
+      return close_and_return(kFailureExit);
+    }
+    if (response != R"({"version":1,"type":"decision","status":"paired"})") {
+      error << "syncctl: pairing failed: " << pairing_failure_reason(response)
+            << '\n';
+      return close_and_return(kFailureExit);
+    }
+    output << "paired\n";
+    return close_and_return(kSuccessExit);
   }
   if (response_is_error(response)) {
     error << response << '\n';
