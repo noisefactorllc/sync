@@ -65,6 +65,15 @@ using noisefactor::sync::protocol::FrameView;
   return std::string(length, fill);
 }
 
+// No system location: only an explicit runtime_path is tried, so a runtime
+// the host has installed cannot make these publishers available.
+const std::vector<std::string> kNoSystemCandidates{};
+
+[[nodiscard]] auto hermetic(NdiFramePublisher::Options options = {}) -> NdiFramePublisher::Options {
+  options.system_candidates = &kNoSystemCandidates;
+  return options;
+}
+
 void require_copied_pixels(std::uint16_t alpha_mode,
                            const std::array<std::uint8_t, 16>& pixels,
                            const std::array<std::uint8_t, 16>& expected) {
@@ -123,8 +132,7 @@ SYNC_TEST(ndi_publisher_unpremultiplication_rounds_and_saturates_channels) {
 }
 
 SYNC_TEST(ndi_publisher_with_bogus_explicit_runtime_path_reports_unavailable_without_crashing) {
-  NdiFramePublisher::Options options{.runtime_path = "Z:/definitely/not/a/real/ndi/runtime/dir"};
-  NdiFramePublisher publisher(options);
+  NdiFramePublisher publisher(hermetic({.runtime_path = "Z:/definitely/not/a/real/ndi/runtime/dir"}));
 
   SYNC_REQUIRE(!publisher.available());
   SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::LoadFailed);
@@ -132,9 +140,21 @@ SYNC_TEST(ndi_publisher_with_bogus_explicit_runtime_path_reports_unavailable_wit
 }
 
 SYNC_TEST(ndi_publisher_default_construction_reports_unavailable_without_crashing) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
   SYNC_REQUIRE(!publisher.available());
   SYNC_REQUIRE(publisher.unavailable_reason() != NdiUnavailableReason::None);
+}
+
+SYNC_TEST(ndi_runtime_candidates_take_the_system_locations_from_the_test_seam) {
+  using noisefactor::sync::ndi::runtime_candidates;
+  SYNC_REQUIRE(runtime_candidates("", &kNoSystemCandidates).empty());
+  const std::vector<std::string> system{"first/runtime", "second/runtime"};
+  SYNC_REQUIRE(runtime_candidates("", &system) == system);
+  const std::vector<std::string> explicit_only = runtime_candidates("explicit/dir", &kNoSystemCandidates);
+  SYNC_REQUIRE(explicit_only.size() == 1);
+  SYNC_REQUIRE(explicit_only.front().rfind("explicit/dir", 0) == 0);
+  const std::vector<std::string> both = runtime_candidates("explicit/dir", &system);
+  SYNC_REQUIRE((both == std::vector<std::string>{explicit_only.front(), "first/runtime", "second/runtime"}));
 }
 
 SYNC_TEST(ndi_unavailability_reasons_are_distinct_and_non_secret) {
@@ -159,7 +179,7 @@ SYNC_TEST(ndi_unavailability_reasons_are_distinct_and_non_secret) {
 }
 
 SYNC_TEST(ndi_publisher_unavailable_rejects_open_sender_fails_publish_and_no_ops_close) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
   SYNC_REQUIRE(!publisher.available());
 
   SYNC_REQUIRE(!publisher.open_sender("sender-1", "Sender One"));
@@ -176,7 +196,7 @@ SYNC_TEST(ndi_publisher_unavailable_rejects_open_sender_fails_publish_and_no_ops
 }
 
 SYNC_TEST(ndi_publisher_open_sender_name_boundaries_never_crash) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
 
   // Empty name: rejected.
   SYNC_REQUIRE(!publisher.open_sender("id", ""));
@@ -200,7 +220,7 @@ SYNC_TEST(ndi_publisher_open_sender_name_boundaries_never_crash) {
 }
 
 SYNC_TEST(ndi_publisher_open_sender_id_boundaries_never_crash) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
 
   SYNC_REQUIRE(!publisher.open_sender("", "Name"));
   SYNC_REQUIRE(!publisher.open_sender(make_name(1), "Name"));
@@ -217,7 +237,7 @@ SYNC_TEST(ndi_publisher_open_sender_id_boundaries_never_crash) {
 }
 
 SYNC_TEST(ndi_publisher_publish_rejects_each_malformed_frame_shape) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
   const std::array<std::byte, 16> payload{};
   const FrameView valid = make_valid_frame(payload);
 
@@ -269,17 +289,16 @@ SYNC_TEST(ndi_publisher_publish_rejects_each_malformed_frame_shape) {
 }
 
 SYNC_TEST(ndi_publisher_poll_failure_is_nullopt_on_a_fresh_publisher) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
   SYNC_REQUIRE(!publisher.poll_failure(0).has_value());
   SYNC_REQUIRE(!publisher.poll_failure(123'456).has_value());
 
-  NdiFramePublisher::Options options{.runtime_path = "also/not/real"};
-  NdiFramePublisher explicit_publisher(options);
+  NdiFramePublisher explicit_publisher(hermetic({.runtime_path = "also/not/real"}));
   SYNC_REQUIRE(!explicit_publisher.poll_failure(0).has_value());
 }
 
 SYNC_TEST(ndi_publisher_close_sender_is_idempotent_and_order_independent) {
-  NdiFramePublisher publisher;
+  NdiFramePublisher publisher(hermetic());
   // None of these ever opened anything (the provider is unavailable), but
   // close_sender must remain a safe, repeatable no-op regardless of call
   // order or repetition.
@@ -490,14 +509,9 @@ SYNC_TEST(ndi_publisher_on_macos_refuses_unsigned_and_ad_hoc_runtimes_without_lo
     const std::filesystem::path log = unique_log("refused");
     set_stub_log(log.string());
     {
-      NdiFramePublisher publisher({.runtime_path = directory});
-      if (std::filesystem::exists(noisefactor::sync::ndi::kVendorRuntimePath)) {
-        // A Mac with the vendor runtime installed loads it as the second candidate.
-        SYNC_REQUIRE(publisher.available());
-      } else {
-        SYNC_REQUIRE(!publisher.available());
-        SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::SignatureRejected);
-      }
+      NdiFramePublisher publisher(hermetic({.runtime_path = directory}));
+      SYNC_REQUIRE(!publisher.available());
+      SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::SignatureRejected);
     }
     set_stub_log("");
     // The stub writes "loaded" when it is mapped: no log means no dlopen.

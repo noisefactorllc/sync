@@ -12,8 +12,11 @@
 namespace noisefactor::sync::ndi {
 
 // The runtime library paths NdiFramePublisher tries, in order, for an
-// explicit runtime directory (empty when the caller named none).
-[[nodiscard]] auto runtime_candidates(std::string_view runtime_path) -> std::vector<std::string>;
+// explicit runtime directory (empty when the caller named none), followed by
+// the platform's own locations or, when given, `system_candidates`.
+[[nodiscard]] auto runtime_candidates(std::string_view runtime_path,
+                                      const std::vector<std::string>* system_candidates = nullptr)
+    -> std::vector<std::string>;
 
 #if defined(__APPLE__)
 // The vendor's macOS runtime package installs the library here and sets no

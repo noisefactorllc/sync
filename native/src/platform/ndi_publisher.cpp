@@ -437,8 +437,17 @@ void add_candidate(std::array<std::string, kMaximumDiscoveryPaths>& paths, std::
   ++count;
 }
 
-void collect_candidates(std::string_view runtime_path, std::array<std::string, kMaximumDiscoveryPaths>& paths,
-                        std::size_t& count) {
+void collect_candidates(std::string_view runtime_path, const std::vector<std::string>* system_candidates,
+                        std::array<std::string, kMaximumDiscoveryPaths>& paths, std::size_t& count) {
+  if (system_candidates != nullptr) {
+    if (!runtime_path.empty()) {
+      add_candidate(paths, count, join_runtime_dir(runtime_path));
+    }
+    for (const std::string& candidate : *system_candidates) {
+      add_candidate(paths, count, candidate);
+    }
+    return;
+  }
 #if defined(__APPLE__)
   if (!runtime_path.empty()) {
     add_candidate(paths, count, join_runtime_dir(runtime_path));
@@ -551,10 +560,11 @@ constexpr std::size_t kMaximumSenderNameBytes = 64;
 
 }  // namespace
 
-auto ndi::runtime_candidates(std::string_view runtime_path) -> std::vector<std::string> {
+auto ndi::runtime_candidates(std::string_view runtime_path, const std::vector<std::string>* system_candidates)
+    -> std::vector<std::string> {
   std::array<std::string, kMaximumDiscoveryPaths> paths{};
   std::size_t count = 0;
-  collect_candidates(runtime_path, paths, count);
+  collect_candidates(runtime_path, system_candidates, paths, count);
   return {std::make_move_iterator(paths.begin()),
           std::make_move_iterator(paths.begin() + static_cast<std::ptrdiff_t>(count))};
 }
@@ -657,7 +667,7 @@ struct NdiFramePublisher::Impl {
       configuration_valid = false;
       return;
     }
-    discover(options.runtime_path, options.signature_requirement);
+    discover(options.runtime_path, options.signature_requirement, options.system_candidates);
   }
 
   bool configuration_valid = true;
@@ -671,11 +681,12 @@ struct NdiFramePublisher::Impl {
   std::optional<ProviderFailure> latched_failure;
   std::array<SenderEntry, NdiFramePublisher::kMaximumSenderEntries> senders{};
 
-  void discover(std::string_view runtime_path, std::string_view signature_requirement) noexcept {
+  void discover(std::string_view runtime_path, std::string_view signature_requirement,
+                const std::vector<std::string>* system_candidates) noexcept {
     try {
       std::array<std::string, kMaximumDiscoveryPaths> candidates{};
       std::size_t candidate_count = 0;
-      collect_candidates(runtime_path, candidates, candidate_count);
+      collect_candidates(runtime_path, system_candidates, candidates, candidate_count);
 #if defined(__APPLE__)
       const std::string requirement = signature_requirement.empty()
                                           ? ndi::vendor_runtime_requirement()

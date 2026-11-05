@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <sync/frame_receiver.hpp>
 
@@ -50,6 +52,12 @@ class NdiFramePublisher final : public FramePublisher {
     // Team ID pin as the code requirement every candidate must satisfy
     // before it is loaded. The tests set it so that their stub runtime loads.
     std::string_view signature_requirement{};
+    // Test seam. Production searches the platform's own locations after
+    // runtime_path when this is null: on macOS the vendor's install path, on
+    // Windows and Linux the NDI_RUNTIME_DIR_V6 / V5 directories and the bare
+    // library name. A test points it at its own list, usually empty, so that
+    // a runtime the host has installed cannot change the result.
+    const std::vector<std::string>* system_candidates = nullptr;
   };
 
   NdiFramePublisher();
