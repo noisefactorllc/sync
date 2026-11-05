@@ -477,6 +477,8 @@ SYNC_DAEMON_PATH=build/syncd npm run test:integration
 ctest --test-dir build --output-on-failure
 ```
 
+`test:packaging` needs `npm ci --ignore-scripts --no-bin-links` first.
+
 `test:unit` checks protocol and harness behavior without a native build. The
 integration command also runs `test:integration:soak` in a separate test process:
 the regular short soak uses a 60 FPS ceiling and fixed memory readings, while an
