@@ -5,8 +5,10 @@
 #include <QImage>
 #include <QStringList>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +49,63 @@ const QString kPerlin = QStringLiteral("search synth\nperlin().write(o0)\nrender
   options.data_root = data_root();
   options.ring_name = ring_name(tag);
   return options;
+}
+
+// How a ring frame compares with the backend's readSurface() image of the
+// same frame. Both quantize the backend's float surface to 8 bits, by
+// different routes: the ring through the export shader's RGBA8 render target,
+// readSurface() with std::round on the CPU. GL does not make the two round a
+// value near a half step alike, and hardware GL lands one step lower on a few
+// texels where llvmpipe agrees exactly. So a colour byte may differ by 1, on
+// a few texels; alpha, row order and orientation may not differ at all.
+struct ReadbackMatch {
+  bool alpha_identical = true;
+  int max_colour_delta = 0;
+  std::size_t differing = 0;
+  std::size_t bytes = 0;
+};
+
+// Compares a top-down RGBA8 frame at row_stride with reference, an RGBA8888
+// image of the same size.
+[[nodiscard]] auto compare_readback(const QImage& reference, const unsigned char* frame,
+                                    std::size_t row_stride) -> ReadbackMatch {
+  ReadbackMatch match;
+  const auto row_bytes = static_cast<std::size_t>(reference.width()) * 4;
+  for (int y = 0; y < reference.height(); ++y) {
+    const auto* ref = reference.constScanLine(y);
+    const auto* got = frame + static_cast<std::size_t>(y) * row_stride;
+    for (std::size_t i = 0; i < row_bytes; ++i) {
+      ++match.bytes;
+      if (ref[i] == got[i]) continue;
+      ++match.differing;
+      if (i % 4 == 3) {
+        match.alpha_identical = false;
+      } else {
+        match.max_colour_delta = std::max(match.max_colour_delta, std::abs(int{ref[i]} - int{got[i]}));
+      }
+    }
+  }
+  return match;
+}
+
+// The same image: alpha exact, each colour byte within 1, and at most 1% of
+// the bytes different.
+[[nodiscard]] auto same_image(const ReadbackMatch& match) -> bool {
+  return match.alpha_identical && match.max_colour_delta <= 1 && match.differing * 100 <= match.bytes;
+}
+
+// image turned upside down (flip) or left for right (mirror), built by hand
+// so the test does not depend on which QImage transform API the Qt has.
+[[nodiscard]] auto transformed(const QImage& image, bool flip, bool mirror) -> QImage {
+  QImage out(image.size(), image.format());
+  for (int y = 0; y < image.height(); ++y) {
+    const auto* src = image.constScanLine(flip ? image.height() - 1 - y : y);
+    auto* dst = out.scanLine(y);
+    for (int x = 0; x < image.width(); ++x) {
+      std::memcpy(dst + x * 4, src + (mirror ? image.width() - 1 - x : x) * 4, 4);
+    }
+  }
+  return out;
 }
 
 SYNC_TEST(the_compiler_loads_the_catalogue_and_reports_errors_as_data) {
@@ -151,27 +210,68 @@ SYNC_TEST(a_frame_in_the_ring_is_the_backends_own_top_down_readback) {
   SYNC_REQUIRE(lease.held());
 
   // The backend's readSurface() is documented top-down RGBA8 (backend.h).
-  // The gradient is opaque, so premultiplication leaves it unchanged and the
-  // ring must match it byte for byte.
+  // The gradient is opaque, so premultiplication leaves it unchanged, and the
+  // ring must hold the same image in the same row order (compare_readback
+  // says how close "the same" is).
   const QImage reference = engine.read_surface().convertToFormat(QImage::Format_RGBA8888);
   SYNC_REQUIRE(reference.width() == 64 && reference.height() == 48);
+  SYNC_REQUIRE(lease.info().width == 64 && lease.info().height == 48);
+  const std::size_t stride = lease.info().row_stride;
+  SYNC_REQUIRE(stride == static_cast<std::size_t>(reference.bytesPerLine()));
   const auto payload = lease.payload();
+  SYNC_REQUIRE(payload.size() >= stride * 48);
+  const auto* ring = reinterpret_cast<const unsigned char*>(payload.data());
   bool opaque = true;
-  bool identical = true;
   bool varied = false;
-  const auto first = payload[0];
   for (int y = 0; y < 48; ++y) {
     const auto* ref = reference.constScanLine(y);
-    const auto* got = reinterpret_cast<const unsigned char*>(payload.data()) + y * 64 * 4;
-    if (std::memcmp(ref, got, 64 * 4) != 0) identical = false;
     for (int x = 0; x < 64; ++x) {
       if (ref[x * 4 + 3] != 255) opaque = false;
-      if (static_cast<std::byte>(got[x * 4]) != first) varied = true;
+      if (ring[y * stride + x * 4] != ring[0]) varied = true;
     }
   }
   SYNC_REQUIRE(opaque);
   SYNC_REQUIRE(varied);
-  SYNC_REQUIRE(identical);
+
+  const ReadbackMatch match = compare_readback(reference, ring, stride);
+  SYNC_REQUIRE(match.alpha_identical);
+  SYNC_REQUIRE(match.max_colour_delta <= 1);
+  SYNC_REQUIRE(match.differing * 100 <= match.bytes);
+  SYNC_REQUIRE(same_image(match));
+  // The rotated gradient is neither vertically nor horizontally symmetric, so
+  // the ring cannot pass as the reference turned upside down or mirrored.
+  SYNC_REQUIRE(!same_image(compare_readback(transformed(reference, true, false), ring, stride)));
+  SYNC_REQUIRE(!same_image(compare_readback(transformed(reference, false, true), ring, stride)));
+
+  // And the comparison rejects each defect it is there to catch, applied to
+  // this ring frame: a flipped or mirrored frame, a colour byte 2 steps off,
+  // an alpha byte off by 1, and an off-by-1 on more than 1% of the bytes.
+  QImage frame(64, 48, QImage::Format_RGBA8888);
+  for (int y = 0; y < 48; ++y) std::memcpy(frame.scanLine(y), ring + y * stride, 64 * 4);
+  const auto rejected = [&](const QImage& mutant) {
+    return !same_image(compare_readback(reference, mutant.constBits(), static_cast<std::size_t>(mutant.bytesPerLine())));
+  };
+  SYNC_REQUIRE(!rejected(frame));
+  SYNC_REQUIRE(rejected(transformed(frame, true, false)));
+  SYNC_REQUIRE(rejected(transformed(frame, false, true)));
+  QImage two_steps = frame;
+  {
+    auto* texel = two_steps.scanLine(24) + 32 * 4;
+    const auto* ref = reference.constScanLine(24) + 32 * 4;
+    const int channel = ref[1] >= 2 ? 1 : (ref[0] >= 2 ? 0 : 2);
+    texel[channel] = static_cast<unsigned char>(ref[channel] >= 2 ? ref[channel] - 2 : ref[channel] + 2);
+  }
+  SYNC_REQUIRE(rejected(two_steps));
+  QImage alpha = frame;
+  alpha.scanLine(24)[32 * 4 + 3] = 254;
+  SYNC_REQUIRE(rejected(alpha));
+  QImage widespread = frame;
+  for (int y = 0; y < 48; y += 2) {
+    auto* row = widespread.scanLine(y);
+    const auto* ref = reference.constScanLine(y);
+    for (int x = 0; x < 64; ++x) row[x * 4] = static_cast<unsigned char>(ref[x * 4] == 0 ? 1 : ref[x * 4] - 1);
+  }
+  SYNC_REQUIRE(rejected(widespread));
 }
 
 SYNC_TEST(swapping_programs_changes_the_output) {
