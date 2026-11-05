@@ -6,6 +6,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -710,6 +711,49 @@ constexpr std::size_t kNoChange = std::numeric_limits<std::size_t>::max();
   return declared;
 }
 
+// A render loop `period_us` apart, with the same capture jitter, that sends a
+// fixed `keep_per_mille` of its frames in a regular pattern, as a sender does
+// that keeps up with only part of its loop.
+[[nodiscard]] auto declare_decimated(double period_us, std::uint64_t keep_per_mille, double seconds,
+                                     std::uint64_t seed) -> std::vector<Declared> {
+  Jitter jitter{seed};
+  FrameRateTracker tracker;
+  std::vector<Declared> declared;
+  const double keep = static_cast<double>(keep_per_mille) / 1000.0;
+  const double phase = static_cast<double>(jitter.next() % 1000U) / 1000.0;
+  const auto frames = static_cast<std::size_t>(std::llround(seconds * 1'000'000.0 / period_us));
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    const double nominal_us = static_cast<double>(frame) * period_us;
+    const auto index = static_cast<double>(frame);
+    const bool sent = frame == 0 || std::floor((index + 1.0) * keep + phase) != std::floor(index * keep + phase);
+    const double offset_us = static_cast<double>(jitter.next() % 4001U) - 2000.0;
+    if (!sent) continue;
+    const auto time_us = static_cast<std::uint64_t>(1'000'000'000.0 + nominal_us + offset_us);
+    declared.push_back({nominal_us / 1'000'000.0, tracker.observe(time_us)});
+  }
+  return declared;
+}
+
+// Video at `content_fps` on a display that refreshes at `display_hz`: each
+// frame is presented at the first refresh at or after its own time, with the
+// same capture jitter.
+[[nodiscard]] auto declare_pulldown(double content_fps, double display_hz, double seconds,
+                                    std::uint64_t seed) -> std::vector<Declared> {
+  Jitter jitter{seed};
+  FrameRateTracker tracker;
+  std::vector<Declared> declared;
+  const double phase = static_cast<double>(jitter.next() % 1000U) / 1000.0;
+  const auto frames = static_cast<int>(seconds * content_fps);
+  for (int frame = 0; frame < frames; ++frame) {
+    const double refresh = std::ceil((static_cast<double>(frame) + phase) * display_hz / content_fps - 1e-9);
+    const double offset_us = static_cast<double>(jitter.next() % 4001U) - 2000.0;
+    const auto time_us =
+        static_cast<std::uint64_t>(1'000'000'000.0 + refresh * 1'000'000.0 / display_hz + offset_us);
+    declared.push_back({refresh / display_hz, tracker.observe(time_us)});
+  }
+  return declared;
+}
+
 [[nodiscard]] auto changes(const std::vector<Declared>& declared) -> std::size_t {
   std::size_t count = 0;
   for (std::size_t index = 1; index < declared.size(); ++index) {
@@ -722,6 +766,48 @@ constexpr std::size_t kNoChange = std::numeric_limits<std::size_t>::max();
 [[nodiscard]] auto settled_at(const std::vector<Declared>& declared, FrameRate rate) -> double {
   for (std::size_t index = declared.size(); index > 0; --index) {
     if (!(declared[index - 1].rate == rate)) {
+      return index < declared.size() ? declared[index].seconds : std::numeric_limits<double>::infinity();
+    }
+  }
+  return 0.0;
+}
+
+// The changes on frames from `seconds` on.
+[[nodiscard]] auto changes_from(const std::vector<Declared>& declared, double seconds) -> std::size_t {
+  std::size_t count = 0;
+  for (std::size_t index = 1; index < declared.size(); ++index) {
+    if (declared[index].seconds >= seconds && !(declared[index].rate == declared[index - 1].rate)) ++count;
+  }
+  return count;
+}
+
+// The changes after the first frame that declares `rate`, or all of them when
+// no frame does.
+[[nodiscard]] auto changes_after(const std::vector<Declared>& declared, FrameRate rate) -> std::size_t {
+  std::size_t first = 0;
+  while (first < declared.size() && !(declared[first].rate == rate)) ++first;
+  if (first == declared.size()) return changes(declared);
+  std::size_t count = 0;
+  for (std::size_t index = first + 1; index < declared.size(); ++index) {
+    if (!(declared[index].rate == declared[index - 1].rate)) ++count;
+  }
+  return count;
+}
+
+// The rate at which the frames arrived.
+[[nodiscard]] auto delivered_rate(const std::vector<Declared>& declared) -> double {
+  return static_cast<double>(declared.size() - 1) / (declared.back().seconds - declared.front().seconds);
+}
+
+[[nodiscard]] auto within(FrameRate rate, double target, double share) -> bool {
+  return std::abs(frames_per_second(rate) - target) <= share * target;
+}
+
+// The nominal time from which every declared rate lies within `share` of
+// `target`.
+[[nodiscard]] auto settled_near(const std::vector<Declared>& declared, double target, double share) -> double {
+  for (std::size_t index = declared.size(); index > 0; --index) {
+    if (!within(declared[index - 1].rate, target, share)) {
       return index < declared.size() ? declared[index].seconds : std::numeric_limits<double>::infinity();
     }
   }
@@ -792,26 +878,68 @@ SYNC_TEST(ndi_frame_rate_tracker_follows_a_change_from_60_to_30_fps_within_a_sec
   }
 }
 
-// Drops lengthen intervals and never change the loop's cadence: a loop that
-// loses up to most of its frames declares its own rate, after at most the one
-// change from the initial 60/1. In 0.2.137 the reference period was the median
-// interval, which drops pull upward, so frames were misnumbered and the fit
-// restarted, and the declared rate flapped between 60/1, 60000/1001 and
-// measured rates.
-SYNC_TEST(ndi_frame_rate_tracker_holds_the_rate_of_a_loop_that_drops_frames) {
+// Occasional drops lengthen intervals and never change the loop's cadence: a
+// loop that loses a tenth of its frames declares its own rate, after at most
+// the one change from the initial 60/1.
+SYNC_TEST(ndi_frame_rate_tracker_holds_the_rate_of_a_loop_that_drops_a_tenth_of_its_frames) {
   const std::array<std::pair<double, FrameRate>, 2> loops{{
       {kMicrosecondsPer48Fps, FrameRate{48, 1}},
       {kMicrosecondsPer60Fps, FrameRate{60, 1}},
   }};
   for (const auto& [period_us, rate] : loops) {
     const auto frames = static_cast<std::size_t>(std::llround(20'000'000.0 / period_us));
-    for (const std::uint64_t drop_per_mille : {100U, 300U, 470U, 600U}) {
+    for (const std::uint64_t seed : kSeeds) {
+      const std::vector<Declared> declared = declare_dropping(period_us, frames, seed, 100);
+      SYNC_REQUIRE(declared.front().rate == kInitialFrameRate);
+      SYNC_REQUIRE(changes(declared) <= 1);
+      SYNC_REQUIRE(declared.back().rate == rate);
+      SYNC_REQUIRE(settled_at(declared, rate) <= 3.0);
+    }
+  }
+}
+
+// A loop that loses more than about a quarter of its frames for a full second
+// is labelled with the rate it delivers. Random drops leave that rate
+// uncertain for a while: over n periods of the loop, a drop share q gives it a
+// relative standard deviation of sqrt(q / ((1 - q) n)), several percent after
+// the first seconds, so the label is held to 15% of the delivered rate from
+// 10 s on. A loop that loses 30% of its frames delivers close to the 75% that
+// starts the delivered label, and either label is right for it.
+SYNC_TEST(ndi_frame_rate_tracker_labels_the_rate_a_loop_delivers_through_random_drops) {
+  const std::array<std::pair<double, FrameRate>, 2> loops{{
+      {kMicrosecondsPer48Fps, FrameRate{48, 1}},
+      {kMicrosecondsPer60Fps, FrameRate{60, 1}},
+  }};
+  for (const auto& [period_us, rate] : loops) {
+    const auto frames = static_cast<std::size_t>(std::llround(20'000'000.0 / period_us));
+    for (const std::uint64_t drop_per_mille : {300U, 470U, 600U}) {
       for (const std::uint64_t seed : kSeeds) {
         const std::vector<Declared> declared = declare_dropping(period_us, frames, seed, drop_per_mille);
-        SYNC_REQUIRE(declared.front().rate == kInitialFrameRate);
-        SYNC_REQUIRE(changes(declared) <= 1);
-        SYNC_REQUIRE(declared.back().rate == rate);
-        SYNC_REQUIRE(settled_at(declared, rate) <= 3.0);
+        const double delivered = delivered_rate(declared);
+        for (const Declared& frame : declared) {
+          if (frame.seconds < 10.0) continue;
+          SYNC_REQUIRE(within(frame.rate, delivered, 0.15) || (drop_per_mille == 300U && frame.rate == rate));
+        }
+        SYNC_REQUIRE(changes_from(declared, 10.0) <= 3);
+      }
+    }
+  }
+}
+
+// A sender that keeps a fixed share of its loop, as one does that cannot keep
+// up, delivers a steady rate, and that is its label within 3 s, after at most
+// one change from the loop's own rate.
+SYNC_TEST(ndi_frame_rate_tracker_labels_the_rate_of_a_loop_that_keeps_a_fixed_share_of_its_frames) {
+  const std::array<std::pair<double, FrameRate>, 2> loops{{
+      {kMicrosecondsPer48Fps, FrameRate{48, 1}},
+      {kMicrosecondsPer60Fps, FrameRate{60, 1}},
+  }};
+  for (const auto& [period_us, rate] : loops) {
+    for (const std::uint64_t keep_per_mille : {700U, 530U, 400U}) {
+      for (const std::uint64_t seed : kSeeds) {
+        const std::vector<Declared> declared = declare_decimated(period_us, keep_per_mille, 20.0, seed);
+        SYNC_REQUIRE(settled_near(declared, delivered_rate(declared), 0.05) <= 3.0);
+        SYNC_REQUIRE(changes_after(declared, rate) <= 1);
       }
     }
   }
@@ -819,10 +947,11 @@ SYNC_TEST(ndi_frame_rate_tracker_holds_the_rate_of_a_loop_that_drops_frames) {
 
 // The pattern a headless browser sender produced through Sync.app 0.2.137:
 // presentation times on a 60 Hz grid, two consecutive frames sent and the
-// next two or three dropped, after the stream had started at another rate.
-// That tracker held the rate it had declared before the pattern began (all
-// 246 frames of one receive declared 50/1). The loop's rate is 60/1.
-SYNC_TEST(ndi_frame_rate_tracker_follows_a_paired_frame_pattern_to_its_60_hz_grid) {
+// next two or three dropped, also after the stream had started at another
+// rate. That tracker held the rate it had declared before the pattern began
+// (all 246 frames of one receive declared 50/1). The label is the rate the
+// pattern delivers.
+SYNC_TEST(ndi_frame_rate_tracker_labels_the_delivered_rate_of_a_paired_frame_pattern) {
   for (const std::uint64_t seed : kSeeds) {
     for (const bool lead_in : {false, true}) {
       Jitter jitter{seed};
@@ -842,9 +971,72 @@ SYNC_TEST(ndi_frame_rate_tracker_follows_a_paired_frame_pattern_to_its_60_hz_gri
         }
         grid_us += (pair % 9 == 8 ? 2.0 : 3.0) * kMicrosecondsPer60Fps;
       }
-      SYNC_REQUIRE(declared.back().rate == (FrameRate{60, 1}));
-      SYNC_REQUIRE(settled_at(declared, {60, 1}) <= (lead_in ? 2.0 : 0.0));
-      SYNC_REQUIRE(changes(declared) <= (lead_in ? 1U : 0U));
+      // Without a lead-in the loop's own rate is the initial 60/1; after one
+      // the label goes from 50/1 to 60/1 and then to the delivered rate.
+      SYNC_REQUIRE(settled_near(declared, delivered_rate(declared), 0.05) <= (lead_in ? 4.0 : 3.0));
+      SYNC_REQUIRE(changes(declared) <= (lead_in ? 2U : 1U));
+    }
+  }
+}
+
+// Video at 24, 23.976 or 25 frames a second on a 60, 59.94 or 50 Hz display,
+// and 26.67 frames a second on a 60 Hz one: each frame waits for the next
+// refresh, so its intervals are two and three refreshes. cf1e77a numbered such
+// frames by the short intervals, fitted a period that is neither the refresh
+// nor the video, and restarted, so the label flapped many times a second. The
+// label is the video's rate as the delivered label gives it: 24 and 23.976
+// differ by less than a refresh moves the first seconds' frames, so either of
+// their labels is right. The first frames of 24 fps video on a 50 Hz display
+// are 25 fps until the first three-refresh interval, so one correction within
+// the first second is allowed; after it the label changes at most once more,
+// onto the video's rate, by 3 s, and never again.
+SYNC_TEST(ndi_frame_rate_tracker_holds_one_label_through_display_pulldown) {
+  struct Case {
+    double video_fps;
+    double display_hz;
+    std::array<FrameRate, 2> labels;
+  };
+  const std::array<FrameRate, 2> twenty_four{{{24, 1}, {24000, 1001}}};
+  const std::array<FrameRate, 2> twenty_five{{{25, 1}, {25, 1}}};
+  const std::array<Case, 10> cases{{
+      {24.0, 60.0, twenty_four},
+      {24.0, 60'000.0 / 1001.0, twenty_four},
+      {24.0, 50.0, twenty_four},
+      {24'000.0 / 1001.0, 60.0, twenty_four},
+      {24'000.0 / 1001.0, 60'000.0 / 1001.0, twenty_four},
+      {24'000.0 / 1001.0, 50.0, twenty_four},
+      {25.0, 60.0, twenty_five},
+      {25.0, 60'000.0 / 1001.0, twenty_five},
+      {25.0, 50.0, twenty_five},
+      {60.0 * 4.0 / 9.0, 60.0, {{{27, 1}, {27, 1}}}},
+  }};
+  for (const Case& entry : cases) {
+    for (const std::uint64_t seed : kSeeds) {
+      const std::vector<Declared> declared = declare_pulldown(entry.video_fps, entry.display_hz, 60.0, seed);
+      SYNC_REQUIRE(changes(declared) - changes_from(declared, 1.0) <= 2);
+      SYNC_REQUIRE(changes_from(declared, 1.0) <= 1);
+      std::optional<FrameRate> held;
+      for (const Declared& frame : declared) {
+        if (frame.seconds < 3.0) continue;
+        SYNC_REQUIRE(frame.rate == entry.labels[0] || frame.rate == entry.labels[1]);
+        if (!held) held = frame.rate;
+        SYNC_REQUIRE(frame.rate == *held);
+      }
+    }
+  }
+}
+
+// A steady cadence at no standard rate is declared as measured once, and the
+// declaration holds while the fit stays within the standard-rate tolerance of
+// it. cf1e77a declared the measured rate again whenever the fitted period
+// moved by a microsecond.
+SYNC_TEST(ndi_frame_rate_tracker_declares_a_steady_unusual_cadence_once) {
+  for (const double fps : {15.0, 20.0, 40.0}) {
+    for (const std::uint64_t seed : kSeeds) {
+      const std::vector<Declared> declared =
+          declare_jittered(1'000'000.0 / fps, static_cast<std::size_t>(60.0 * fps), seed);
+      SYNC_REQUIRE(changes(declared) == 1);
+      SYNC_REQUIRE(within(declared.back().rate, fps, 0.02));
     }
   }
 }
