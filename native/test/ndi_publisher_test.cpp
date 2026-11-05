@@ -19,6 +19,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <sync/frame_receiver.hpp>
 #include <sync/platform/ndi_publisher.hpp>
 
@@ -139,6 +144,7 @@ SYNC_TEST(ndi_unavailability_reasons_are_distinct_and_non_secret) {
       NdiUnavailableReason::InitializationFailed,
       NdiUnavailableReason::UnsupportedCpu,
       NdiUnavailableReason::SignatureRejected,
+      NdiUnavailableReason::RuntimeNotRootOwned,
   };
   std::array<std::string_view, reasons.size()> descriptions{};
   for (std::size_t index = 0; index < reasons.size(); ++index) {
@@ -496,6 +502,58 @@ SYNC_TEST(ndi_publisher_on_macos_refuses_unsigned_and_ad_hoc_runtimes_without_lo
     // The stub writes "loaded" when it is mapped: no log means no dlopen.
     SYNC_REQUIRE(!std::filesystem::exists(log));
   }
+}
+
+SYNC_TEST(ndi_vendor_runtime_ownership_admits_only_root_owned_files_in_root_owned_directories) {
+  using noisefactor::sync::ndi::check_runtime_ownership;
+  using noisefactor::sync::ndi::RuntimeOwnership;
+  // A system binary: root-owned, in a root-owned directory, neither writable
+  // by group or others.
+  SYNC_REQUIRE(check_runtime_ownership("/bin/ls") == RuntimeOwnership::RootOwned);
+  SYNC_REQUIRE(check_runtime_ownership("/definitely/not/a/real/libndi.dylib") == RuntimeOwnership::Missing);
+
+  const std::filesystem::path directory = unique_log("ownership");
+  std::filesystem::create_directory(directory);
+  const std::filesystem::path owned = directory / "libndi.dylib";
+  { std::ofstream(owned) << "not a runtime"; }
+  // This test runs as an ordinary user, so the file it made is not root's.
+  SYNC_REQUIRE(::getuid() != 0);
+  SYNC_REQUIRE(check_runtime_ownership(owned.string()) == RuntimeOwnership::Exposed);
+  // A link to a root-owned file is still a link.
+  const std::filesystem::path link = directory / "linked.dylib";
+  SYNC_REQUIRE(::symlink("/bin/ls", link.c_str()) == 0);
+  SYNC_REQUIRE(check_runtime_ownership(link.string()) == RuntimeOwnership::Exposed);
+  std::filesystem::remove_all(directory);
+  // A root-owned link in a root-owned directory to a root-owned file: only
+  // the link itself makes it Exposed. macOS ships /usr/bin/vi as a link to vim.
+  SYNC_REQUIRE(std::filesystem::is_symlink("/usr/bin/vi"));
+  SYNC_REQUIRE(check_runtime_ownership(std::filesystem::canonical("/usr/bin/vi").string()) ==
+               RuntimeOwnership::RootOwned);
+  SYNC_REQUIRE(check_runtime_ownership("/usr/bin/vi") == RuntimeOwnership::Exposed);
+}
+
+SYNC_TEST(ndi_vendor_runtime_ownership_refuses_a_directory_others_can_write) {
+  using noisefactor::sync::ndi::runtime_ownership;
+  using noisefactor::sync::ndi::RuntimeOwnership;
+  const auto status = [](mode_t mode, uid_t uid) {
+    struct stat value {};
+    value.st_mode = mode;
+    value.st_uid = uid;
+    return value;
+  };
+  const struct stat file = status(S_IFREG | 0755, 0);
+  const struct stat directory = status(S_IFDIR | 0755, 0);
+  SYNC_REQUIRE(runtime_ownership(file, directory) == RuntimeOwnership::RootOwned);
+  // A world-writable directory such as /tmp, even with the sticky bit.
+  SYNC_REQUIRE(runtime_ownership(file, status(S_IFDIR | S_ISVTX | 0777, 0)) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(file, status(S_IFDIR | 0775, 0)) == RuntimeOwnership::Exposed);
+  // A directory a user owns, as Homebrew leaves /usr/local/lib on Intel Macs.
+  SYNC_REQUIRE(runtime_ownership(file, status(S_IFDIR | 0755, 501)) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(status(S_IFREG | 0775, 0), directory) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(status(S_IFREG | 0757, 0), directory) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(status(S_IFREG | 0755, 501), directory) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(status(S_IFLNK | 0755, 0), directory) == RuntimeOwnership::Exposed);
+  SYNC_REQUIRE(runtime_ownership(file, status(S_IFLNK | 0755, 0)) == RuntimeOwnership::Exposed);
 }
 
 SYNC_TEST(ndi_publisher_on_macos_loads_a_runtime_that_satisfies_its_requirement) {

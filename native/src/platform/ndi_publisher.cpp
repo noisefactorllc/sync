@@ -567,6 +567,34 @@ auto ndi::vendor_runtime_requirement() -> std::string {
   return requirement;
 }
 
+auto ndi::runtime_ownership(const struct stat& file, const struct stat& directory) noexcept
+    -> RuntimeOwnership {
+  const auto root_owned_and_closed = [](const struct stat& status) noexcept {
+    return status.st_uid == 0 && (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+  };
+  return S_ISREG(file.st_mode) && root_owned_and_closed(file) && S_ISDIR(directory.st_mode) &&
+                 root_owned_and_closed(directory)
+             ? RuntimeOwnership::RootOwned
+             : RuntimeOwnership::Exposed;
+}
+
+auto ndi::check_runtime_ownership(const std::string& path) noexcept -> RuntimeOwnership {
+  struct stat file {};
+  if (::lstat(path.c_str(), &file) != 0) {
+    return RuntimeOwnership::Missing;
+  }
+  const std::size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos) {
+    return RuntimeOwnership::Exposed;
+  }
+  const std::string directory = slash == 0 ? std::string("/") : path.substr(0, slash);
+  struct stat parent {};
+  if (::lstat(directory.c_str(), &parent) != 0) {
+    return RuntimeOwnership::Exposed;
+  }
+  return runtime_ownership(file, parent);
+}
+
 auto ndi::check_runtime_signature(const std::string& path, const std::string& requirement) noexcept
     -> RuntimeSignature {
   struct stat status {};
@@ -659,6 +687,16 @@ struct NdiFramePublisher::Impl {
       for (std::size_t index = 0; index < candidate_count; ++index) {
         const std::string& candidate = candidates[index];
 #if defined(__APPLE__)
+        if (candidate == ndi::kVendorRuntimePath) {
+          const ndi::RuntimeOwnership ownership = ndi::check_runtime_ownership(candidate);
+          if (ownership == ndi::RuntimeOwnership::Missing) {
+            continue;
+          }
+          if (ownership == ndi::RuntimeOwnership::Exposed) {
+            unavailable_reason = NdiUnavailableReason::RuntimeNotRootOwned;
+            continue;
+          }
+        }
         // Checked on disk before dlopen, which would run the file's code.
         const ndi::RuntimeSignature signature = ndi::check_runtime_signature(candidate, requirement);
         if (signature == ndi::RuntimeSignature::Rejected) {
@@ -810,6 +848,8 @@ auto describe(NdiUnavailableReason reason) noexcept -> const char* {
       return "the NDI runtime does not support this CPU";
     case NdiUnavailableReason::SignatureRejected:
       return "the NDI runtime is not signed by NewTek";
+    case NdiUnavailableReason::RuntimeNotRootOwned:
+      return "the NDI runtime at /usr/local/lib is not owned by root";
   }
   return "the NDI runtime is unavailable";
 }

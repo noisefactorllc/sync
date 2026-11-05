@@ -5,6 +5,10 @@
 #include <string_view>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#endif
+
 namespace noisefactor::sync::ndi {
 
 // The runtime library paths NdiFramePublisher tries, in order, for an
@@ -29,6 +33,19 @@ inline constexpr std::string_view kNdiRuntimeTeamId = "W8U66ET244";
 [[nodiscard]] auto vendor_runtime_requirement() -> std::string;
 
 enum class RuntimeSignature : std::uint8_t { Accepted, Missing, Rejected };
+
+enum class RuntimeOwnership : std::uint8_t { RootOwned, Missing, Exposed };
+
+// RootOwned when `path` is a regular file, not a symbolic link, owned by
+// root and writable by neither its group nor others, in a directory with the
+// same owner and modes. Only root can then replace the file between the
+// signature check and dlopen. Applied to kVendorRuntimePath only: the
+// --ndi-runtime directory is a developer flag, which Sync.app never passes.
+[[nodiscard]] auto check_runtime_ownership(const std::string& path) noexcept -> RuntimeOwnership;
+
+// The same rule on the lstat results of the file and of its directory.
+[[nodiscard]] auto runtime_ownership(const struct stat& file, const struct stat& directory) noexcept
+    -> RuntimeOwnership;
 
 // Checks a candidate's signature on disk, for every architecture it holds,
 // against `requirement`, without loading it.

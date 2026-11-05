@@ -66,6 +66,15 @@ unavailable and syncd prints "the NDI runtime is not signed by NewTek" on
 stderr. The Team ID is the constant `kNdiRuntimeTeamId` in
 `native/src/ndi_runtime_discovery.hpp`.
 
+The check reads the file before dlopen loads it, so the vendor install path
+must also be one only root can change: `/usr/local/lib/libndi.dylib` must be
+a regular file, not a symbolic link, owned by root and not writable by its
+group or by others, and `/usr/local/lib` must be owned by root with the same
+modes. The vendor package installs both that way. Otherwise syncd skips the
+file and prints "the NDI runtime at /usr/local/lib is not owned by root".
+The `--ndi-runtime` directory is a developer flag, which Sync.app never
+passes, and is not held to this rule.
+
 Per-platform library file name:
 
 | Platform | File name |

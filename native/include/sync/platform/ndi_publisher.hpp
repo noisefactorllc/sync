@@ -19,6 +19,9 @@ enum class NdiUnavailableReason : std::uint8_t {
   UnsupportedCpu,
   // macOS: the runtime file does not carry NewTek's Developer ID signature.
   SignatureRejected,
+  // macOS: the vendor's install path, or its directory, is not owned by root
+  // or is writable by its group or by others.
+  RuntimeNotRootOwned,
 };
 
 [[nodiscard]] auto describe(NdiUnavailableReason reason) noexcept
@@ -43,9 +46,9 @@ class NdiFramePublisher final : public FramePublisher {
     // means "search only those".
     std::string_view runtime_path{};
     std::size_t allocation_budget_bytes = kProductAllocationBudgetBytes;
-    // macOS only: the code requirement every candidate must satisfy before
-    // it is loaded. Empty selects the NewTek Team ID pin, which is what
-    // syncd always uses; the tests set it so that their stub runtime loads.
+    // Test seam, macOS only. syncd never sets it; empty selects the NewTek
+    // Team ID pin as the code requirement every candidate must satisfy
+    // before it is loaded. The tests set it so that their stub runtime loads.
     std::string_view signature_requirement{};
   };
 
