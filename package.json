@@ -29,5 +29,8 @@
     "test:soak": "node test/acceptance/daemon-memory-soak.mjs",
     "test:soak:unit": "node --test --test-timeout=30000 test/soak/*.test.js test/soak/lib/*.test.js",
     "test:soak:long": "node test/soak/run.mjs"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

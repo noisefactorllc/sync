@@ -128,6 +128,9 @@ jobs:
       - name: Run JavaScript unit tests and test coverage guard
         run: npm run test:unit
 
+      - name: Install the pinned TypeScript compiler
+        run: npm ci --ignore-scripts --no-bin-links
+
       - name: Run packaging tests
         run: npm run test:packaging
 
@@ -280,6 +283,10 @@ jobs:
           name: sync-linux-native-audio
           path: audio-qualification/
           if-no-files-found: error
+
+      - name: Install the pinned TypeScript compiler
+        if: matrix.name == 'Release'
+        run: npm ci --ignore-scripts --no-bin-links
 
       - name: Build and verify Debian package
         if: matrix.name == 'Release'
@@ -635,6 +642,9 @@ jobs:
         env:
           SYNC_DAEMON_PATH: build/${{ env.BUILD_TYPE }}/syncd.exe
         run: npm run test:unit
+
+      - name: Install the pinned TypeScript compiler
+        run: npm ci --ignore-scripts --no-bin-links
 
       - name: Run packaging tests
         run: npm run test:packaging
