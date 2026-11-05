@@ -838,8 +838,23 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   find_library(SYSTEM_EXTENSIONS_FRAMEWORK SystemExtensions REQUIRED)
+  # The menu app reads the CoreMediaIO device list, never a stream, to tell a
+  # camera macOS failed to publish from one the helper could not open.
+  find_library(COREMEDIAIO_FRAMEWORK CoreMediaIO REQUIRED)
+  add_library(sync_cmio_device_lookup
+    native/src/platform/macos/cmio_device_lookup.mm
+  )
+  target_compile_features(sync_cmio_device_lookup PUBLIC cxx_std_20)
+  set_target_properties(sync_cmio_device_lookup PROPERTIES OBJCXX_STANDARD 20)
+  target_include_directories(sync_cmio_device_lookup PUBLIC native/include)
+  target_compile_options(sync_cmio_device_lookup PRIVATE
+    $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_link_libraries(sync_cmio_device_lookup
+    PRIVATE ${COREMEDIAIO_FRAMEWORK} ${CORE_FOUNDATION_FRAMEWORK}
+  )
   target_link_libraries(sync_menu PRIVATE
-    sync_companion_process sync_camera_activation ${APPKIT_FRAMEWORK}
+    sync_companion_process sync_camera_activation sync_cmio_device_lookup ${APPKIT_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK} ${SERVICE_MANAGEMENT_FRAMEWORK}
     ${SYSTEM_EXTENSIONS_FRAMEWORK}
   )
@@ -1123,7 +1138,7 @@ if(APPLE)
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
   target_link_libraries(sync_cmio_camera_sink_tests
-    PRIVATE sync_cmio_camera_sink ${FOUNDATION_FRAMEWORK}
+    PRIVATE sync_cmio_camera_sink sync_cmio_device_lookup ${FOUNDATION_FRAMEWORK}
   )
   add_test(NAME sync_cmio_camera_sink_tests COMMAND sync_cmio_camera_sink_tests)
 

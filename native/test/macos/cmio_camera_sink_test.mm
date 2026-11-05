@@ -5,9 +5,11 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <string_view>
 
 #include <sync/platform/camera_identity.hpp>
 #include <sync/platform/cmio_camera_sink.hpp>
+#include <sync/platform/cmio_device_lookup.hpp>
 #include <sync/camera/frame_ring.hpp>
 #include "../../src/platform/macos/cmio_frame_submission.hpp"
 #import <Foundation/Foundation.h>
@@ -43,6 +45,16 @@ SYNC_TEST(cmio_camera_sink_without_the_extension_is_unavailable_and_refuses_fram
       .presentation_time_us = 1,
   };
   SYNC_REQUIRE(sink.submit(frame) == CameraSinkSubmit::Failed);
+}
+
+SYNC_TEST(cmio_device_lookup_agrees_with_the_sink_on_a_missing_device) {
+  // The menu app asks this, not the sink, before it calls for a restart; both
+  // must call the same device missing.
+  constexpr std::string_view kMissing = "io.noisefactor.sync.camera.does-not-exist";
+  SYNC_REQUIRE(!noisefactor::sync::camera::cmio_device_present(kMissing));
+  CmioCameraSink sink({.device_uid = kMissing, .enable_shm = false});
+  SYNC_REQUIRE(sink.unavailable_reason() == CameraSinkUnavailableReason::DeviceNotFound);
+  SYNC_REQUIRE(!noisefactor::sync::camera::cmio_device_present(""));
 }
 
 SYNC_TEST(cmio_camera_sink_rejects_frames_that_are_not_the_advertised_canvas) {

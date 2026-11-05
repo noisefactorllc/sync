@@ -8,6 +8,7 @@
 #include <sync/camera_activation.hpp>
 #include <sync/companion_model.hpp>
 #include <sync/platform/camera_identity.hpp>
+#include <sync/platform/cmio_device_lookup.hpp>
 #include <sync/server.hpp>
 
 #include <memory>
@@ -81,6 +82,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
   BOOL _quitting;
   camera::CameraActivationState _cameraState;
   std::string _cameraError;
+  camera::CameraLaunchSequence _cameraLaunch;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -121,7 +123,24 @@ std::uint64_t monotonic_milliseconds() noexcept {
   _menu.delegate = self;
   _statusItem.menu = _menu;
 
-  [self probeThenStart];
+  // The helper waits for the camera activation request to answer, so it is
+  // not a client of the old extension while macOS replaces it. The wait is
+  // bounded from here, before the first-run notice, so even a request that
+  // never answers cannot leave Sync without its helper.
+  const bool activationRequested =
+      camera::bundle_is_in_applications(bundle.bundlePath.UTF8String != nullptr
+                                            ? bundle.bundlePath.UTF8String
+                                            : "");
+  [self applyHelperAction:_cameraLaunch.launched(activationRequested)];
+  if (activationRequested) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 static_cast<int64_t>(camera::CameraLaunchSequence::kActivationWaitMs *
+                                                      NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+                     SyncAppDelegate* self = weakSelf;
+                     if (self != nil) [self applyHelperAction:self->_cameraLaunch.activation_wait_elapsed()];
+                   });
+  }
   _pollTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                 target:self
                                               selector:@selector(pollStatus:)
@@ -130,6 +149,57 @@ std::uint64_t monotonic_milliseconds() noexcept {
   [self refreshPairings];
   [self showPreviewNoticeIfNeeded];
   [self requestCameraExtension];
+}
+
+// Runs what the launch sequence decided for the helper.
+- (void)applyHelperAction:(camera::CameraLaunchSequence::HelperAction)action {
+  if (action.step == camera::CameraLaunchSequence::HelperStep::None) return;
+  const bool restart = action.step == camera::CameraLaunchSequence::HelperStep::Restart;
+  __weak SyncAppDelegate* weakSelf = self;
+  void (^run)(void) = ^{
+    SyncAppDelegate* self = weakSelf;
+    if (self == nil || self->_quitting) return;
+    if (restart) {
+      [self restartSync:nil];
+    } else {
+      [self probeThenStart];
+    }
+  };
+  if (action.delay_ms == 0) {
+    run();
+    return;
+  }
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(action.delay_ms * NSEC_PER_MSEC)),
+                 dispatch_get_main_queue(), run);
+}
+
+// The app's own helper answered a health probe. When the activation completed
+// in this launch and that helper, started after it, has no camera, look for
+// the device once more before the camera line asks for a restart.
+- (void)observeCameraReport {
+  if (!_process->owned_pid().has_value()) return;
+  const companion::HealthSnapshot& health = _model->health();
+  if (!health.reachable || !health.compatible) return;
+  if (!_cameraLaunch.helper_reported(health.providers.contains("camera"))) return;
+  __weak SyncAppDelegate* weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               static_cast<int64_t>(camera::CameraLaunchSequence::kDeviceRecheckDelayMs *
+                                                    NSEC_PER_MSEC)),
+                 dispatch_get_main_queue(), ^{
+                   SyncAppDelegate* self = weakSelf;
+                   if (self != nil && !self->_quitting) [self recheckCamera];
+                 });
+}
+
+- (void)recheckCamera {
+  const companion::HealthSnapshot& health = _model->health();
+  const bool cameraAvailable = _process->owned_pid().has_value() && health.reachable &&
+                               health.compatible && health.providers.contains("camera");
+  // A read of CoreMediaIO's device list only; no stream is opened.
+  const bool devicePresent = camera::cmio_device_present(camera::kDeviceUid);
+  if (_cameraLaunch.rechecked(cameraAvailable, devicePresent)) {
+    _cameraState = camera::CameraActivationState::NeedsRestart;
+  }
 }
 
 - (void)dismissPairingAlert {
@@ -245,6 +315,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
 - (void)requestNeedsUserApproval:(OSSystemExtensionRequest*)request {
   (void)request;
   _cameraState = camera::CameraActivationState::NeedsApproval;
+  [self applyHelperAction:_cameraLaunch.needs_approval()];
 }
 
 - (void)request:(OSSystemExtensionRequest*)request
@@ -252,17 +323,15 @@ std::uint64_t monotonic_milliseconds() noexcept {
   (void)request;
   if (result == OSSystemExtensionRequestWillCompleteAfterReboot) {
     _cameraState = camera::CameraActivationState::ActiveAfterReboot;
+    [self applyHelperAction:_cameraLaunch.completes_after_reboot()];
     return;
   }
   _cameraState = camera::CameraActivationState::Active;
   // The device is published to CoreMediaIO a moment after activation
   // completes; a helper started in that gap discovers nothing and reports
-  // the camera unavailable until its next restart.
-  __weak SyncAppDelegate* weakSelf = self;
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-    SyncAppDelegate* self = weakSelf;
-    if (self != nil && !self->_quitting) [self restartSync:nil];
-  });
+  // the camera unavailable until its next restart. So the helper starts, or a
+  // helper already running restarts, after kDevicePublishDelayMs.
+  [self applyHelperAction:_cameraLaunch.completed(monotonic_milliseconds())];
 }
 
 - (void)request:(OSSystemExtensionRequest*)request didFailWithError:(NSError*)error {
@@ -282,6 +351,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
   const char* description = detail.UTF8String;
   _cameraError = description != nullptr ? description : "unknown error";
   _model->append_stderr("camera extension: " + _cameraError + "\n");
+  [self applyHelperAction:_cameraLaunch.failed()];
 }
 
 - (void)openCameraSettings:(id)sender {
@@ -312,6 +382,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
     if (health.has_value()) {
       self->_model->observe_health(std::move(*health),
                                    monotonic_milliseconds());
+      [self observeCameraReport];
       return;
     }
     [self startHelper];
@@ -347,6 +418,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
   }
   if (const auto pid = _process->owned_pid(); pid.has_value()) {
     _model->helper_started(*pid);
+    _cameraLaunch.helper_started(monotonic_milliseconds());
   }
 }
 
@@ -436,6 +508,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
   }
   if (const auto pid = _process->owned_pid(); pid.has_value()) {
     _model->helper_started(*pid, monotonic_milliseconds());
+    _cameraLaunch.helper_started(monotonic_milliseconds());
   } else {
     const auto recovery = _model->recovery_launch_failed(
         -1, monotonic_milliseconds());
@@ -471,6 +544,7 @@ std::uint64_t monotonic_milliseconds() noexcept {
       }
       self->_model->observe_health(std::move(*health),
                                    monotonic_milliseconds());
+      [self observeCameraReport];
     } else {
       const bool terminate_owned = self->_model->observe_health_failure(
           monotonic_milliseconds());
