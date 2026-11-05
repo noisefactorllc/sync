@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -430,8 +431,8 @@ void require_cadence(std::uint64_t interval_us, double low_fps, double high_fps)
     SYNC_REQUIRE((frame.first_pixel == std::array<unsigned, 4>{255, 0, 0, 255}));
     SYNC_REQUIRE((frame.last_row_pixel == std::array<unsigned, 4>{0, 0, 255, 255}));
     const double fps = static_cast<double>(frame.rate_n) / frame.rate_d;
-    if (index == 0) {
-      // The first frame has no interval yet.
+    if (index < 2) {
+      // The first two frames give one interval, too few to judge a cadence.
       SYNC_REQUIRE((FrameRate{frame.rate_n, frame.rate_d} == kInitialFrameRate));
     } else {
       SYNC_REQUIRE(fps >= low_fps && fps <= high_fps);
@@ -632,4 +633,128 @@ SYNC_TEST(ndi_frame_rate_tracker_declares_an_unusual_cadence_as_measured) {
   FrameRate declared{};
   for (std::uint64_t index = 0; index < 20; ++index) declared = tracker.observe(index * 12'345);
   SYNC_REQUIRE(declared == (FrameRate{1'000'000, 12'345}));
+}
+
+namespace {
+
+// SplitMix64: the same jitter sequence on every platform and standard library.
+struct Jitter {
+  std::uint64_t state;
+  auto next() -> std::uint64_t {
+    std::uint64_t value = (state += 0x9e3779b97f4a7c15ULL);
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+  }
+};
+
+struct Declared {
+  double seconds = 0.0;
+  FrameRate rate{};
+};
+
+constexpr std::size_t kNoChange = std::numeric_limits<std::size_t>::max();
+
+// A sender `period_us` apart (from frame `change_at` on, `next_period_us`),
+// each presentation time moved by uniform capture jitter of up to 2 ms either
+// way, about one frame in fifty dropped. Returns the rate declared on each
+// frame that was sent, at its nominal time.
+[[nodiscard]] auto declare_jittered(double period_us, std::size_t frames, std::uint64_t seed,
+                                    std::size_t change_at = kNoChange, double next_period_us = 0.0)
+    -> std::vector<Declared> {
+  Jitter jitter{seed};
+  FrameRateTracker tracker;
+  std::vector<Declared> declared;
+  double nominal_us = 0.0;
+  for (std::size_t frame = 0; frame < frames; ++frame) {
+    if (frame == change_at) period_us = next_period_us;
+    if (frame > 0) nominal_us += period_us;
+    const bool dropped = frame > 0 && jitter.next() % 50U == 0U;
+    const double offset_us = static_cast<double>(jitter.next() % 4001U) - 2000.0;
+    if (dropped) continue;
+    const auto time_us = static_cast<std::uint64_t>(1'000'000'000.0 + nominal_us + offset_us);
+    declared.push_back({nominal_us / 1'000'000.0, tracker.observe(time_us)});
+  }
+  return declared;
+}
+
+[[nodiscard]] auto changes(const std::vector<Declared>& declared) -> std::size_t {
+  std::size_t count = 0;
+  for (std::size_t index = 1; index < declared.size(); ++index) {
+    if (!(declared[index].rate == declared[index - 1].rate)) ++count;
+  }
+  return count;
+}
+
+// The nominal time from which every declared rate is `rate`.
+[[nodiscard]] auto settled_at(const std::vector<Declared>& declared, FrameRate rate) -> double {
+  for (std::size_t index = declared.size(); index > 0; --index) {
+    if (!(declared[index - 1].rate == rate)) {
+      return index < declared.size() ? declared[index].seconds : std::numeric_limits<double>::infinity();
+    }
+  }
+  return 0.0;
+}
+
+// Seeds 1 to 10, and 34 and 316: in simulation a confidence level of 1e-3
+// for every decision declared 30000/1001 for a while on seed 34's 30 fps
+// stream and a measured 65 fps on seed 316's third 60 fps frame.
+constexpr std::array<std::uint64_t, 12> kSeeds{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 34, 316};
+
+constexpr double kMicrosecondsPer60Fps = 1'000'000.0 / 60.0;
+constexpr double kMicrosecondsPer30Fps = 1'000'000.0 / 30.0;
+constexpr double kMicrosecondsPer59_94Fps = 1'000'000.0 * 1001.0 / 60'000.0;
+constexpr double kMicrosecondsPer29_97Fps = 1'000'000.0 * 1001.0 / 30'000.0;
+
+}  // namespace
+
+// zig's live 60 fps run alternated between 60/1 and 60000/1001 because a
+// short average of jittered frame times crossed the 0.05% boundary between
+// them. A receiver must see one rate while the cadence holds.
+SYNC_TEST(ndi_frame_rate_tracker_holds_60_and_30_fps_through_capture_jitter_and_drops) {
+  for (const std::uint64_t seed : kSeeds) {
+    const std::vector<Declared> sixty = declare_jittered(kMicrosecondsPer60Fps, 3600, seed);
+    for (const Declared& frame : sixty) SYNC_REQUIRE((frame.rate == FrameRate{60, 1}));
+
+    const std::vector<Declared> thirty = declare_jittered(kMicrosecondsPer30Fps, 1800, seed);
+    SYNC_REQUIRE(thirty.front().rate == kInitialFrameRate);
+    SYNC_REQUIRE(changes(thirty) == 1);
+    SYNC_REQUIRE(settled_at(thirty, {30, 1}) <= 1.0);
+  }
+}
+
+SYNC_TEST(ndi_frame_rate_tracker_settles_once_on_59_94_and_29_97_fps) {
+  for (const std::uint64_t seed : kSeeds) {
+    const std::vector<Declared> ntsc60 = declare_jittered(kMicrosecondsPer59_94Fps, 3600, seed);
+    SYNC_REQUIRE(ntsc60.front().rate == kInitialFrameRate);
+    SYNC_REQUIRE(changes(ntsc60) == 1);
+    SYNC_REQUIRE(settled_at(ntsc60, {60000, 1001}) <= 4.0);
+
+    // 60/1 first, then 30/1 once the cadence is clearly 30 fps, then 30000/1001.
+    const std::vector<Declared> ntsc30 = declare_jittered(kMicrosecondsPer29_97Fps, 1800, seed);
+    SYNC_REQUIRE(ntsc30.front().rate == kInitialFrameRate);
+    SYNC_REQUIRE(changes(ntsc30) <= 2);
+    for (const Declared& frame : ntsc30) {
+      SYNC_REQUIRE((frame.rate == kInitialFrameRate || frame.rate == FrameRate{30, 1} ||
+                    frame.rate == FrameRate{30000, 1001}));
+    }
+    SYNC_REQUIRE(settled_at(ntsc30, {30000, 1001}) <= 5.0);
+  }
+}
+
+SYNC_TEST(ndi_frame_rate_tracker_follows_a_change_from_60_to_30_fps_within_a_second) {
+  for (const std::uint64_t seed : kSeeds) {
+    const std::vector<Declared> declared =
+        declare_jittered(kMicrosecondsPer60Fps, 600, seed, 300, kMicrosecondsPer30Fps);
+    const double change_seconds = 300.0 / 60.0;
+    std::vector<Declared> after;
+    for (const Declared& frame : declared) {
+      if (frame.seconds < change_seconds) {
+        SYNC_REQUIRE((frame.rate == FrameRate{60, 1}));
+      } else {
+        after.push_back(frame);
+      }
+    }
+    SYNC_REQUIRE(settled_at(after, {30, 1}) - change_seconds <= 1.1);
+  }
 }
