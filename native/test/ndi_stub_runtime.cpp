@@ -2,7 +2,9 @@
 // dynamic-load entry point, NDIlib_v5_load, with the table layout of
 // Processing.NDI.DynamicLoad.h, and writes one line per video frame to the
 // file named by SYNC_NDI_STUB_LOG, so a test can read what a receiver would
-// be told about each frame. It sends nothing anywhere.
+// be told about each frame. On POSIX it also writes "loaded" when the loader
+// maps it, so a test can tell whether a refused copy was ever loaded. It
+// sends nothing anywhere.
 
 #include <cstddef>
 #include <cstdint>
@@ -118,6 +120,10 @@ const Api api = [] {
   table.send_send_video_async_v2 = send_video_async;
   return table;
 }();
+
+#if !defined(_WIN32)
+__attribute__((constructor)) void log_load() { log_line("loaded\n"); }
+#endif
 
 }  // namespace
 

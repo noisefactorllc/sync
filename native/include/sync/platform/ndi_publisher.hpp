@@ -17,6 +17,8 @@ enum class NdiUnavailableReason : std::uint8_t {
   EntryPointMissing,
   InitializationFailed,
   UnsupportedCpu,
+  // macOS: the runtime file does not carry NewTek's Developer ID signature.
+  SignatureRejected,
 };
 
 [[nodiscard]] auto describe(NdiUnavailableReason reason) noexcept
@@ -33,13 +35,18 @@ class NdiFramePublisher final : public FramePublisher {
   static constexpr std::size_t kProductAllocationBudgetBytes = 512ULL * 1024ULL * 1024ULL;
 
   struct Options {
-    // Directory to search first, ahead of the vendor's documented
-    // NDI_RUNTIME_DIR_V6 / NDI_RUNTIME_DIR_V5 environment variables. Wired
-    // from the --ndi-runtime CLI flag by the caller; empty means "rely on
-    // the documented discovery variables and the OS loader's default
-    // search only".
+    // Directory to search first. Wired from the --ndi-runtime CLI flag by
+    // the caller. On Windows and Linux it comes ahead of the vendor's
+    // documented NDI_RUNTIME_DIR_V6 / NDI_RUNTIME_DIR_V5 environment
+    // variables and the OS loader's default search; on macOS it comes ahead
+    // of the vendor's install path, /usr/local/lib/libndi.dylib. Empty
+    // means "search only those".
     std::string_view runtime_path{};
     std::size_t allocation_budget_bytes = kProductAllocationBudgetBytes;
+    // macOS only: the code requirement every candidate must satisfy before
+    // it is loaded. Empty selects the NewTek Team ID pin, which is what
+    // syncd always uses; the tests set it so that their stub runtime loads.
+    std::string_view signature_requirement{};
   };
 
   NdiFramePublisher();

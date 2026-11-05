@@ -688,6 +688,13 @@ target_link_libraries(sync_ndi_publisher PUBLIC sync_protocol)
 if(NOT WIN32)
   target_link_libraries(sync_ndi_publisher PRIVATE ${CMAKE_DL_LIBS})
 endif()
+# macOS checks each candidate's code signature before it loads it.
+if(APPLE)
+  find_library(SYNC_NDI_SECURITY_FRAMEWORK Security REQUIRED)
+  find_library(SYNC_NDI_CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+  target_link_libraries(sync_ndi_publisher PRIVATE
+    ${SYNC_NDI_SECURITY_FRAMEWORK} ${SYNC_NDI_CORE_FOUNDATION_FRAMEWORK})
+endif()
 
 add_executable(sync_ndi_publisher_tests
   native/test/ndi_publisher_test.cpp
@@ -722,6 +729,28 @@ set_target_properties(sync_ndi_stub_runtime PROPERTIES
 add_dependencies(sync_ndi_publisher_tests sync_ndi_stub_runtime)
 target_compile_definitions(sync_ndi_publisher_tests PRIVATE
   SYNC_NDI_STUB_RUNTIME_DIR="$<TARGET_FILE_DIR:sync_ndi_stub_runtime>")
+# On macOS the publisher loads only a runtime that satisfies its code
+# requirement. The stub is signed ad hoc with an identifier the tests name in
+# their own requirement; an unsigned copy and an ad hoc copy, each in a
+# directory of its own, are what the NewTek pin must refuse.
+if(APPLE)
+  find_program(SYNC_CODESIGN codesign REQUIRED)
+  set(SYNC_NDI_STUB_IDENTIFIER io.noisefactor.sync.test.ndi-stub)
+  set(SYNC_NDI_STUB_ADHOC_DIR ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-adhoc)
+  set(SYNC_NDI_STUB_UNSIGNED_DIR ${CMAKE_CURRENT_BINARY_DIR}/ndi-stub-unsigned)
+  add_custom_command(TARGET sync_ndi_stub_runtime POST_BUILD
+    COMMAND ${SYNC_CODESIGN} --force --sign - --identifier ${SYNC_NDI_STUB_IDENTIFIER}
+      $<TARGET_FILE:sync_ndi_stub_runtime>
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SYNC_NDI_STUB_ADHOC_DIR} ${SYNC_NDI_STUB_UNSIGNED_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:sync_ndi_stub_runtime> ${SYNC_NDI_STUB_ADHOC_DIR}/libndi.dylib
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:sync_ndi_stub_runtime> ${SYNC_NDI_STUB_UNSIGNED_DIR}/libndi.dylib
+    COMMAND ${SYNC_CODESIGN} --remove-signature ${SYNC_NDI_STUB_UNSIGNED_DIR}/libndi.dylib
+    VERBATIM)
+  target_compile_definitions(sync_ndi_publisher_tests PRIVATE
+    SYNC_NDI_STUB_IDENTIFIER="${SYNC_NDI_STUB_IDENTIFIER}"
+    SYNC_NDI_STUB_ADHOC_DIR="${SYNC_NDI_STUB_ADHOC_DIR}"
+    SYNC_NDI_STUB_UNSIGNED_DIR="${SYNC_NDI_STUB_UNSIGNED_DIR}")
+endif()
 
 if(APPLE)
   enable_language(OBJCXX)

@@ -294,13 +294,26 @@ test("entitlements for the app and the camera extension are committed and valid"
   // plutil exists only on macOS; the content checks below run everywhere
   // this suite does, Windows included.
   if (process.platform === "darwin") {
-    for (const name of ["Sync.entitlements", "SyncCamera.entitlements", "SyncRender.entitlements"]) {
+    for (const name of ["Sync.entitlements", "SyncCamera.entitlements", "SyncRender.entitlements",
+                        "Syncd.entitlements"]) {
       const result = spawnSync("/usr/bin/plutil", ["-lint", entitlement(name)], { encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);
     }
   }
   assert.match(readFileSync(entitlement("Sync.entitlements"), "utf8"),
                /com\.apple\.developer\.system-extension\.install/);
+  // syncd records audio input and loads the vendor-signed NDI runtime, which
+  // the hardened runtime refuses unless library validation is disabled.
+  // Only syncd gets that exception: it loads a runtime only after checking
+  // NewTek's signature on it.
+  const daemonEntitlements = readFileSync(entitlement("Syncd.entitlements"), "utf8");
+  assert.match(daemonEntitlements, /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/);
+  assert.match(daemonEntitlements, /<key>com\.apple\.security\.cs\.disable-library-validation<\/key>\s*<true\/>/);
+  for (const name of readdirSync(path.join(sourceDirectory, "packaging/macos"))) {
+    if (name.endsWith(".entitlements") && name !== "Syncd.entitlements") {
+      assert.doesNotMatch(readFileSync(entitlement(name), "utf8"), /disable-library-validation/, name);
+    }
+  }
   assert.match(readFileSync(entitlement("SyncCamera.entitlements"), "utf8"),
                /com\.apple\.security\.app-sandbox/);
   // sync-render captures camera and audio input for the programs it renders;

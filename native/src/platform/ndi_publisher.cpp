@@ -2,6 +2,7 @@
 
 #include "../ndi_frame_copy.hpp"
 #include "../ndi_frame_rate.hpp"
+#include "../ndi_runtime_discovery.hpp"
 #include "../replacement_budget.hpp"
 
 #include <array>
@@ -10,12 +11,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,6 +31,12 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#endif
+
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#include <sys/stat.h>
 #endif
 
 // ============================================================================
@@ -71,6 +81,12 @@ namespace {
 // finally the bare library name, which defers to the OS loader's own
 // default search rules. This mirrors the reasoning in syphon_consumer.mm
 // for Syphon.framework discovery on macOS.
+//
+// macOS differs: the vendor's package installs one absolute path and sets no
+// environment variable, so the search is the explicit path and then that
+// install path. syncd runs there with library validation disabled, so every
+// candidate must first pass check_runtime_signature (the NewTek Team ID pin)
+// or it is never loaded.
 
 #if defined(_WIN32)
 using native_module_handle = HMODULE;
@@ -186,6 +202,7 @@ constexpr char kPathSeparator = '/';
 constexpr std::size_t kMaximumRuntimePathBytes = 4096;
 #endif
 
+#if !defined(__APPLE__)
 [[nodiscard]] auto read_env_var(const char* name, std::string& out) noexcept -> bool {
 #if defined(_WIN32)
   // GetEnvironmentVariableA rather than getenv or _dupenv_s: it has no shared
@@ -219,6 +236,7 @@ constexpr std::size_t kMaximumRuntimePathBytes = 4096;
   return true;
 #endif
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Minimal, hand-reproduced prefix of the NDIlib_v5 dynamic-load ABI.
@@ -419,6 +437,42 @@ void add_candidate(std::array<std::string, kMaximumDiscoveryPaths>& paths, std::
   ++count;
 }
 
+void collect_candidates(std::string_view runtime_path, std::array<std::string, kMaximumDiscoveryPaths>& paths,
+                        std::size_t& count) {
+#if defined(__APPLE__)
+  if (!runtime_path.empty()) {
+    add_candidate(paths, count, join_runtime_dir(runtime_path));
+  }
+  add_candidate(paths, count, std::string(ndi::kVendorRuntimePath));
+#else
+  add_candidate(paths, count, join_runtime_dir(runtime_path));
+
+  std::string env_value;
+  if (read_env_var("NDI_RUNTIME_DIR_V6", env_value)) {
+    add_candidate(paths, count, join_runtime_dir(env_value));
+  }
+  if (read_env_var("NDI_RUNTIME_DIR_V5", env_value)) {
+    add_candidate(paths, count, join_runtime_dir(env_value));
+  }
+  // Bare library name: defers entirely to the OS loader's own default
+  // search rules, adding no path of our own.
+  add_candidate(paths, count, std::string(platform_library_filename()));
+#endif
+}
+
+#if defined(__APPLE__)
+template <typename Ref>
+struct CfReleaser {
+  void operator()(Ref ref) const noexcept {
+    if (ref != nullptr) {
+      ::CFRelease(ref);
+    }
+  }
+};
+template <typename Ref>
+using CfOwned = std::unique_ptr<std::remove_pointer_t<Ref>, CfReleaser<Ref>>;
+#endif
+
 // ---------------------------------------------------------------------------
 // Checked arithmetic (mirrors metal_frame_publisher.mm's helper)
 // ---------------------------------------------------------------------------
@@ -497,6 +551,57 @@ constexpr std::size_t kMaximumSenderNameBytes = 64;
 
 }  // namespace
 
+auto ndi::runtime_candidates(std::string_view runtime_path) -> std::vector<std::string> {
+  std::array<std::string, kMaximumDiscoveryPaths> paths{};
+  std::size_t count = 0;
+  collect_candidates(runtime_path, paths, count);
+  return {std::make_move_iterator(paths.begin()),
+          std::make_move_iterator(paths.begin() + static_cast<std::ptrdiff_t>(count))};
+}
+
+#if defined(__APPLE__)
+auto ndi::vendor_runtime_requirement() -> std::string {
+  std::string requirement = "anchor apple generic and certificate leaf[subject.OU] = \"";
+  requirement += kNdiRuntimeTeamId;
+  requirement += '"';
+  return requirement;
+}
+
+auto ndi::check_runtime_signature(const std::string& path, const std::string& requirement) noexcept
+    -> RuntimeSignature {
+  struct stat status {};
+  if (::stat(path.c_str(), &status) != 0) {
+    return RuntimeSignature::Missing;
+  }
+  if (!S_ISREG(status.st_mode)) {
+    return RuntimeSignature::Rejected;
+  }
+  const CfOwned<CFURLRef> url(::CFURLCreateFromFileSystemRepresentation(
+      kCFAllocatorDefault, reinterpret_cast<const UInt8*>(path.data()), static_cast<CFIndex>(path.size()),
+      false));
+  const CfOwned<CFStringRef> text(::CFStringCreateWithBytes(
+      kCFAllocatorDefault, reinterpret_cast<const UInt8*>(requirement.data()),
+      static_cast<CFIndex>(requirement.size()), kCFStringEncodingUTF8, false));
+  if (url == nullptr || text == nullptr) {
+    return RuntimeSignature::Rejected;
+  }
+  SecStaticCodeRef code_ref = nullptr;
+  if (::SecStaticCodeCreateWithPath(url.get(), kSecCSDefaultFlags, &code_ref) != errSecSuccess) {
+    return RuntimeSignature::Rejected;
+  }
+  const CfOwned<SecStaticCodeRef> code(code_ref);
+  SecRequirementRef requirement_ref = nullptr;
+  if (::SecRequirementCreateWithString(text.get(), kSecCSDefaultFlags, &requirement_ref) != errSecSuccess) {
+    return RuntimeSignature::Rejected;
+  }
+  const CfOwned<SecRequirementRef> compiled(requirement_ref);
+  const SecCSFlags flags = kSecCSStrictValidate | kSecCSCheckAllArchitectures;
+  return ::SecStaticCodeCheckValidityWithErrors(code.get(), flags, compiled.get(), nullptr) == errSecSuccess
+             ? RuntimeSignature::Accepted
+             : RuntimeSignature::Rejected;
+}
+#endif
+
 struct NdiFramePublisher::Impl {
   struct FrameBuffer {
     std::unique_ptr<std::byte[]> storage;
@@ -524,7 +629,7 @@ struct NdiFramePublisher::Impl {
       configuration_valid = false;
       return;
     }
-    discover(options.runtime_path);
+    discover(options.runtime_path, options.signature_requirement);
   }
 
   bool configuration_valid = true;
@@ -538,26 +643,35 @@ struct NdiFramePublisher::Impl {
   std::optional<ProviderFailure> latched_failure;
   std::array<SenderEntry, NdiFramePublisher::kMaximumSenderEntries> senders{};
 
-  void discover(std::string_view runtime_path) noexcept {
+  void discover(std::string_view runtime_path, std::string_view signature_requirement) noexcept {
     try {
       std::array<std::string, kMaximumDiscoveryPaths> candidates{};
       std::size_t candidate_count = 0;
-
-      add_candidate(candidates, candidate_count, join_runtime_dir(runtime_path));
-
-      std::string env_value;
-      if (read_env_var("NDI_RUNTIME_DIR_V6", env_value)) {
-        add_candidate(candidates, candidate_count, join_runtime_dir(env_value));
-      }
-      if (read_env_var("NDI_RUNTIME_DIR_V5", env_value)) {
-        add_candidate(candidates, candidate_count, join_runtime_dir(env_value));
-      }
-      // Bare library name: defers entirely to the OS loader's own default
-      // search rules, adding no path of our own.
-      add_candidate(candidates, candidate_count, std::string(platform_library_filename()));
+      collect_candidates(runtime_path, candidates, candidate_count);
+#if defined(__APPLE__)
+      const std::string requirement = signature_requirement.empty()
+                                          ? ndi::vendor_runtime_requirement()
+                                          : std::string(signature_requirement);
+#else
+      static_cast<void>(signature_requirement);
+#endif
 
       for (std::size_t index = 0; index < candidate_count; ++index) {
         const std::string& candidate = candidates[index];
+#if defined(__APPLE__)
+        // Checked on disk before dlopen, which would run the file's code.
+        const ndi::RuntimeSignature signature = ndi::check_runtime_signature(candidate, requirement);
+        if (signature == ndi::RuntimeSignature::Rejected) {
+          unavailable_reason = NdiUnavailableReason::SignatureRejected;
+          continue;
+        }
+        if (signature == ndi::RuntimeSignature::Missing) {
+          if (!runtime_path.empty() && index == 0) {
+            unavailable_reason = NdiUnavailableReason::LoadFailed;
+          }
+          continue;
+        }
+#endif
         native_module_handle handle = load_module(candidate, path_has_directory(candidate));
         if (handle == kNullModule) {
           if (!runtime_path.empty() && index == 0) {
@@ -694,6 +808,8 @@ auto describe(NdiUnavailableReason reason) noexcept -> const char* {
       return "the NDI runtime refused initialization";
     case NdiUnavailableReason::UnsupportedCpu:
       return "the NDI runtime does not support this CPU";
+    case NdiUnavailableReason::SignatureRejected:
+      return "the NDI runtime is not signed by NewTek";
   }
   return "the NDI runtime is unavailable";
 }

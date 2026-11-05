@@ -18,8 +18,8 @@ error.
 ## Discovery
 
 `NdiFramePublisher` builds a bounded, deduplicated list of at most 4
-candidate library paths, in this order, and stops at the first one that
-loads, resolves, and passes its ABI probe:
+candidate library paths and stops at the first one that loads, resolves,
+and passes its ABI probe. On Windows and Linux the order is:
 
 1. The directory named by `Options::runtime_path` (wired from the
    `--ndi-runtime` CLI flag), if the caller supplied one.
@@ -31,11 +31,40 @@ loads, resolves, and passes its ABI probe:
    own default search path.
 
 `NDI_RUNTIME_DIR_V6` / `NDI_RUNTIME_DIR_V5` are the NDI SDK's own documented
-discovery variables — the official NDI Runtime installer sets them. Sync
-adds no other search location (no per-user or working-directory fallback):
-loading a module executes its code, so every directory searched must
-already be one this process trusts, exactly the reasoning
+discovery variables; the vendor's Windows runtime installer sets them.
+
+On macOS the order is:
+
+1. The directory named by `Options::runtime_path` (`--ndi-runtime`), if the
+   caller supplied one.
+2. `/usr/local/lib/libndi.dylib`, where the vendor's macOS runtime package
+   installs the library.
+
+The macOS package sets no environment variable, so on macOS Sync reads
+neither discovery variable and does not fall back to the loader's default
+search.
+
+Sync adds no other search location (no per-user or working-directory
+fallback): loading a module executes its code, so every directory searched
+must already be one this process trusts, exactly the reasoning
 `syphon_consumer.mm` documents for `Syphon.framework` discovery on macOS.
+
+### macOS signature pin
+
+NewTek signs `libndi.dylib` with its own Developer ID, and the hardened
+runtime refuses to load a library signed by another team. syncd is therefore
+signed with `com.apple.security.cs.disable-library-validation`
+(`packaging/macos/Syncd.entitlements`); no other Sync binary carries it.
+That entitlement would let syncd load any library, so syncd checks every
+candidate on disk before it loads it. The file must satisfy the code
+requirement `anchor apple generic and certificate leaf[subject.OU] =
+"W8U66ET244"`, NewTek's Team ID, for every architecture it contains
+(`SecStaticCodeCheckValidityWithErrors` with `kSecCSStrictValidate |
+kSecCSCheckAllArchitectures`). A candidate that is unsigned, ad hoc signed
+or signed by another team is never loaded: `/health` lists `ndi` as
+unavailable and syncd prints "the NDI runtime is not signed by NewTek" on
+stderr. The Team ID is the constant `kNdiRuntimeTeamId` in
+`native/src/ndi_runtime_discovery.hpp`.
 
 Per-platform library file name:
 

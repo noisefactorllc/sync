@@ -2,6 +2,7 @@
 
 #include "../src/ndi_frame_copy.hpp"
 #include "../src/ndi_frame_rate.hpp"
+#include "../src/ndi_runtime_discovery.hpp"
 
 #include <array>
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -136,6 +138,7 @@ SYNC_TEST(ndi_unavailability_reasons_are_distinct_and_non_secret) {
       NdiUnavailableReason::EntryPointMissing,
       NdiUnavailableReason::InitializationFailed,
       NdiUnavailableReason::UnsupportedCpu,
+      NdiUnavailableReason::SignatureRejected,
   };
   std::array<std::string_view, reasons.size()> descriptions{};
   for (std::size_t index = 0; index < reasons.size(); ++index) {
@@ -339,6 +342,14 @@ struct LoggedFrame {
   std::array<unsigned, 4> last_row_pixel{};
 };
 
+#if defined(__APPLE__)
+// The stub is signed ad hoc under this identifier (CMakeLists.txt), so this
+// requirement admits it where the NewTek pin would refuse it.
+constexpr std::string_view kStubRequirement = "identifier \"" SYNC_NDI_STUB_IDENTIFIER "\"";
+#else
+constexpr std::string_view kStubRequirement{};
+#endif
+
 void set_stub_log(const std::string& path) {
 #if defined(_WIN32)
   SYNC_REQUIRE(_putenv_s("SYNC_NDI_STUB_LOG", path.c_str()) == 0);
@@ -357,7 +368,8 @@ void set_stub_log(const std::string& path) {
        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".log");
   set_stub_log(log.string());
   {
-    NdiFramePublisher publisher({.runtime_path = SYNC_NDI_STUB_RUNTIME_DIR});
+    NdiFramePublisher publisher(
+        {.runtime_path = SYNC_NDI_STUB_RUNTIME_DIR, .signature_requirement = kStubRequirement});
     SYNC_REQUIRE(publisher.available());
     SYNC_REQUIRE(publisher.open_sender("sender", "Cadence probe"));
     const StubFrame frame;
@@ -422,6 +434,93 @@ void require_cadence(std::uint64_t interval_us, double low_fps, double high_fps)
 }
 
 }  // namespace
+
+#if defined(__APPLE__)
+namespace {
+
+[[nodiscard]] auto unique_log(std::string_view label) -> std::filesystem::path {
+  return std::filesystem::temp_directory_path() /
+         ("sync-ndi-stub-" + std::string(label) + "-" +
+          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".log");
+}
+
+[[nodiscard]] auto read_file(const std::filesystem::path& path) -> std::string {
+  std::ifstream input(path);
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+}  // namespace
+
+SYNC_TEST(ndi_runtime_candidates_on_macos_are_the_flag_directory_then_the_vendor_install_path) {
+  using noisefactor::sync::ndi::runtime_candidates;
+  // The vendor's runtime directory variables add no candidate on macOS.
+  SYNC_REQUIRE(setenv("NDI_RUNTIME_DIR_V6", "/tmp/sync-ndi-v6", 1) == 0);
+  SYNC_REQUIRE(setenv("NDI_RUNTIME_DIR_V5", "/tmp/sync-ndi-v5", 1) == 0);
+  const std::vector<std::string> with_flag = runtime_candidates("/opt/ndi");
+  const std::vector<std::string> with_trailing_slash = runtime_candidates("/opt/ndi/");
+  const std::vector<std::string> without_flag = runtime_candidates("");
+  const std::vector<std::string> flag_is_vendor_dir = runtime_candidates("/usr/local/lib");
+  SYNC_REQUIRE(unsetenv("NDI_RUNTIME_DIR_V6") == 0);
+  SYNC_REQUIRE(unsetenv("NDI_RUNTIME_DIR_V5") == 0);
+  SYNC_REQUIRE((with_flag == std::vector<std::string>{"/opt/ndi/libndi.dylib", "/usr/local/lib/libndi.dylib"}));
+  SYNC_REQUIRE(with_trailing_slash == with_flag);
+  SYNC_REQUIRE((without_flag == std::vector<std::string>{"/usr/local/lib/libndi.dylib"}));
+  SYNC_REQUIRE((flag_is_vendor_dir == std::vector<std::string>{"/usr/local/lib/libndi.dylib"}));
+}
+
+// Declared before the control below, which loads the ad hoc copy: the tests
+// run in declaration order, so here neither copy has ever been loaded.
+SYNC_TEST(ndi_publisher_on_macos_refuses_unsigned_and_ad_hoc_runtimes_without_loading_them) {
+  using noisefactor::sync::ndi::check_runtime_signature;
+  using noisefactor::sync::ndi::RuntimeSignature;
+  const std::string requirement = noisefactor::sync::ndi::vendor_runtime_requirement();
+  SYNC_REQUIRE(requirement == "anchor apple generic and certificate leaf[subject.OU] = \"W8U66ET244\"");
+  for (const std::string_view directory : {std::string_view(SYNC_NDI_STUB_UNSIGNED_DIR),
+                                           std::string_view(SYNC_NDI_STUB_ADHOC_DIR)}) {
+    const std::string library = std::string(directory) + "/libndi.dylib";
+    SYNC_REQUIRE(std::filesystem::is_regular_file(library));
+    SYNC_REQUIRE(check_runtime_signature(library, requirement) == RuntimeSignature::Rejected);
+    const std::filesystem::path log = unique_log("refused");
+    set_stub_log(log.string());
+    {
+      NdiFramePublisher publisher({.runtime_path = directory});
+      if (std::filesystem::exists(noisefactor::sync::ndi::kVendorRuntimePath)) {
+        // A Mac with the vendor runtime installed loads it as the second candidate.
+        SYNC_REQUIRE(publisher.available());
+      } else {
+        SYNC_REQUIRE(!publisher.available());
+        SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::SignatureRejected);
+      }
+    }
+    set_stub_log("");
+    // The stub writes "loaded" when it is mapped: no log means no dlopen.
+    SYNC_REQUIRE(!std::filesystem::exists(log));
+  }
+}
+
+SYNC_TEST(ndi_publisher_on_macos_loads_a_runtime_that_satisfies_its_requirement) {
+  using noisefactor::sync::ndi::check_runtime_signature;
+  using noisefactor::sync::ndi::RuntimeSignature;
+  const std::string requirement(kStubRequirement);
+  const std::string adhoc = std::string(SYNC_NDI_STUB_ADHOC_DIR) + "/libndi.dylib";
+  SYNC_REQUIRE(check_runtime_signature(adhoc, requirement) == RuntimeSignature::Accepted);
+  SYNC_REQUIRE(check_runtime_signature(std::string(SYNC_NDI_STUB_UNSIGNED_DIR) + "/libndi.dylib", requirement) ==
+               RuntimeSignature::Rejected);
+  SYNC_REQUIRE(check_runtime_signature("/definitely/not/a/real/libndi.dylib", requirement) ==
+               RuntimeSignature::Missing);
+  const std::filesystem::path log = unique_log("admitted");
+  set_stub_log(log.string());
+  {
+    NdiFramePublisher publisher({.runtime_path = SYNC_NDI_STUB_ADHOC_DIR, .signature_requirement = kStubRequirement});
+    SYNC_REQUIRE(publisher.available());
+    SYNC_REQUIRE(publisher.unavailable_reason() == NdiUnavailableReason::None);
+  }
+  set_stub_log("");
+  // The control for the refusal test: the load marker is written.
+  SYNC_REQUIRE(read_file(log) == "loaded\n");
+  std::filesystem::remove(log);
+}
+#endif
 
 SYNC_TEST(ndi_publisher_declares_a_60_fps_cadence_through_a_stub_runtime) {
   require_cadence(16'667, 59.4, 60.6);
