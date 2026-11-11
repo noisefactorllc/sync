@@ -4,7 +4,7 @@
 The default endpoint is `http://127.0.0.1:53979`.
 You can supply an explicit IPv4 or IPv6 loopback endpoint for development.
 
-The SDK version is `@noisefactor/sync` 0.3.3.
+The SDK version is `@noisefactor/sync` 0.3.4.
 The local installation procedures do not publish the package to npm.
 Read the [repository developer guide](https://github.com/noisefactorllc/sync/blob/main/docs/developers.md) for tarball and vendored-module procedures.
 The SDK does not install the native companion.

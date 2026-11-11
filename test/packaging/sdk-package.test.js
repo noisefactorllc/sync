@@ -24,7 +24,7 @@ test('packed SDK installs in an external project and emits literal frame bytes',
   });
   const [artifact] = JSON.parse(stdout);
   assert.equal(artifact.name, '@noisefactor/sync');
-  assert.equal(artifact.version, '0.3.3');
+  assert.equal(artifact.version, '0.3.4');
   const manifest = JSON.parse(await readFile(path.join(root, 'browser/package.json'), 'utf8'));
   assert.deepEqual(artifact.files.map(file => file.path).sort(), [...manifest.files, 'package.json'].sort());
   await writeFile(path.join(directory, 'package.json'), '{"private":true,"type":"module"}');
@@ -42,7 +42,7 @@ test('packed SDK installs in an external project and emits literal frame bytes',
     assert.equal(sink.submit({width:1,height:1,rowStride:4,data:pixels}, 1), true);
     pixels.fill(0);
     assert.deepEqual([...packet.slice(64)], [255,0,32,255]);
-    assert.equal(SYNC_SDK_VERSION, '0.3.3');
+    assert.equal(SYNC_SDK_VERSION, '0.3.4');
     assert.equal(typeof SyncBridgeClient.prototype.createRgbaSender, 'function');
     assert.equal(typeof SyncBridgeClient.prototype.createNv12StreamSender, 'function');
     assert.equal(typeof SyncBridgeClient.prototype.createH264StreamSender, 'function');

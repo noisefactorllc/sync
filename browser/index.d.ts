@@ -1,4 +1,4 @@
-export const SYNC_SDK_VERSION: '0.3.3';
+export const SYNC_SDK_VERSION: '0.3.4';
 export const SYNC_DEFAULT_ENDPOINT: 'http://127.0.0.1:53979';
 export type ColorSpace = 'srgb' | 'display-p3';
 export type AlphaMode = 'opaque' | 'straight' | 'premultiplied';
