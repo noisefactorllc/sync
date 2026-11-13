@@ -27,7 +27,7 @@ AppName=Sync
 AppVersion={#SyncVersion}
 AppVerName=Sync {#SyncVersion}
 AppPublisher=Noise Factor LLC
-AppPublisherURL=https://noisedeck.app/docs/Sync.md
+AppPublisherURL=https://sync.noisedeck.app/
 AppSupportURL=https://github.com/noisefactorllc/sync
 DefaultDirName={autopf}\Noise Factor\Sync
 DefaultGroupName=Sync
@@ -71,7 +71,7 @@ Source: "{#SyncBundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 
 [Icons]
 Name: "{group}\Sync"; Filename: "{app}\Sync.exe"
-Name: "{group}\Sync documentation"; Filename: "https://noisedeck.app/docs/Sync.md"
+Name: "{group}\Sync documentation"; Filename: "https://sync.noisedeck.app/#docs"
 Name: "{userstartup}\Sync"; Filename: "{app}\Sync.exe"; Tasks: startupicon
 
 [Run]
