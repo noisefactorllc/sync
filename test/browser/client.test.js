@@ -1610,6 +1610,16 @@ test('connect classifies authentication and rejects malformed, oversized, early-
       },
       ErrorClass: SyncAuthenticationError,
     },
+    {
+      // A full credential worker never checked the token, so it is retryable.
+      setup(socket) {
+        socket.open();
+        socket.onSend = () => socket.message(JSON.stringify({
+          type: 'error', code: 'authority_saturated', message: 'Credential worker is busy',
+        }));
+      },
+      ErrorClass: SyncUnavailableError,
+    },
     { setup(socket) { socket.open(); socket.onSend = () => socket.message('{'); }, ErrorClass: SyncProtocolError },
     {
       setup(socket) {

@@ -456,6 +456,7 @@ Handle these groups in the application UI:
 | Permission required or denied | Ask the user to use the explicit Connect control or browser settings. |
 | Pairing denied, busy, or timed out | Keep output stopped and let the user start a new attempt. |
 | Authentication | Remove the stored token and require a new explicit pairing action. |
+| Unavailable | Keep the stored token and connect again later. |
 | Capability | Show that no selected native send provider is available. |
 | Sender lost | Stop the render submission and release renderer resources. |
 | Protocol or configuration | Report the exact stable error code and fix the integration. |

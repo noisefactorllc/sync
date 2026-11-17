@@ -1045,7 +1045,7 @@ class Server {
           close_connection(*connection);
         }
       } else if (expired == DeadlineKind::PairingRequest) {
-        apply_pairing_cooldown(connection->origin, now);
+        // No prompt was shown, so the global cooldown does not start.
         try {
           queue_pairing_error(*connection, "pairing_timeout",
                               "Pairing request timed out");
@@ -1157,9 +1157,11 @@ class Server {
       const std::uint64_t generation = next_authority_generation();
       if (authority_worker_ == nullptr ||
           !authority_worker_->submit_issue(generation, target->origin)) {
-        report.set_failure("store_failure");
+        // The store was never reached: the bounded credential worker is full.
+        report.set_failure("authority_saturated");
         clear_deadline(*target);
-        queue_pairing_error(*target, "store_failure", "Pairing store failed");
+        queue_pairing_error(*target, "authority_saturated",
+                            "Credential worker is busy");
         return;
       }
       target->authority_state = AuthorityState::PairingIssuePending;
@@ -1867,8 +1869,10 @@ class Server {
                                      parsed.message->token);
           parsed.message->clear_sensitive();
           if (!submitted) {
-            queue_error_and_close(connection, "authentication_failed",
-                                  "Invalid token or protocol version");
+            // The token was never checked, so this is not an authentication
+            // failure: the client keeps its token and connects again later.
+            queue_error_and_close(connection, "authority_saturated",
+                                  "Credential worker is busy");
             return;
           }
           connection.authority_state = AuthorityState::AuthenticationPending;
@@ -2122,8 +2126,9 @@ class Server {
                           "Pairing is cooling down");
       return;
     }
+    // Only a prompt that the daemon showed starts the global cooldown. A
+    // request refused here shows none, so it leaves the cooldown unchanged.
     if (active_pairing_generation_ != 0) {
-      apply_pairing_cooldown(connection.origin, now);
       queue_pairing_error(connection, "prompt_saturated", "Another pairing prompt is active");
       return;
     }
@@ -2132,7 +2137,6 @@ class Server {
     pairing::PromptRequest request;
     if (!request.assign(next_pairing_generation_, connection.origin, parsed.request.name()) ||
         options_.pairing_prompt == nullptr || !options_.pairing_prompt->begin(request)) {
-      apply_pairing_cooldown(connection.origin, now);
       queue_pairing_error(connection, "prompt_saturated", "Pairing prompt is unavailable");
       return;
     }

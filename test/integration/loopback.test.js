@@ -2018,15 +2018,20 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     assert.equal((await pairWithDaemon(daemon.ready, originC, "Saturated")).code,
                  "prompt_saturated");
     assert.equal((await pairWithDaemon(daemon.ready, originC, "Saturated retry")).code,
-                 "pairing_cooldown");
+                 "prompt_saturated",
+                 "a refused request shows no prompt, so it starts no cooldown");
     assert.equal((await finishPairingClient(pending.client, "prompt timeout")).code,
                  "pairing_timeout");
+    assert.equal((await pairWithDaemon(daemon.ready, originC, "After the shown prompt")).code,
+                 "pairing_cooldown",
+                 "the shown prompt that timed out starts the cooldown");
     await stop(daemon);
 
     daemon = await start("saturated.store", "saturate");
     assert.equal((await pairWithDaemon(daemon.ready, originA)).code, "prompt_saturated");
     assert.equal((await pairWithDaemon(daemon.ready, originA, "Immediate retry")).code,
-                 "pairing_cooldown");
+                 "prompt_saturated",
+                 "a prompt that cannot start shows nothing, so it starts no cooldown");
     await stop(daemon);
   } finally {
     for (const releasePath of authorityReleasePaths) {
@@ -2036,6 +2041,143 @@ test("dynamic pairing binds durable tokens and sender tickets to normalized orig
     for (const daemon of activeDaemons) {
       await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
     }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a full credential worker answers busy and never fails a valid token", async () => {
+  const temporaryRoot = await realpath(os.tmpdir());
+  const directory = await mkdtemp(path.join(temporaryRoot, "sync-authority-busy-"));
+  const storePath = path.join(directory, "state", "busy.store");
+  const releasePath = `${storePath}.release`;
+  const clients = new Set();
+  let daemon;
+  const stop = async () => {
+    const running = daemon;
+    daemon = undefined;
+    if (running) await stopDaemon(running.child, running.stderr, running.stdout, running.ready);
+  };
+  const open = async (route, origin) => {
+    const upgraded = await upgrade({ port: daemon.ready.port, route, origin });
+    assert.equal(upgraded.status, 101);
+    clients.add(upgraded.client);
+    return upgraded.client;
+  };
+  const hello = (client, token) => client.sendJson({ type: "hello", token, protocolVersions: [1] });
+  const busyAndClosed = async (client, description) => {
+    assert.deepEqual(await client.nextJson(description), {
+      type: "error", code: "authority_saturated", message: "Credential worker is busy",
+    });
+    const close = await client.nextFrame(`${description} close`);
+    assert.equal(close.opcode, 0x8);
+    assert.equal(close.payload.readUInt16BE(0), 1008);
+  };
+
+  try {
+    const origin = "https://paired.example";
+    const flood = "https://flood.example";
+    const invalidToken = "f".repeat(64);
+    daemon = await spawnPairingDaemon(storePath, "approve");
+    const paired = await pairWithDaemon(daemon.ready, origin, "Busy worker seed");
+    assert.match(paired.token, /^[a-f0-9]{64}$/);
+    await stop();
+
+    daemon = await spawnPairingDaemon(storePath, "hold-first-auth");
+    // Each control socket starts its one-second hello deadline when it opens,
+    // so every socket opens before the first hello.
+    const [held, ...queued] = await Promise.all(
+      Array.from({ length: 65 }, () => open("/control", flood)),
+    );
+    hello(held, invalidToken);
+    const heldDeadline = Date.now() + TIMEOUT_MS;
+    while ((await readFile(`${releasePath}.auth-count`, "utf8").catch(() => "")) !== "1") {
+      assert.ok(Date.now() < heldDeadline, "the worker holds the first check");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // The held check and 63 queued checks fill the worker's 64 places, so one
+    // of these 64 hellos finds no place and is answered at once.
+    for (const client of queued) hello(client, invalidToken);
+    const overflowDeadline = Date.now() + TIMEOUT_MS;
+    let answered = [];
+    while (answered.length === 0) {
+      assert.ok(Date.now() < overflowDeadline, "one hello finds the worker full");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      answered = queued.filter((client) => client.frames.some((frame) => frame.opcode === 0x1));
+    }
+    assert.equal(answered.length, 1, "exactly one hello finds the worker full");
+    await busyAndClosed(answered[0], "overflow hello");
+
+    const valid = await open("/control", origin);
+    hello(valid, paired.token);
+    await busyAndClosed(valid, "valid hello while the worker is full");
+
+    const pairing = await open("/pair", "https://newapp.example");
+    pairing.sendJson({ type: "pair", protocolVersions: [1], name: "Busy approval" });
+    assert.deepEqual(await pairing.nextJson("approval while the worker is full", PAIRING_TIMEOUT_MS), {
+      type: "error", code: "authority_saturated", message: "Credential worker is busy",
+    });
+    const pairingClose = await pairing.nextFrame("busy approval close");
+    assert.equal(pairingClose.opcode, 0x8);
+    assert.equal(pairingClose.payload.readUInt16BE(0), 1008);
+
+    await writeFile(releasePath, "release", { mode: 0o600 });
+    for (const client of clients) client.destroy();
+    clients.clear();
+    // Once the worker drains, an invalid token still fails authentication and
+    // the token that met a full worker still authenticates.
+    const answer = async (token, description) => {
+      const deadline = Date.now() + TIMEOUT_MS;
+      for (;;) {
+        const control = await open("/control", origin);
+        hello(control, token);
+        const reply = await control.nextJson(description);
+        control.destroy();
+        clients.delete(control);
+        if (reply.code !== "authority_saturated" || Date.now() >= deadline) return reply;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    assert.equal((await answer(invalidToken, "invalid hello after the worker drains")).code,
+                 "authentication_failed");
+    assert.equal((await answer(paired.token, "valid hello after the worker drains")).type,
+                 "welcome");
+    await stop();
+    assert.equal(await readFile(`${storePath}.issuance`, "utf8"), "committed\nauthority_saturated\n",
+                 "the prompt hears that the busy approval issued no token");
+  } finally {
+    await writeFile(releasePath, "release", { mode: 0o600 }).catch(() => {});
+    for (const client of clients) client.destroy();
+    await stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pairing socket that never sends a request does not start the global cooldown", async () => {
+  const temporaryRoot = await realpath(os.tmpdir());
+  const directory = await mkdtemp(path.join(temporaryRoot, "sync-idle-pairing-"));
+  let daemon;
+  let idle;
+  try {
+    daemon = await spawnPairingDaemon(path.join(directory, "state", "idle.store"), "approve");
+    const upgraded = await upgrade({ port: daemon.ready.port, route: "/pair", origin: "https://idle.example" });
+    assert.equal(upgraded.status, 101);
+    idle = upgraded.client;
+    assert.deepEqual(await idle.nextJson("idle pairing socket", PAIRING_TIMEOUT_MS), {
+      type: "error", code: "pairing_timeout", message: "Pairing request timed out",
+    });
+    const close = await idle.nextFrame("idle pairing close", PAIRING_TIMEOUT_MS);
+    assert.equal(close.opcode, 0x8);
+    idle.send(0x8, close.payload);
+    await idle.waitClosed();
+
+    const victim = await pairWithDaemon(daemon.ready, "https://victim.example", "After an idle socket");
+    assert.equal(victim.type, "paired", "an idle socket showed no prompt and started no cooldown");
+    assert.equal((await pairWithDaemon(daemon.ready, "https://other.example", "After a shown prompt")).code,
+                 "pairing_cooldown",
+                 "the prompt that was shown still starts the cooldown");
+  } finally {
+    idle?.destroy();
+    if (daemon) await stopDaemon(daemon.child, daemon.stderr, daemon.stdout, daemon.ready);
     await rm(directory, { recursive: true, force: true });
   }
 });

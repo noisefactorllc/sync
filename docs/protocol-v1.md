@@ -175,6 +175,8 @@ The complete control message can contain at most 16 KiB.
 
 The daemon checks the token against the normalized WebSocket origin.
 An invalid token or incompatible version returns `authentication_failed`.
+When the bounded credential worker cannot accept the check, the daemon returns `authority_saturated` instead.
+It has not checked the token, so the client keeps the token and connects again later.
 The daemon then closes the socket with code 1008.
 
 A successful hello returns:
@@ -287,6 +289,7 @@ All control errors use this shape:
 The daemon can return these control error codes:
 
 - `authentication_failed`
+- `authority_saturated`: the bounded credential worker cannot accept the hello. The token was not checked.
 - `bad_request`
 - `out_of_order`
 - `publisher_unavailable`

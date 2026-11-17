@@ -317,7 +317,10 @@ function daemonError(value) {
   if (value.code === 'bad_request' || value.code === 'out_of_order') {
     return new SyncProtocolError(value.message, options);
   }
-  if (value.code === 'internal_error' || value.code === 'audio_unavailable') {
+  // A full credential worker never checked the token, so the application
+  // keeps it and connects again later.
+  if (value.code === 'internal_error' || value.code === 'audio_unavailable' ||
+      value.code === 'authority_saturated') {
     return new SyncUnavailableError(value.message, options);
   }
   return new SyncLifecycleError(value.message, options);
